@@ -1,0 +1,18 @@
+# Everything 服务端配置示例。放到 <data_dir>/config.yaml 或用 --config 指定。
+# 所有项都可被 EVE_ 前缀环境变量覆盖：EVE_ADDR、EVE_DATA_DIR、EVE_REGISTRATION。
+
+# HTTP 监听地址
+addr: ":8787"
+
+# 数据目录（eve.db、jwt.key 存放处；容器内建议挂载持久卷）
+data_dir: "./data"
+
+# 注册策略：
+#   first  —— 默认，仅允许注册第一个用户（单用户自托管）
+#   open   —— 允许新注册（家庭可信部署）
+#   closed —— 完全关闭注册
+registration: "first"
+
+# 访问令牌 15 分钟；刷新令牌 90 天
+access_token_ttl_minutes: 15
+refresh_token_ttl_days: 90

@@ -1,0 +1,33 @@
+services:
+  eve:
+    image: ghcr.io/everything-personal/eve:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: everything-eve
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      EVE_ADDR: ":8787"
+      EVE_DATA_DIR: "/data"
+      # first（默认，仅可注册首个用户）| open（家庭可信）| closed
+      EVE_REGISTRATION: "first"
+    volumes:
+      - eve-data:/data
+    # 建议在反向代理（Caddy/Traefik/Nginx）后启用 HTTPS
+
+  # 可选：本地 AI，隐私数据不出本机。启用后在系统设置中把 Provider 指向
+  # http://ollama:11434（v1 兼容 OpenAI 接口的模型）。
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ai"]
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "11434:11434"
+
+volumes:
+  eve-data:
+  ollama-data:

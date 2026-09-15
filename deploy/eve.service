@@ -1,0 +1,22 @@
+[Unit]
+Description=Everything (eve) personal life server
+Documentation=https://github.com/everything-personal/eve
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eve
+Group=eve
+WorkingDirectory=/var/lib/eve
+ExecStart=/usr/local/bin/eve --config /var/lib/eve/config.yaml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/eve
+
+[Install]
+WantedBy=multi-user.target

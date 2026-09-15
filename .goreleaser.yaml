@@ -1,0 +1,80 @@
+# GoReleaser：本地快照验证用 `goreleaser release --snapshot --clean`
+# 发布前会先构建网页端（输出到 server/web/dist 供 go:embed）
+version: 2
+
+before:
+  hooks:
+    - cmd: npm ci --no-audit --no-fund
+      dir: web
+    - cmd: npm run build
+      dir: web
+
+builds:
+  - id: eve
+    dir: server
+    main: ./cmd/eve
+    binary: eve
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X github.com/everything-personal/eve/internal/api.Version={{.Version}}
+
+archives:
+  - id: default
+    name_template: >-
+      eve_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    builds:
+      - eve
+    files:
+      - deploy/eve.service
+    format_overrides:
+      - goos: windows
+        formats: zip
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"
+
+changelog:
+  sort: asc
+  use: github
+
+dockers:
+  - id: multiarch
+    goos: linux
+    goarch: amd64
+    use: buildx
+    dockerfile: deploy/Dockerfile
+    image_templates:
+      - "ghcr.io/everything-personal/eve:{{ .Version }}-amd64"
+      - "ghcr.io/everything-personal/eve:latest-amd64"
+  - id: multiarch-arm64
+    goos: linux
+    goarch: arm64
+    use: buildx
+    dockerfile: deploy/Dockerfile
+    image_templates:
+      - "ghcr.io/everything-personal/eve:{{ .Version }}-arm64"
+      - "ghcr.io/everything-personal/eve:latest-arm64"
+
+docker_manifests:
+  - name_template: "ghcr.io/everything-personal/eve:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/everything-personal/eve:{{ .Version }}-amd64"
+      - "ghcr.io/everything-personal/eve:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/everything-personal/eve:latest"
+    image_templates:
+      - "ghcr.io/everything-personal/eve:latest-amd64"
+      - "ghcr.io/everything-personal/eve:latest-arm64"

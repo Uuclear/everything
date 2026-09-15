@@ -1,0 +1,26 @@
+# Go
+/server/data/
+*.db
+*.db-wal
+*.db-shm
+/server/eve
+/server/dist/
+# Web 构建产物（已通过 embed 占位目录纳入仓库结构）
+/server/web/dist/*
+!/server/web/dist/.gitkeep
+node_modules/
+dist/
+# Android
+*.keystore
+*.jks
+android/.gradle/
+android/local.properties
+android/app/build/
+android/build/
+# 本地配置与密钥
+*.local
+.env
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
