@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/everything-personal/eve/internal/api"
+	"github.com/everything-personal/eve/internal/attachments"
 	"github.com/everything-personal/eve/internal/auth"
 	"github.com/everything-personal/eve/internal/config"
 	"github.com/everything-personal/eve/internal/db"
@@ -58,10 +59,15 @@ func main() {
 		os.Exit(1)
 	}
 	records := vault.New(database)
+	files, err := attachments.New(database, cfg.DataDir+"/attachments")
+	if err != nil {
+		logger.Error("初始化附件存储失败", "err", err)
+		os.Exit(1)
+	}
 	hub := sync.New()
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           api.New(cfg, database, authSvc, records, hub).Handler(),
+		Handler:           api.New(cfg, database, authSvc, records, files, hub).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

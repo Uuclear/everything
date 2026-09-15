@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/everything-personal/eve/internal/attachments"
 	"github.com/everything-personal/eve/internal/auth"
 	"github.com/everything-personal/eve/internal/config"
 	"github.com/everything-personal/eve/internal/sync"
@@ -23,16 +24,17 @@ var Version = "dev"
 
 // Server 持有全部 HTTP 依赖。
 type Server struct {
-	cfg   config.Config
-	db    *sql.DB
-	auth  *auth.Service
-	vault *vault.Store
-	hub   *sync.Hub
+	cfg         config.Config
+	db          *sql.DB
+	auth        *auth.Service
+	vault       *vault.Store
+	attachments *attachments.Store
+	hub         *sync.Hub
 }
 
 // New 创建 API 服务器。
-func New(cfg config.Config, database *sql.DB, authSvc *auth.Service, records *vault.Store, hub *sync.Hub) *Server {
-	return &Server{cfg: cfg, db: database, auth: authSvc, vault: records, hub: hub}
+func New(cfg config.Config, database *sql.DB, authSvc *auth.Service, records *vault.Store, files *attachments.Store, hub *sync.Hub) *Server {
+	return &Server{cfg: cfg, db: database, auth: authSvc, vault: records, attachments: files, hub: hub}
 }
 
 // Handler 返回完整路由。
@@ -53,6 +55,8 @@ func (s *Server) Handler() http.Handler {
 			r.Use(s.requireAccessToken)
 			r.Post("/records/batch", s.upsertRecords)
 			r.Get("/records", s.listRecords)
+			r.Put("/attachments/{id}", s.uploadAttachment)
+			r.Get("/attachments/{id}", s.downloadAttachment)
 			r.Get("/events", s.events)
 		})
 	})

@@ -14,6 +14,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - name: Build embedded web assets
+        working-directory: web
+        run: npm ci --no-audit --no-fund && npm run build
       - name: Test
         working-directory: server
         run: CGO_ENABLED=0 go test ./...
@@ -56,6 +64,8 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0
       - name: Build debug APK
         working-directory: android
         run: ./gradlew :app:assembleDebug --stacktrace --no-daemon
