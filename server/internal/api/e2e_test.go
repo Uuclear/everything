@@ -2,7 +2,9 @@ package api_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/everything-personal/eve/internal/api"
+	"github.com/everything-personal/eve/internal/attachments"
 	"github.com/everything-personal/eve/internal/auth"
 	"github.com/everything-personal/eve/internal/config"
 	"github.com/everything-personal/eve/internal/crypto"
@@ -46,7 +49,11 @@ func newHarness(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := api.New(cfg, database, authSvc, vault.New(database), sync.New()).Handler()
+	files, err := attachments.New(database, cfg.DataDir+"/attachments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := api.New(cfg, database, authSvc, vault.New(database), files, sync.New()).Handler()
 	return httptest.NewServer(handler)
 }
 
@@ -113,7 +120,46 @@ func TestEndToEndRegisterSyncDecrypt(t *testing.T) {
 	}
 	c.token = out["access_token"].(string)
 
-	// 2) 重复注册（first 策略下应被拒绝）。
+	// 2) 上传客户端已加密的附件，服务端只验证摘要并保存密文。
+	attachment := []byte("encrypted attachment bytes")
+	sum := sha256.Sum256(attachment)
+	req, _ := http.NewRequest(http.MethodPut, c.srv.URL+"/api/v1/attachments/photo-1", bytes.NewReader(attachment))
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Content-SHA256", hex.EncodeToString(sum[:]))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("附件上传失败: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	req, _ = http.NewRequest(http.MethodPut, c.srv.URL+"/api/v1/attachments/photo-2", bytes.NewReader(attachment))
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Content-SHA256", hex.EncodeToString(sum[:]))
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("相同密文摘要应支持逻辑附件: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	req, _ = http.NewRequest(http.MethodGet, c.srv.URL+"/api/v1/attachments/photo-1", nil)
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloaded, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(downloaded, attachment) {
+		t.Fatalf("附件下载不一致: %d %q", resp.StatusCode, downloaded)
+	}
+
+	// 3) 重复注册（first 策略下应被拒绝）。
 	status, _ = c.do(http.MethodPost, "/api/v1/auth/register", map[string]any{
 		"username": "bob", "auth_salt": c.authSalt, "kek_salt": c.kekSalt,
 		"auth_verifier": verifier, "wrapped_master_key": wrapped, "device_name": c.device,
@@ -122,7 +168,7 @@ func TestEndToEndRegisterSyncDecrypt(t *testing.T) {
 		t.Fatalf("首个用户后注册应关闭，得到 %d", status)
 	}
 
-	// 3) 用 MK 加密一条证件记录并同步。
+	// 4) 用 MK 加密一条证件记录并同步。
 	plaintext := []byte(`{"module":"identity","title":"我的护照","number":"E12345678","expires_at":1946985600000}`)
 	const id, module, version = "rec-passport-1", "identity", int64(1)
 	ciphertext, err := crypto.Seal(c.mk, plaintext, crypto.RecordAAD(id, module, version))
@@ -140,7 +186,7 @@ func TestEndToEndRegisterSyncDecrypt(t *testing.T) {
 		t.Fatalf("写入失败: %d %v", status, out)
 	}
 
-	// 4) 旧版本重复推送必须被跳过。
+	// 5) 旧版本重复推送必须被跳过。
 	status, out = c.do(http.MethodPost, "/api/v1/records/batch", map[string]any{
 		"records": []map[string]any{{
 			"id": id, "module": module, "type": "passport",
@@ -152,7 +198,7 @@ func TestEndToEndRegisterSyncDecrypt(t *testing.T) {
 		t.Fatalf("旧版本应跳过: %d %v", status, out)
 	}
 
-	// 5) 新设备登录：拿盐 → 派生 KEK 解开服务器返回的包裹 MK → 增量拉取并解密。
+	// 6) 新设备登录：拿盐 → 派生 KEK 解开服务器返回的包裹 MK → 增量拉取并解密。
 	c2 := &testClient{t: t, srv: srv, username: c.username, password: c.password}
 	status, params := c2.do(http.MethodGet, "/api/v1/auth/parameters?username=alice", nil, false)
 	if status != http.StatusOK {
@@ -200,7 +246,7 @@ func TestEndToEndRegisterSyncDecrypt(t *testing.T) {
 		t.Fatalf("解密明文不一致: %q", decrypted)
 	}
 
-	// 6) 无令牌访问受保护接口必须 401。
+	// 7) 无令牌访问受保护接口必须 401。
 	status, _ = c.do(http.MethodGet, "/api/v1/records?since=0", nil, false)
 	if status != http.StatusUnauthorized {
 		t.Fatalf("未带令牌应 401，得到 %d", status)
