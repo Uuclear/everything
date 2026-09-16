@@ -70,6 +70,8 @@
 - AI Agent 调度链路（阶段 6 主体，消费 v2 暴露的工具）。
 - 跨设备预算同步（共享调度表加密上行）。
 - 投资账户自动同步 / 自动再平衡（券商 API 直连）。
+- loan 分期扣款场景（loan 总到期 `loan_due` 已覆盖；分期 `repayment_installment`
+  延后到 v3）。
 
 ## Background & Context
 
@@ -255,7 +257,9 @@ v2 spec 的硬约束：
 - **附件元数据**：在引用方记录（policy / contract / 任何带 `attachments`
   字段的记录）下挂 `[{id, mime, size, sha256}]` 列表。
 - **零知识**：附件二进制全程加密上行；服务端仅承载密文 + sha256。
-- **大小限制**：单文件 ≤ 50 MB（端侧校验，超限拒收）。
+- **大小限制**：单文件 ≤ 50 MB（端侧校验，超限**直接拒收**，不压缩 /
+  不分块；Android 端 Toast / Web 端 toast 提示"超出 50MB 限制"，无任何
+  上行 / 服务端协议动作）。
 
 #### FR-V2-B.2 UI 集成
 
@@ -414,6 +418,10 @@ Web 端仅提供文本输入 + iCal 导入（v1 既有）；OCR / 语音仅 Andr
 - **触发时机**：tx 保存后立即计算当月累计 → 若 ≥ `warning_threshold_pct` →
   应用内 toast / banner 显示"本月 [分类] 已用 85%，接近预算上限"。
 - **月报页**：v1 已有阈值提醒文案，v2 增强为"硬约束告警 + 趋势线"。
+- **通道归类（重要）**：预算告警**不新增** Reminders `kind`，**不接入**
+  v1 单闹钟链式调度（避免破坏"单链路"硬约束 #6）。仅通过应用内
+  EventBus / Compose Flow / Vue reactive 事件触发 toast/banner，与
+  Reminders 通道完全解耦。
 
 ---
 
@@ -433,7 +441,8 @@ Web 端仅提供文本输入 + iCal 导入（v1 既有）；OCR / 语音仅 Andr
 #### FR-V2-G.2 Service Worker 注册
 
 - `web/public/sw.js` 复用 v1 events 既有注册逻辑（v1 已为 events 启用
-  Web Notification API，v2 复用同款 Service Worker）。
+  Web Notification API，v2 在原 SW **新增 `case 'finance': ...` 分支**，
+  保持 SW 单实例注册，避免新建第二个 SW）。
 - **新增通知通道**：finance 通道（订阅扣费 / 保单到期 / 借款到期 3 类）。
 
 ---

@@ -13,11 +13,12 @@
 | B1 | P0 | T1 | 4 子类型纯函数 + Web 端 4 编辑器 + 列表 | v1 已落地 |
 | B2 | P0 | T2 | Android 端 4 编辑器 + 列表 + 导航 | T1 |
 | B3 | P0 | T3 | 附件完整闭环（块存储 + UI 集成） | T1 |
-| B4 | P0 | T4 | 后 3 类提醒链路（订阅/保单/借款）+ aggregator loan 启用 | T1 + T2 |
+| B4 | P0 | T4 | 后 3 类提醒链路（订阅/保单/借款）+ aggregator loan 启用 | T1 + T2（含 TR-2.6） |
 | B5 | P1 | T5 | 多币种汇率 + aggregator 多币种折算 | v1 aggregator |
 | B6 | P1 | T6 + T7 | 预算硬约束 + Web 端提醒 | v1 既有提醒 |
 | B7 | P2 | T8 + T9 | 投资账户 + 手动行情 | v1 aggregator |
-| B8 | P2 | T10 + T11 | AI 联动记账（OCR + 语音） + 文档 + 门禁 | T1 |
+| B8 | P2 | T9 | AI 联动记账（OCR + 语音） | v1 tx 编辑器 |
+| 收尾 | P0 | T10 | 文档同步 + 端到端冒烟 + 门禁复跑 | T1~T9 |
 
 ---
 
@@ -122,9 +123,11 @@
   - 修改 `android/app/src/main/java/com/everything/eve/data/EveDatabase.kt`：
     `version = 7` + `MIGRATION_6_7`
   - 修改 `android/app/src/main/java/com/everything/eve/data/finance/FinanceRepository.kt`：
-    `sealRecord/openRecord` 联动附件
+    `sealRecord/openRecord` 联动附件（附件块**复用** v1 records 通道，
+    `type="attachment"` 子标识 + AAD `module="finance" + type +
+    attachment_id`，**不新建独立协议通道**）
   - 修改 `android/app/src/main/java/com/everything/eve/collector/CollectorWorker.kt`：
-    附件块同步（pullAndDecrypt + pushChanges）
+    附件块同步（pullAndDecrypt + pushChanges，复用 records 通道加密上行）
   - 新建 `web/src/finance/attachment.ts`：`uploadFile(file: File)` +
     `downloadFile(id: string)` + `listAttachments(recordId: string)` +
     `deleteAttachment(id: string)`
@@ -360,21 +363,23 @@
 - **Priority**: medium
 - **Depends On**: v1 tx 编辑器
 - **Description**:
-  - 新建 `android/app/src/main/java/com/everything/eve/finance/OcrRecognizer.kt`：
-    on-device ML Kit Text Recognition（`com.google.mlkit:text-recognition`
-    AAR，自包含零 GMS）+ 启发式解析（金额 / 日期 / 商家名）
+  - 新建 `android/app/src/main/java/com/everything/eve/finance/OcrParser.kt`：
+    纯函数层（on-device ML Kit Text Recognition 调用方 → 输入文本 →
+    输出 `ReceiptHint`）。UI 层另建 `OcrScannerEngine.kt` 调系统 CameraX
+    + ML Kit 引擎，避免与 `android.speech.SpeechRecognizer` 同名 import 混淆。
     - 纯函数 `parseReceiptText(text: String): ReceiptHint?`
     - `data class ReceiptHint(val amountMinor: Long?, val ts: Long?, 
       val merchant: String?)`
-  - 新建 `android/app/src/main/java/com/everything/eve/finance/SpeechRecognizer.kt`：
-    Android SpeechRecognizer on-device 模式 + 启发式意图解析
+  - 新建 `android/app/src/main/java/com/everything/eve/finance/SpeechParser.kt`：
+    纯函数层（on-device 语音识别结果文本 → `SpeechHint`）。UI 层另建
+    `SpeechRecorderEngine.kt` 调系统 `android.speech.SpeechRecognizer` API。
     - 纯函数 `parseSpeechText(text: String): SpeechHint?`
     - `data class SpeechHint(val amountMinor: Long?, val category: String?, 
       val ts: Long = System.currentTimeMillis())`
   - 新建 `android/app/src/main/java/com/everything/eve/ui/finance/OcrScannerSheet.kt`：
-    Compose CameraX 拍照 + OCR 预览
+    Compose CameraX 拍照 + OCR 预览（调用 `OcrScannerEngine`）
   - 新建 `android/app/src/main/java/com/everything/eve/ui/finance/SpeechRecorderSheet.kt`：
-    Compose 录音 + 识别预览
+    Compose 录音 + 识别预览（调用 `SpeechRecorderEngine`）
   - 修改 `android/app/src/main/java/com/everything/eve/ui/finance/TxEditorScreen.kt`：
     增加"扫描小票" / "语音记账"按钮 → 预填 Editor 字段
   - 修改 `android/app/src/main/java/com/everything/eve/finance/FinanceViewModel.kt`：
@@ -395,8 +400,8 @@
   - **真机冒烟（v2 推荐执行，FU-7 同款）**：docs/smoke/finance-v2-ai-manual.md
     ≥6 场景
 - **TR 列表**:
-  - TR-9.1 OcrRecognizer + parseReceiptText 纯函数
-  - TR-9.2 SpeechRecognizer + parseSpeechText 纯函数
+  - TR-9.1 OcrParser + parseReceiptText 纯函数（+ OcrScannerEngine UI 层）
+  - TR-9.2 SpeechParser + parseSpeechText 纯函数（+ SpeechRecorderEngine UI 层）
   - TR-9.3 Android OCR Scanner Sheet + CameraX 集成
   - TR-9.4 Android Speech Recorder Sheet + SpeechRecognizer 集成
   - TR-9.5 TxEditor 预填按钮 + 权限申请 + 文案
