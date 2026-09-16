@@ -25,4 +25,7 @@ object FinanceModule {
 
     /** 子类型：流水（transaction）。 */
     const val TYPE_TX: String = "tx"
+
+    /** 子类型：附件（policy / contract 等 v2 父记录下挂的本地密文 envelope）。 */
+    const val TYPE_ATTACHMENT: String = "attachment"
 }

@@ -36,6 +36,14 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
 
+    // JVM 单测：Android SDK stub API 默认抛 RuntimeException("Method ... not mocked")，
+    // 这里开启 returnDefaultValues=true 让 JSONObject.put / Context.getString / Application
+    // 等返回零值（null / 0 / false / empty List）以确保单元测试可运行（org.json.put 抛错
+    // 是财务附件仓库测试最常见的根因——records 通道元数据 JSON 序列化调用 JSONObject）。
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -76,6 +84,10 @@ dependencies {
 
     // JVM 单测：Crockford 向量等不依赖 native 的纯算法
     testImplementation(libs.junit)
+    // 真实 org.json 实现：覆盖 android.jar stub 让 JSONObject.put / .toString 工作
+    testImplementation(libs.json)
+    // 协程测试：Dispatchers.setMain（B3 附件 VM 的 viewModelScope.launch 单测）
+    testImplementation(libs.kotlinx.coroutines.test)
     // JVM 单测锚点向量：lazysodium-java 自带桌面 libsodium（win64/linux64/mac），
     // 与 lazysodium-android 同版本同原语，仅测试类路径可见（阶段 4a Task 5）
     testImplementation(libs.lazysodium.java)

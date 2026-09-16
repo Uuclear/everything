@@ -53,6 +53,7 @@ import {
 } from '../crypto/envelope'
 import { useAuthStore } from './auth'
 import type {
+  AttachmentRef,
   CachedFinanceRecord,
   FinanceAccount,
   FinanceCard,
@@ -71,6 +72,12 @@ import {
   validateV2Payload,
   type ValidationResult,
 } from '../finance/types'
+import {
+  defaultAttachmentChannel,
+  uploadFile,
+  type AttachmentChannel,
+  type AttachmentRecord,
+} from '../finance/attachment'
 
 // -----------------------------------------------------------------------------
 // 持久化契约 —— StorageChannel（注入点：默认 localStorage；测试可 mock）
@@ -236,6 +243,34 @@ export const useFinanceStore = defineStore('finance', () => {
       return (_channel ??= defaultCryptoChannel()).list(...args)
     },
   }
+  // ========== 附件子状态（TR-3.3 + TR-3.4） ==========
+  /** 附件元数据缓存（id → AttachmentRef）。 */
+  const attachments = reactive(new Map<string, AttachmentRef>())
+  /** 二级索引：recordId → 附件 id 集合（用于 UI 列表按 recordId 拉取）。 */
+  const attachmentsByRecordId = reactive(new Map<string, Set<string>>())
+  /** 附件密文缓存（id → AttachmentRecord；含 ciphertext + plaintextJson 元数据）。 */
+  const attachmentCipherCache = reactive(new Map<string, AttachmentRecord>())
+  /**
+   * 附件加密通道（默认直连 envelope + 内存 remote；测试可注入）。
+   *
+   * 注意：channel.upsert 写入 attachmentCipherCache（pinia 内存）；
+   *       channel.listByRecord 从 cache 过滤 recordId；二者共用同一份缓存。
+   */
+  const attachmentRemote = new Map<string, AttachmentRecord>()
+  let _attachmentChannel: AttachmentChannel | null = null
+  /**
+   * 懒构造附件 channel（首次调用才走 defaultAttachmentChannel，避免
+   * pinia 未激活场景触发 useAuthStore 引用错误；测试注入后即可绕过）。
+   */
+  function getAttachmentChannel(): AttachmentChannel {
+    if (_attachmentChannel) return _attachmentChannel
+    const auth = useAuthStore()
+    if (!auth.sodium || !auth.masterKey) {
+      throw new Error('附件通道未初始化：请先解锁（auth.masterKey 不存在）')
+    }
+    _attachmentChannel = defaultAttachmentChannel(auth.sodium, auth.masterKey, attachmentRemote)
+    return _attachmentChannel
+  }
   /** schema 版本（v1=1；v2 B1 启用时升 2；schemaVersion>2 由迁移接管）。 */
   const schemaVersion = ref<1 | 2>(1)
   /** startup hydration 是否完成（首屏 UI 据此决定是否展示骨架）。 */
@@ -335,6 +370,45 @@ export const useFinanceStore = defineStore('finance', () => {
       .map((r) => r.data as unknown as FinanceContract),
   )
 
+  // ========== 附件 getters ==========
+
+  /** 全部附件元数据（按 sha256 前 8 位分组无关；仅按 id 顺序输出）。 */
+  const listAttachments = computed<AttachmentRef[]>(() =>
+    Array.from(attachments.values()).filter((r) => {
+      const cipher = attachmentCipherCache.get(r.id)
+      return cipher == null || !cipher.deleted
+    }),
+  )
+
+  /**
+   * 按 recordId 拉附件列表（供 UI 编辑器调用）。
+   *
+   * 返回 reactive 数组——响应式订阅自动触发 UI 更新。
+   *
+   * 行为契约：
+   *   - cipher 缺失时仍可返回（addAttachment 直接元数据路径；密文通过
+   *     channel.upsert 单独上传，cipher 缓存可能稍后才到位）；
+   *   - cipher 存在但 deleted=true 时过滤（墓碑不可见）。
+   */
+  function getAttachmentsForRecord(recordId: string): AttachmentRef[] {
+    const ids = attachmentsByRecordId.get(recordId)
+    if (!ids) return []
+    const out: AttachmentRef[] = []
+    for (const id of ids) {
+      const ref = attachments.get(id)
+      if (!ref) continue
+      const cipher = attachmentCipherCache.get(id)
+      if (cipher && cipher.deleted) continue
+      out.push(ref)
+    }
+    return out
+  }
+
+  /** 取单个附件元数据（无 → undefined）。 */
+  function getAttachmentMeta(id: string): AttachmentRef | undefined {
+    return attachments.get(id)
+  }
+
   // ========== 查询接口 ==========
 
   function byId(type: FinanceType, id: string): CachedFinanceRecord | undefined {
@@ -421,6 +495,80 @@ export const useFinanceStore = defineStore('finance', () => {
       policies.delete(remote.id)
       loans.delete(remote.id)
       contracts.delete(remote.id)
+      // 附件墓碑：从密文缓存 + 二级索引移除（attachmentCipherCache 保留墓碑用于审计）。
+      if (remote.type === 'attachment') {
+        const cipher = attachmentCipherCache.get(remote.id)
+        if (cipher) {
+          cipher.deleted = true
+          cipher.updated_at = remote.updated_at
+          cipher.version = Math.max(cipher.version, remote.version)
+          const set = attachmentsByRecordId.get(cipher.recordId)
+          if (set) {
+            set.delete(remote.id)
+            if (set.size === 0) attachmentsByRecordId.delete(cipher.recordId)
+          }
+        }
+      }
+      return
+    }
+    // ========== 附件 ingest（type='attachment'） ==========
+    // 附件密文走独立通道：解密 plaintextJson → 还原 AttachmentRef 元数据；
+    // ciphertext 存 attachmentCipherCache（不存普通 Map）。
+    if (remote.type === 'attachment') {
+      let data: unknown
+      try {
+        data = channel.open(remote.id, remote.module, remote.ciphertext, remote.version)
+      } catch {
+        throw new Error('附件解密失败')
+      }
+      // 解密产物 = plaintextJson 字节流（Uint8Array → TextDecoder → JSON.parse）。
+      let meta: { mime: string; size: number; sha256: string; recordId?: string }
+      try {
+        // crypto/envelope.openRecord 已规范返回 Uint8Array；某些 mock 通道
+        // 可能返回 Buffer 等 BufferSource 兼容类型，统一按 Uint8Array 处理。
+        const bytes: Uint8Array =
+          data instanceof Uint8Array
+            ? data
+            : ArrayBuffer.isView(data)
+              ? new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength))
+              : new Uint8Array(data as ArrayBufferLike)
+        meta = JSON.parse(new TextDecoder().decode(bytes)) as {
+          mime: string
+          size: number
+          sha256: string
+          recordId?: string
+        }
+      } catch {
+        throw new Error('附件明文 JSON 解析失败')
+      }
+      // 端侧 recordId 索引（plaintextJson.recordId）—— 优先级 > AAD。
+      const recordId = meta.recordId ?? ''
+      const ref: AttachmentRef = {
+        id: remote.id,
+        mime: meta.mime,
+        size: meta.size,
+        sha256: meta.sha256,
+      }
+      attachments.set(remote.id, ref)
+      attachmentCipherCache.set(remote.id, {
+        id: remote.id,
+        ciphertext: remote.ciphertext,
+        version: remote.version,
+        recordId,
+        plaintextJson: JSON.stringify(meta),
+        deleted: false,
+        device_id: 'web',
+        created_at: remote.created_at,
+        updated_at: remote.updated_at,
+      })
+      // 二级索引维护。
+      const set = attachmentsByRecordId.get(recordId)
+      if (set) {
+        set.add(remote.id)
+      } else {
+        attachmentsByRecordId.set(recordId, new Set([remote.id]))
+      }
+      since = Math.max(since, remote.updated_at)
       return
     }
     const type = remote.type as FinanceType
@@ -1046,6 +1194,11 @@ export const useFinanceStore = defineStore('finance', () => {
     policies.clear()
     loans.clear()
     contracts.clear()
+    // 附件子状态一并清空（与 v1/v2 子类型同节奏）。
+    attachments.clear()
+    attachmentsByRecordId.clear()
+    attachmentCipherCache.clear()
+    attachmentRemote.clear()
     since = 0
     lastSyncAt.value = 0
     hydrated.value = false
@@ -1077,8 +1230,67 @@ export const useFinanceStore = defineStore('finance', () => {
     policies.clear()
     loans.clear()
     contracts.clear()
+    attachments.clear()
+    attachmentsByRecordId.clear()
+    attachmentCipherCache.clear()
+    attachmentRemote.clear()
+    _attachmentChannel = null
     hydrated.value = false
     since = 0
+  }
+
+  // ========== 附件 CRUD（TR-3.3） ==========
+
+  /**
+   * 添加附件（编辑器上传 → 写 store）。
+   *
+   * 由 attachment.ts.uploadFile 调 channel.upsert 后再调本函数入 store 元数据。
+   * 二级索引同步维护。
+   */
+  function addAttachment(recordId: string, ref: AttachmentRef): void {
+    attachments.set(ref.id, ref)
+    const set = attachmentsByRecordId.get(recordId)
+    if (set) {
+      set.add(ref.id)
+    } else {
+      attachmentsByRecordId.set(recordId, new Set([ref.id]))
+    }
+  }
+
+  /**
+   * 删除附件（store 元数据 + 二级索引；密文缓存由 attachment.ts.deleteAttachment 标记墓碑）。
+   */
+  function removeAttachment(recordId: string, attachmentId: string): void {
+    attachments.delete(attachmentId)
+    const set = attachmentsByRecordId.get(recordId)
+    if (set) {
+      set.delete(attachmentId)
+      if (set.size === 0) attachmentsByRecordId.delete(recordId)
+    }
+  }
+
+  /**
+   * 高级包装：上传附件 + 入 store 元数据 + 维护二级索引。
+   *
+   * UI 编辑器建议走本方法，不要直接调 attachment.uploadFile——后者只负责
+   * 加密上行，不写 store 元数据。
+   *
+   * @param recordId 关联财务记录 id
+   * @param file File 鸭子对象（真实浏览器 File 或测试桩）
+   * @returns AttachmentResult（成功 → AttachmentRef，失败 → 中文错误文案）
+   */
+  async function uploadAttachment(recordId: string, file: File) {
+    const ch = getAttachmentChannel()
+    return uploadFile(recordId, file, ch, (ref) => {
+      addAttachment(recordId, ref)
+    })
+  }
+
+  /**
+   * 注入自定义附件加密通道（仅供单元测试使用）。
+   */
+  function _setAttachmentChannelForTest(ch: AttachmentChannel): void {
+    _attachmentChannel = ch
   }
 
   return {
@@ -1131,11 +1343,22 @@ export const useFinanceStore = defineStore('finance', () => {
     addContract,
     updateContract,
     deleteContract,
+    // 附件 getters / CRUD（TR-3.3 + TR-3.4）
+    attachments,
+    attachmentsByRecordId,
+    listAttachments,
+    getAttachmentsForRecord,
+    getAttachmentMeta,
+    getAttachmentChannel,
+    addAttachment,
+    removeAttachment,
+    uploadAttachment,
     // 重置
     reset,
     // 测试钩子
     _setStorageForTest,
     _setChannelForTest,
+    _setAttachmentChannelForTest,
     _resetForTest,
     // 内部工具（导出便于测试 toJson 链路）
     toJson,

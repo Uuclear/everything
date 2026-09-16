@@ -13,10 +13,12 @@ import com.everything.eve.data.event.EventDao
 import com.everything.eve.data.event.EventEntity
 import com.everything.eve.data.event.EventReminderLogDao
 import com.everything.eve.data.event.EventReminderLogEntity
+import com.everything.eve.data.finance.dao.AttachmentDao
 import com.everything.eve.data.finance.dao.FinanceAccountDao
 import com.everything.eve.data.finance.dao.FinanceCardDao
 import com.everything.eve.data.finance.dao.FinanceReminderLogDao
 import com.everything.eve.data.finance.dao.FinanceTxDao
+import com.everything.eve.data.finance.entity.AttachmentEntity
 import com.everything.eve.data.finance.entity.FinanceAccountEntity
 import com.everything.eve.data.finance.entity.FinanceCardEntity
 import com.everything.eve.data.finance.entity.FinanceReminderLogEntity
@@ -37,8 +39,10 @@ import com.everything.eve.data.finance.entity.FinanceTxEntity
         FinanceCardEntity::class,
         FinanceTxEntity::class,
         FinanceReminderLogEntity::class,
+        // 阶段 5 v2：财务附件本地缓存（v7 迁移新增——密文 envelope 缓存表）
+        AttachmentEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class EveDatabase : RoomDatabase() {
@@ -65,6 +69,9 @@ abstract class EveDatabase : RoomDatabase() {
 
     /** 阶段 5：财务提醒降级日志 DAO（v6 迁移新增）。 */
     abstract fun financeReminderLogDao(): FinanceReminderLogDao
+
+    /** 阶段 5 v2：财务附件本地缓存 DAO（v7 迁移新增）。 */
+    abstract fun attachmentDao(): AttachmentDao
 
     companion object {
         /**
@@ -390,9 +397,75 @@ abstract class EveDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v6 → v7：新增 `finance_attachment`（财务附件本地密文缓存表）。
+         *
+         * 与既有 v5→v6 同模式：仅 CREATE TABLE IF NOT EXISTS + 索引，
+         * 不 ALTER/DROP 既有十一表（records / sync_state / collector_state /
+         * location_points / location_outbox / event / event_reminder_log /
+         * finance_account / finance_card / finance_tx / finance_reminder_log），
+         * 保证既有数据零影响。
+         *
+         * finance_attachment（spec TR-3.1 / 附件本地缓存）：
+         *  - 12 列（含 schema_version / module 五列系统字段，与 AttachmentEntity
+         *    一一对应；encrypted_payload 字节字段存本地 Room 缓存密文——用 vault
+         *    masterKey 再封一层 envelope 的内容，与服务端 records 通道外发的
+         *    ciphertext 是不同密文）；
+         *  - **零知识红线**：mime / size / sha256 / encrypted_payload 仅本地用，
+         *    不进 SharedPreferences / 日志 / 通知文案；
+         *  - SQL 完全用 SQLite 兼容类型（INTEGER / TEXT / BLOB），不依赖 Room
+         *    类型转换，便于 v6 旧库升级到 v7 时无差异执行；
+         *  - 索引 (record_id) 服务按父记录（policy/contract）筛选附件；
+         *    (updated_at) 服务增量同步游标；
+         *    (dirty) 服务同步推送对账。
+         */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // ---- 步骤 1：建 finance_attachment 表（spec TR-3.1）----
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS finance_attachment (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        record_id TEXT NOT NULL,
+                        mime TEXT NOT NULL,
+                        size INTEGER NOT NULL,
+                        sha256 TEXT NOT NULL,
+                        encrypted_payload BLOB NOT NULL,
+                        schema_version INTEGER NOT NULL DEFAULT 1,
+                        module TEXT NOT NULL DEFAULT 'finance',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        dirty INTEGER NOT NULL DEFAULT 1,
+                        deleted INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent(),
+                )
+                // ---- 步骤 2：建 finance_attachment 表索引（spec TR-3.1 明示）----
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_attachment_record_id " +
+                        "ON finance_attachment (record_id)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_attachment_updated_at " +
+                        "ON finance_attachment (updated_at)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_attachment_dirty " +
+                        "ON finance_attachment (dirty)",
+                )
+            }
+        }
+
         fun build(context: Context): EveDatabase =
             Room.databaseBuilder(context, EveDatabase::class.java, "eve.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6,
+                    MIGRATION_6_7,
+                )
                 .build()
     }
 }

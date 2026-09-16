@@ -6,6 +6,7 @@ import com.everything.eve.auth.AuthManager
 import com.everything.eve.data.EveDatabase
 import com.everything.eve.data.RecordsRepository
 import com.everything.eve.data.event.EventsRepository
+import com.everything.eve.data.finance.AttachmentRepository
 import com.everything.eve.data.finance.FinanceRepository
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
@@ -35,6 +36,10 @@ object ServiceLocator {
         private set
     // 阶段 5 Task 4：财务模块仓库（明文 4 表 + records 通道复用，仅搭骨架）
     lateinit var financeRepo: FinanceRepository
+        private set
+    // 阶段 5 v2 / TR-3.2：财务附件仓库（policy / contract 挂的合同扫描件 / 保单 PDF）；
+    // 独立于 financeRepo，单独走 AttachmentDao + records.type="attachment" 通道。
+    lateinit var attachmentRepo: AttachmentRepository
         private set
     lateinit var db: EveDatabase
         private set
@@ -75,6 +80,13 @@ object ServiceLocator {
             txDao = db.financeTxDao(),
             reminderLogDao = db.financeReminderLogDao(),
             recordsRepository = repo,
+        )
+        // 阶段 5 v2 / TR-3.2：财务附件仓库（独立 AttachmentDao + records 通道复用）；
+        // CollectorWorker 末尾调用 pullAndDecrypt + pushChanges 调度上行下行。
+        attachmentRepo = AttachmentRepository(
+            attachmentDao = db.attachmentDao(),
+            recordsRepository = repo,
+            auth = auth,
         )
         collector = com.everything.eve.collector.CollectorEngine(
             appContext = ctx,

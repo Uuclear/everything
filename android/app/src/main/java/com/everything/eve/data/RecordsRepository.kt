@@ -18,7 +18,7 @@ import java.util.UUID
  *  - 历史 module='note'/type='secure_note' 继续可读，AAD 用其自身 module 解；
  *  - login/card/identity 记录只同步保存，不在笔记 UI 暴露（Android 本期不做其完整 UI）。
  */
-class RecordsRepository(
+open class RecordsRepository(
     private val dao: RecordDao,
     private val auth: AuthManager,
 ) {
@@ -414,8 +414,91 @@ class RecordsRepository(
      * @throws javax.crypto.AEADBadTagException 密文/AAD 不匹配。
      */
     fun decryptFinanceRecord(entity: RecordEntity): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() } ?: error("资料库未解锁")
+        val plain = CryptoEnvelope.openRecord(
+            mk,
+            CryptoEnvelope.unb64(entity.ciphertext),
+            entity.id,
+            entity.module,
+            entity.version,
+        )
+        return String(plain, Charsets.UTF_8)
+    }
+
+    // =============================================================================
+    // 阶段 5 v2 / TR-3.2：财务附件 records 通道扩展（policy / contract 挂的合同扫描件 / 保单 PDF）。
+    // =============================================================================
+    // 设计纪律（与既有 finance 子类型一致）：
+    //  1) **不新造 envelope 路径**：完全复用 CryptoEnvelope.sealRecord / openRecord，AAD 沿用
+    //     "eve:v1:record:{id}:finance:" + BE(uint64 version)——与 account/card/tx 逐字节一致；
+    //  2) **type 子类型**：attachment 与 account/card/tx 共用 module="finance"，type 字段值
+    //     "attachment"（与 FinanceModule.TYPE_ATTACHMENT 字节级一致）；
+    //  3) **明文载荷契约（与 AttachmentRepository.upload / delete 同款口径）**：
+    //     - upload 路径 plaintextJson = {"id","recordId","mime","size","sha256"}（不含 record_id
+    //       冗余字段——recordId 已通过 AttachmentEntity 承载，避免 records 通道 payload 膨胀）；
+    //     - delete 路径 plaintextJson = {"id","deleted":true}（墓碑推送）。
+    //     解密后由 AttachmentRepository.pullAndDecrypt 按上述契约反序列化（不依赖 finance 模块
+    //     的 fromJsonObj 三件套）；
+    //  4) **dirty 标记**：upsertFinanceAttachment 写完 records 行 dirty=true，等待
+    //     RecordsRepository.sync() 周期推送；推送成功后由 markClean 翻 false（与既有链路一致）。
+
+    /**
+     * 把一条附件明文密封为 records 条目（module=finance/type=attachment），并标 dirty。
+     *
+     * 与 [upsertFinanceAccount] / [upsertFinanceCard] / [upsertFinanceTx] 同款链路：sealRecord →
+     * dao.upsertAll → dirty=true。**明文载荷契约**由调用方 [AttachmentRepository] 维护：
+     *  - 上传：`{"id","recordId","mime","size","sha256"}`
+     *  - 删除（tombstone）：`{"id","deleted":true}`
+     *
+     * @param attachmentId 附件 UUID（即 AttachmentEntity.id / records id，同空间）。
+     * @param plaintextJson 附件明文载荷 JSON。
+     * @param recordId 父记录 id（保留参数仅作接口契约一致性参考；**不**写入 plaintext 载荷
+     *   ——该字段由 AttachmentEntity.recordId 承载，避免 records 通道明文冗余）。
+     * @return 写入的 record id（即 attachmentId）。
+     * @throws IllegalStateException MK 未解锁。
+     */
+    open suspend fun upsertFinanceAttachment(
+        attachmentId: String,
+        plaintextJson: String,
+        @Suppress("UNUSED_PARAMETER") recordId: String,
+    ): String {
         val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
             ?: error("资料库未解锁")
+        val now = System.currentTimeMillis()
+        val plain = plaintextJson.toByteArray(Charsets.UTF_8)
+        val sealed = CryptoEnvelope.sealRecord(mk, plain, attachmentId, moduleFinance, 1)
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = attachmentId,
+                    module = moduleFinance,
+                    type = com.everything.eve.data.finance.FinanceModule.TYPE_ATTACHMENT,
+                    ciphertext = CryptoEnvelope.b64(sealed),
+                    version = 1,
+                    createdAt = now,
+                    updatedAt = now,
+                    deleted = false,
+                    dirty = true,
+                ),
+            ),
+        )
+        return attachmentId
+    }
+
+    /**
+     * 解密一条 attachment records 密文回明文 JSON（AttachmentRepository.pullAndDecrypt 入库用）。
+     *
+     * 与 [decryptFinanceRecord] / [decryptEventRule] 同款骨架：解密失败（AAD 不匹配 / 模块非
+     * finance / 密文被改）抛 javax.crypto.AEADBadTagException，由 AttachmentRepository.pullAndDecrypt
+     * 决定是否降级。**不**静默吞掉（spec NFR-1 "解密失败不静默"）。
+     *
+     * @param entity 已落 records 表的 attachment 行（ciphertext / module / version 来自下行）。
+     * @return 明文 JSON 字符串（AttachmentRepository.upload / delete 的 plaintextJson 同格式）。
+     * @throws IllegalStateException MK 未解锁。
+     * @throws javax.crypto.AEADBadTagException 密文/AAD 不匹配。
+     */
+    open fun decryptFinanceAttachment(entity: RecordEntity): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() } ?: error("资料库未解锁")
         val plain = CryptoEnvelope.openRecord(
             mk,
             CryptoEnvelope.unb64(entity.ciphertext),

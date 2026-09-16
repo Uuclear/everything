@@ -29,6 +29,7 @@
 
 package com.everything.eve.ui.finance
 
+import android.content.Intent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,6 +44,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -55,6 +57,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -63,6 +66,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
@@ -70,6 +74,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import com.everything.eve.R
+import com.everything.eve.ServiceLocator
 import com.everything.eve.finance.FINANCE_V2_SCHEMA_VERSION
 import com.everything.eve.finance.PolicyRecord
 import kotlinx.coroutines.launch
@@ -102,6 +107,18 @@ fun PolicyEditorScreen(
     var errorText by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    // =============================================================================
+    // SA-3 / TR-3.4：附件仓库绑定（编辑器持有 vm 引用；
+    // 编辑模式下 currentRecordId != null → 显示附件节）
+    // =============================================================================
+    val context = LocalContext.current
+    LaunchedEffect(vm) {
+        // 应用启动后 ServiceLocator.attachmentRepo 必已初始化；
+        // 这里安全地注入 vm —— 重复 bind 幂等。
+        runCatching { vm.bindAttachmentRepository(ServiceLocator.attachmentRepo) }
+    }
+    val currentRecordId: String? = id
 
     Scaffold(
         topBar = {
@@ -146,6 +163,37 @@ fun PolicyEditorScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.semantics { testTag = "policy_editor_error" },
+                )
+            }
+
+            // =============================================================================
+            // SA-3 / TR-3.4：附件节 —— 仅编辑模式显示（新建模式下 currentRecordId
+            // 是新生成的 vm.newId()，未入库，挂附件无意义；按 spec 隐藏）
+            // =============================================================================
+            if (currentRecordId != null) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                Text(
+                    text = stringResource(R.string.finance_attachment_section_title),
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.semantics { testTag = "policy_editor_attachment_section" },
+                )
+                AttachmentUploader(
+                    recordId = currentRecordId,
+                    vm = vm,
+                )
+                AttachmentList(
+                    recordId = currentRecordId,
+                    vm = vm,
+                    onPreview = { attachmentId, mime ->
+                        val uri = vm.openAttachment(context, attachmentId, mime)
+                        if (uri != null) {
+                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, mime)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            runCatching { context.startActivity(intent) }
+                        }
+                    },
                 )
             }
 

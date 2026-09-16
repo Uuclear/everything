@@ -347,4 +347,14 @@
     <string name="finance_v2_hint_within_30_days">30 天内</string>
     <string name="finance_v2_hint_within_90_days">90 天内</string>
     <string name="finance_v2_hint_ended">已结束</string>
+
+    <!-- ============== v2 财务附件节（SA-3 / TR-3.4；8 条） ============== -->
+    <string name="finance_attachment_section_title">附件</string>
+    <string name="finance_attachment_uploader_button">上传附件</string>
+    <string name="finance_attachment_uploader_cd">上传附件</string>
+    <string name="finance_attachment_list_cd">附件列表</string>
+    <string name="finance_attachment_empty">暂无附件</string>
+    <string name="finance_attachment_size_exceeded">附件大小超出 50MB 限制</string>
+    <string name="finance_attachment_delete_confirm_title">删除附件</string>
+    <string name="finance_attachment_delete_confirm_message">确定删除此附件？</string>
 </resources>

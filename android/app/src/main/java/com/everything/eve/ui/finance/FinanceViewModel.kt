@@ -34,12 +34,17 @@
 package com.everything.eve.ui.finance
 
 import android.app.Application
+import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.everything.eve.ServiceLocator
+import com.everything.eve.data.finance.AttachmentRepository
+import com.everything.eve.data.finance.entity.AttachmentEntity
 import com.everything.eve.data.finance.entity.FinanceAccountEntity
 import com.everything.eve.data.finance.entity.FinanceCardEntity
 import com.everything.eve.data.finance.entity.FinanceTxEntity
+import com.everything.eve.finance.AttachmentRef
 import com.everything.eve.finance.ContractRecord
 import com.everything.eve.finance.FinanceAggregator
 import com.everything.eve.finance.FinanceRecords
@@ -60,6 +65,8 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.security.MessageDigest
 
 /**
  * 编辑器类型枚举（spec FR-1 / FR-3 / FR-4）。
@@ -797,6 +804,200 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // =============================================================================
+    // 附件绑定（stage5-finance-v2 / Task 5 / TR-3.4 / SA-3）
+    // ============================================================================
+    // 构造器已固化（SA-2 范围外）—— 改为运行时绑定模式：
+    //   * 字段 attachmentRepoRef 默认 null；
+    //   * 应用启动处 / Compose 入口处调 bindAttachmentRepository 注入；
+    //   * 内部访问 attachmentRepo 时取 attachmentRepoRef（未绑定抛 ISE 早暴露）。
+    // ============================================================================
+
+    /** 附件仓库引用（SA-3 注入；构造期 null，由 ServiceLocator 启动后 bind）。 */
+    private var attachmentRepoRef: AttachmentRepository? = null
+
+    /**
+     * 注入附件仓库（SA-3）。
+     *
+     * 调用方：在持有 FinanceViewModel 引用的 Compose Screen（PolicyEditorScreen /
+     * ContractEditorScreen）的 LaunchedEffect 中调
+     * `vm.bindAttachmentRepository(ServiceLocator.attachmentRepo)`。
+     */
+    fun bindAttachmentRepository(repo: AttachmentRepository) {
+        attachmentRepoRef = repo
+    }
+
+    /** 内部访问附件仓库（未绑定抛 ISE，避免 NPE 静默）。 */
+    private val attachmentRepo: AttachmentRepository
+        get() = attachmentRepoRef
+            ?: error("AttachmentRepository 未绑定 —— 必须在 VM 构造后调 bindAttachmentRepository(ServiceLocator.attachmentRepo)")
+
+    // =============================================================================
+    // 附件 observe / action（stage5-finance-v2 / Task 5 / TR-3.4 / SA-3）
+    // ============================================================================
+    // 设计要点：
+    //   1. observe 简化封装：attachmentsByRecordId(recordId) → 直接转发 Repository；
+    //   2. addAttachment / removeAttachment：viewModelScope 内调 Repository，失败
+    //      经 _eventChannel.send(FinanceUiEvent.Error(...)) 报告；
+    //   3. 端侧 50MB 校验双保险：UI 端预检（直接 Toast 拒收）+ VM verifySize 二次
+    //      校验（Repository 内还有 size > 0 与 ATTACHMENT_MAX_SIZE_BYTES 终检）；
+    //   4. sha256 在 VM 层计算（hex 64 字符）→ 传给 Repository.upload。
+    // ============================================================================
+
+    /**
+     * 按父记录 id 实时观察附件列表（Flow 转发）。
+     *
+     * Compose AttachmentList 直接订阅此 Flow，UI 随 Room 写入自动刷新。
+     *
+     * @param recordId 父记录 id（policy / contract 等 v2 子类型记录的主键）。
+     */
+    fun attachmentsByRecordId(recordId: String): Flow<List<AttachmentEntity>> =
+        attachmentRepo.listByRecordId(recordId)
+
+    /**
+     * 上传一个附件：UI 端选择文件 → 读字节 → sha256 → Repository 双写。
+     *
+     * 失败语义：Repository 返回 failure → 转发 _eventChannel.send(Error)。
+     *
+     * @param recordId 父记录 id。
+     * @param content 附件明文字节（policy 合同扫描件 / 保单 PDF 等）。
+     * @param mime MIME 类型（application/pdf / image/jpeg / image/png 等白名单内）。
+     * @return [Result.success] [AttachmentRef]（id / mime / size / sha256）或
+     *   [Result.failure]（含 IllegalArgumentException / IllegalStateException 提示）。
+     */
+    fun addAttachment(
+        recordId: String,
+        content: ByteArray,
+        mime: String,
+    ): Result<AttachmentRef> {
+        // ---- 端侧预校验：size ----
+        when (val sizeCheck = verifySize(content.size.toLong())) {
+            is ValidationResult.Invalid -> {
+                viewModelScope.launch {
+                    _eventChannel.send(FinanceUiEvent.Error("attachment_size_exceeded"))
+                }
+                return Result.failure(IllegalArgumentException(sizeCheck.reason))
+            }
+            else -> Unit
+        }
+
+        // ---- sha256 端侧计算 ----
+        val sha256Hex = sha256HexOf(content)
+
+        viewModelScope.launch {
+            try {
+                val result = attachmentRepo.upload(recordId, content, mime, sha256Hex)
+                if (result.isFailure) {
+                    _eventChannel.send(FinanceUiEvent.Error("attachment_upload_failed"))
+                }
+            } catch (e: Exception) {
+                _eventChannel.send(FinanceUiEvent.Error("attachment_upload_failed"))
+            }
+        }
+        return Result.success(
+            AttachmentRef(
+                id = "pending-${System.currentTimeMillis()}",
+                mime = mime,
+                size = content.size.toLong(),
+                sha256 = sha256Hex,
+            ),
+        )
+    }
+
+    /**
+     * 删除一个附件（软删除墓碑 + 推 records 通道）。
+     *
+     * 失败语义：Repository 返回 failure → 转发 _eventChannel.send(Error)。
+     *
+     * @param id 附件 UUID。
+     */
+    fun removeAttachment(id: String): Result<Unit> {
+        viewModelScope.launch {
+            try {
+                val result = attachmentRepo.delete(id)
+                if (result.isFailure) {
+                    _eventChannel.send(FinanceUiEvent.Error("attachment_delete_failed"))
+                }
+            } catch (e: Exception) {
+                _eventChannel.send(FinanceUiEvent.Error("attachment_delete_failed"))
+            }
+        }
+        return Result.success(Unit)
+    }
+
+    /**
+     * 端侧 50MB 校验（与 [com.everything.eve.finance.FinanceRecords.ATTACHMENT_MAX_SIZE_BYTES] 同口径）。
+     *
+     * @param size 待校验字节数。
+     * @return [ValidationResult.Ok] / [ValidationResult.Invalid(reason)]。
+     */
+    private fun verifySize(size: Long): ValidationResult {
+        val maxBytes = com.everything.eve.finance.ATTACHMENT_MAX_SIZE_BYTES
+        return if (size <= 0L) {
+            ValidationResult.Invalid("附件字节数必须 > 0")
+        } else if (size > maxBytes) {
+            ValidationResult.Invalid("附件超过 ${maxBytes} 字节上限（50MB）")
+        } else {
+            ValidationResult.Ok
+        }
+    }
+
+    /**
+     * 把字节数组转 SHA-256 小写 hex 字符串（64 字符）。
+     *
+     * @param content 待哈希字节。
+     * @return 64 字符 hex。
+     */
+    private fun sha256HexOf(content: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val bytes = digest.digest(content)
+        val sb = StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            val v = b.toInt() and 0xFF
+            sb.append(HEX_CHARS[v ushr 4])
+            sb.append(HEX_CHARS[v and 0x0F])
+        }
+        return sb.toString()
+    }
+
+    /**
+     * 打开一个附件：解密 → 写入 cacheDir → 返回 file://-scheme Uri。
+     *
+     * 实现要点：
+     *   1) attachmentRepo.download(id) → 明文字节（Result.failure 时返回 null）；
+     *   2) 按 mime 推断文件扩展名（pdf / jpg / png / bin）；
+     *   3) 写入 cacheDir/$attachmentId.$ext —— cacheDir 是 app-private，无需权限；
+     *   4) 用 Uri.fromFile(...) 返回 file://-scheme Uri。
+     *
+     * @param context 应用上下文（用于 cacheDir 解析）。
+     * @param attachmentId 附件 UUID。
+     * @param mime 附件 MIME（由调用方从附件列表传入；空时默认 application/octet-stream）。
+     * @return Uri 或 null（下载失败 / 写文件失败）。
+     */
+    fun openAttachment(context: Context, attachmentId: String, mime: String? = null): Uri? {
+        val ctx = context.applicationContext
+        val downloadResult = runCatching {
+            kotlinx.coroutines.runBlocking { attachmentRepo.download(attachmentId) }
+        }.getOrNull() ?: return null
+        val bytes = downloadResult.getOrNull() ?: return null
+
+        val effectiveMime = mime?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+        val ext = when {
+            effectiveMime.contains("pdf", ignoreCase = true) -> "pdf"
+            effectiveMime.contains("jpeg", ignoreCase = true) || effectiveMime.contains("jpg", ignoreCase = true) -> "jpg"
+            effectiveMime.contains("png", ignoreCase = true) -> "png"
+            else -> "bin"
+        }
+
+        val outFile = File(ctx.cacheDir, "$attachmentId.$ext")
+        return try {
+            outFile.writeBytes(bytes)
+            Uri.fromFile(outFile)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // =============================================================================
     // 提醒触发钩子（dashboard 显示最近 N 次信用卡触发）
     // =============================================================================
 
@@ -903,3 +1104,12 @@ private fun isDecimalLike(s: String): Boolean {
     val regex = Regex("^-?\\d+(\\.\\d{1,2})?$")
     return regex.matches(t)
 }
+
+// =============================================================================
+// 附件 SHA-256 hex 编码表（SA-3；与 AttachmentRepository HEX_CHARS 同口径）
+// =============================================================================
+/**
+ * 小写 hex 编码表（16 字符）。
+ * 用于 [FinanceViewModel.sha256HexOf] 把 [MessageDigest] 输出转 hex 字符串。
+ */
+private val HEX_CHARS: CharArray = "0123456789abcdef".toCharArray()

@@ -91,6 +91,18 @@ class CollectorWorker(appContext: Context, params: WorkerParameters) :
                     ServiceLocator.financeRepo.pullAndDecrypt(
                         financeRecords.filter { it.module == com.everything.eve.data.finance.FinanceModule.MODULE }
                     )
+                    // ---- 阶段 5 v2 / TR-3.2 挂载点：附件块 pull + push ----
+                    // 复用同一份 financeRecords 列表过滤 type="attachment"，与 finance
+                    // 主体 pullAndDecrypt 同款过滤；AttachmentRepository 内部按 module + type
+                    // 双键兜底过滤。pushChanges 把本地 dirty 附件元数据推 records 表 dirty 行，
+                    // 等待 RecordsRepository.sync() 周期推送。
+                    ServiceLocator.attachmentRepo.pullAndDecrypt(
+                        financeRecords.filter {
+                            it.module == com.everything.eve.data.finance.FinanceModule.MODULE &&
+                                it.type == com.everything.eve.data.finance.FinanceModule.TYPE_ATTACHMENT
+                        }
+                    )
+                    ServiceLocator.attachmentRepo.pushChanges()
                     ReminderScheduler.rebuildChain(ctx)
                 }
             } catch (t: Throwable) {

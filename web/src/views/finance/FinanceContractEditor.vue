@@ -39,17 +39,25 @@ import {
   NSpace,
   NButton,
   NDatePicker,
+  NDivider,
+  NList,
+  NListItem,
+  NThing,
   NEmpty,
+  NPopconfirm,
   useMessage,
 } from 'naive-ui'
 import { useFinanceStore } from '../../stores/finance'
 import type {
+  AttachmentRef,
   CurrencyCode,
   FinanceContract,
   ContractKind,
   ContractStatus,
 } from '../../finance/types'
 import { DEFAULT_CURRENCY } from '../../finance/types'
+import { uploadFile, deleteAttachment } from '../../finance/attachment'
+import AttachmentViewer from './AttachmentViewer.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -93,6 +101,20 @@ const status = ref<ContractStatus>('active')
 const linkedAccountId = ref<string | null>(null)
 const submitting = ref(false)
 
+// ========== 附件子状态（TR-3.4） ==========
+/** 当前合同的附件列表（编辑期变更缓存 + 保存时落 payload）。 */
+const attachmentsList = ref<AttachmentRef[]>([])
+/** 隐藏的 file input 引用。 */
+const fileInputRef = ref<HTMLInputElement | null>(null)
+/** 当前预览的附件 id（null = 弹层关闭）。 */
+const previewingId = ref<string | null>(null)
+/** 当前预览的附件 mime。 */
+const previewingMime = ref<string | null>(null)
+/** AttachmentViewer 显隐。 */
+const showViewer = ref(false)
+/** 上传中标记。 */
+const uploading = ref(false)
+
 // ========== 模式判断 ==========
 const editingId = computed<string | null>(() => {
   const p = route.params.id
@@ -121,6 +143,11 @@ onMounted(() => {
       noticePeriodDays.value = c.notice_period_days
       status.value = c.status
       linkedAccountId.value = c.linked_account_id
+      // 附件列表：优先 store 二级索引（pull 后最全），其次 payload 兜底。
+      const fromStore = store.getAttachmentsForRecord(editingId.value)
+      attachmentsList.value = fromStore.length > 0
+        ? fromStore
+        : [...(c.attachments ?? [])]
     } else {
       message.warning('未找到该合同, 可能已删除')
     }
@@ -154,10 +181,6 @@ function save() {
   submitting.value = true
   try {
     const now = Date.now()
-    // 附件列表 —— 编辑期保持已有, 新建时为空数组（B3 接入上传）。
-    const existingAttachments: FinanceContract['attachments'] = editingId.value
-      ? ((store.byId('contract', editingId.value)?.data as unknown as FinanceContract)?.attachments ?? [])
-      : []
     const payload: FinanceContract = {
       id: editingId.value ?? cryptoRandomId(),
       schema_version: 2,
@@ -174,7 +197,8 @@ function save() {
       notice_deadline_ts: noticeDeadlineTs.value,
       status: status.value,
       linked_account_id: linkedAccountId.value,
-      attachments: existingAttachments,
+      // 附件列表 —— 直接取 attachmentsList 快照（编辑期增删缓存）。
+      attachments: [...attachmentsList.value],
       created_at: editingId.value
         ? (store.byId('contract', editingId.value)?.createdAt ?? now)
         : now,
@@ -196,6 +220,79 @@ function save() {
 
 function cancel() {
   router.replace({ name: 'finance' })
+}
+
+// ========== 附件操作（TR-3.4） ==========
+
+/** 触发隐藏 file input 点击。 */
+function onUploadAttachment(): void {
+  if (!editingId.value) {
+    message.warning('请先保存合同后再上传附件')
+    return
+  }
+  fileInputRef.value?.click()
+}
+
+/**
+ * 处理 file 选中事件 —— 调 attachment.ts.uploadFile 上传，
+ * 成功后写入 store + 本地 attachmentsList。
+ */
+async function handleFile(event: Event): Promise<void> {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file || !editingId.value) {
+    target.value = ''
+    return
+  }
+  uploading.value = true
+  try {
+    const ch = store.getAttachmentChannel()
+    const result = await uploadFile(editingId.value, file, ch)
+    if (result.ok) {
+      store.addAttachment(editingId.value, result.value)
+      attachmentsList.value = store.getAttachmentsForRecord(editingId.value)
+      message.success('已上传附件')
+    } else {
+      message.error(result.error)
+    }
+  } catch {
+    message.error('上传失败')
+  } finally {
+    uploading.value = false
+    target.value = ''
+  }
+}
+
+/** 打开预览弹层。 */
+function previewAttachment(att: AttachmentRef): void {
+  previewingId.value = att.id
+  previewingMime.value = att.mime
+  showViewer.value = true
+}
+
+/** 删除附件（带二次确认）。 */
+async function removeAttachmentRef(id: string): Promise<void> {
+  if (!editingId.value) return
+  try {
+    const ch = store.getAttachmentChannel()
+    const result = await deleteAttachment(id, ch)
+    if (result.ok) {
+      store.removeAttachment(editingId.value, id)
+      attachmentsList.value = store.getAttachmentsForRecord(editingId.value)
+      message.success('已删除附件')
+    } else {
+      message.error(result.error)
+    }
+  } catch {
+    message.error('删除失败')
+  }
+}
+
+/** 字节数 → 人类可读字符串。 */
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 // ========== 工具 ==========
@@ -262,10 +359,61 @@ function cryptoRandomId(): string {
         <n-form-item label="关联账户">
           <n-input v-model:value="linkedAccountId" placeholder="可选, 关联账户 id" />
         </n-form-item>
-        <n-form-item label="附件">
-          <n-empty description="附件上传 v2 B3 接入" size="small" />
-        </n-form-item>
       </n-form>
+
+      <n-divider />
+      <!-- 附件区块（TR-3.4）：上传 + 列表 + 预览/删除 -->
+      <div class="attachments-section">
+        <div class="attachments-head">
+          <h3>附件</h3>
+          <n-space :size="8">
+            <n-button :disabled="!editingId || uploading" @click="onUploadAttachment">
+              {{ uploading ? '上传中...' : '上传附件' }}
+            </n-button>
+          </n-space>
+        </div>
+        <!-- 隐藏的 file input（accept 限定 PDF / JPG / PNG） -->
+        <input
+          ref="fileInputRef"
+          type="file"
+          accept="application/pdf,image/jpeg,image/png"
+          style="display: none;"
+          data-testid="attachment-file-input"
+          @change="handleFile"
+        />
+        <n-empty
+          v-if="attachmentsList.length === 0"
+          description="尚未上传附件"
+          size="small"
+          style="margin-top: 12px;"
+        />
+        <n-list v-else bordered style="margin-top: 12px;">
+          <n-list-item v-for="att in attachmentsList" :key="att.id">
+            <n-thing
+              :title="att.mime"
+              :description="`${formatSize(att.size)} · ${att.sha256.slice(0, 8)}`"
+              content-style="display: flex; align-items: center; gap: 6px; margin-top: 6px;"
+            >
+              <n-button text type="primary" @click="previewAttachment(att)">
+                查看
+              </n-button>
+              <n-popconfirm @positive-click="removeAttachmentRef(att.id)">
+                <template #trigger>
+                  <n-button text type="error">删除</n-button>
+                </template>
+                确定删除该附件?
+              </n-popconfirm>
+            </n-thing>
+          </n-list-item>
+        </n-list>
+      </div>
+
+      <!-- 附件预览弹层 -->
+      <AttachmentViewer
+        v-model:show="showViewer"
+        :attachment-id="previewingId"
+        :mime="previewingMime"
+      />
     </n-card>
   </div>
 </template>
