@@ -769,7 +769,7 @@ export interface CachedFinanceRecord {
   /** 软删除墓碑。 */
   deleted: boolean
   /** 明文 payload。 */
-  data: FinancePayload
+  data: FinancePayloadAll
 }
 
 // -----------------------------------------------------------------------------

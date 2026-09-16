@@ -308,6 +308,9 @@ describe('finance store / startup hydration', () => {
       cards: [makeCard({ id: 'c1', name: '已持久化卡' })],
       txs: [makeTx({ id: 't1', amount: '88.00' })],
       loans: [],
+      subscriptions: [],
+      policies: [],
+      contracts: [],
     })
 
     const store = useFinanceStore()
@@ -337,6 +340,9 @@ describe('finance store / startup hydration', () => {
       cards: [],
       txs: [],
       loans: [],
+      subscriptions: [],
+      policies: [],
+      contracts: [],
     })
     const store = useFinanceStore()
     store.hydrate()
@@ -348,6 +354,9 @@ describe('finance store / startup hydration', () => {
       cards: [],
       txs: [],
       loans: [],
+      subscriptions: [],
+      policies: [],
+      contracts: [],
     })
     store.hydrate()
     expect(store.listAccounts).toHaveLength(1)

@@ -18,6 +18,11 @@ import FinanceView from '../views/FinanceView.vue'
 import FinanceAccountEditor from '../views/finance/FinanceAccountEditor.vue'
 import FinanceCardEditor from '../views/finance/FinanceCardEditor.vue'
 import FinanceTxEditor from '../views/finance/FinanceTxEditor.vue'
+// 阶段 5 v2 — 4 子类型编辑器（TR-1.3）
+import FinanceSubscriptionEditor from '../views/finance/FinanceSubscriptionEditor.vue'
+import FinancePolicyEditor from '../views/finance/FinancePolicyEditor.vue'
+import FinanceLoanEditor from '../views/finance/FinanceLoanEditor.vue'
+import FinanceContractEditor from '../views/finance/FinanceContractEditor.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(), // hash 模式对单二进制 SPA 托管最友好
@@ -63,6 +68,27 @@ export const router = createRouter({
           path: 'editor/tx/:id?',
           name: 'finance-editor-tx',
           component: FinanceTxEditor,
+        },
+        // 阶段 5 v2 — 4 子类型编辑器（TR-1.3）
+        {
+          path: 'editor/subscription/:id?',
+          name: 'finance-editor-subscription',
+          component: FinanceSubscriptionEditor,
+        },
+        {
+          path: 'editor/policy/:id?',
+          name: 'finance-editor-policy',
+          component: FinancePolicyEditor,
+        },
+        {
+          path: 'editor/loan/:id?',
+          name: 'finance-editor-loan',
+          component: FinanceLoanEditor,
+        },
+        {
+          path: 'editor/contract/:id?',
+          name: 'finance-editor-contract',
+          component: FinanceContractEditor,
         },
       ],
     },

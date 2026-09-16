@@ -56,11 +56,21 @@ import type {
   CachedFinanceRecord,
   FinanceAccount,
   FinanceCard,
-  FinanceTx,
+  FinanceContract,
+  FinanceLoan,
   FinancePayload,
+  FinancePayloadAll,
+  FinancePolicy,
+  FinanceSubscription,
+  FinanceTx,
   FinanceType,
+  FinanceV2Payload,
 } from '../finance/types'
-import { FINANCE_MODULE } from '../finance/types'
+import {
+  FINANCE_MODULE,
+  validateV2Payload,
+  type ValidationResult,
+} from '../finance/types'
 
 // -----------------------------------------------------------------------------
 // 持久化契约 —— StorageChannel（注入点：默认 localStorage；测试可 mock）
@@ -82,12 +92,15 @@ export interface StorageChannel {
 
 /** 持久化形态（明文 JSON；与 schema 字段口径一致）。 */
 export interface PersistedFinanceState {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   accounts: FinanceAccount[]
   cards: FinanceCard[]
   txs: FinanceTx[]
-  /** v2 子类型占位（v1 阶段固定空数组；编辑功能本期不实现）。 */
-  loans: unknown[]
+  /** v2 子类型（v1 阶段固定空数组；v2 B1 启用 4 子类型编辑）。 */
+  subscriptions: FinanceSubscription[]
+  policies: FinancePolicy[]
+  loans: FinanceLoan[]
+  contracts: FinanceContract[]
 }
 
 /** localStorage key —— `eve:finance:v1`（spec §持久化 §6 一致）。 */
@@ -129,12 +142,15 @@ function defaultStorageChannel(): StorageChannel {
  * 测试时可整体 mock，便于不依赖 sodium / 网络跑通单测。
  *
  * 与 4b event-rules store CryptoChannel 同结构——保持三端契约一致。
+ *
+ * v2 扩展：seal/open 同步支持 FinanceV2Payload（subscription / policy /
+ * loan / contract）；AAD `type` 标识区分 v2 子类型，records 通道复用。
  */
 export interface CryptoChannel {
-  /** 密封一条 FinancePayload → 密文 Base64。 */
-  seal(payload: FinancePayload, id: string, version: number): string
-  /** 解密一条密文（Base64）→ FinancePayload。失败抛异常。 */
-  open(id: string, module: string, ciphertextB64: string, version: number): FinancePayload
+  /** 密封一条明文 payload → 密文 Base64。 */
+  seal(payload: FinancePayloadAll, id: string, version: number): string
+  /** 解密一条密文（Base64）→ 明文 payload。失败抛异常。 */
+  open(id: string, module: string, ciphertextB64: string, version: number): FinancePayloadAll
   /** 推送到远端 records。 */
   push(record: RemoteRecord): Promise<{ applied: number; skipped: number; server_time: number }>
   /** 拉取远端 records（since=0 即全量）。 */
@@ -194,6 +210,11 @@ export const useFinanceStore = defineStore('finance', () => {
   const accounts = reactive(new Map<string, CachedFinanceRecord>())
   const cards = reactive(new Map<string, CachedFinanceRecord>())
   const txs = reactive(new Map<string, CachedFinanceRecord>())
+  /** v2 子类型（v2 B1 启用）。 */
+  const subscriptions = reactive(new Map<string, CachedFinanceRecord>())
+  const policies = reactive(new Map<string, CachedFinanceRecord>())
+  const loans = reactive(new Map<string, CachedFinanceRecord>())
+  const contracts = reactive(new Map<string, CachedFinanceRecord>())
   /** 持久化通道（默认 localStorage；测试可注入 mock）。 */
   let storage: StorageChannel = defaultStorageChannel()
   /** 加密通道（默认直连 crypto/envelope + api/client；测试可注入 mock）。 */
@@ -215,8 +236,8 @@ export const useFinanceStore = defineStore('finance', () => {
       return (_channel ??= defaultCryptoChannel()).list(...args)
     },
   }
-  /** schema 版本（v1 固定 1；v2 升级时按需迁移）。 */
-  const schemaVersion = ref<1>(1)
+  /** schema 版本（v1=1；v2 B1 启用时升 2；schemaVersion>2 由迁移接管）。 */
+  const schemaVersion = ref<1 | 2>(1)
   /** startup hydration 是否完成（首屏 UI 据此决定是否展示骨架）。 */
   const hydrated = ref(false)
   /** 同步状态：syncing / lastSyncAt。 */
@@ -266,6 +287,54 @@ export const useFinanceStore = defineStore('finance', () => {
       .map((r) => r.data as FinanceTx),
   )
 
+  /** 所有订阅（按 next_renewal_ts 升序；即将到期在前）。 */
+  const listSubscriptions = computed<FinanceSubscription[]>(() =>
+    Array.from(subscriptions.values())
+      .filter((r) => !r.deleted)
+      .sort((a, b) => {
+        const aS = a.data as unknown as FinanceSubscription
+        const bS = b.data as unknown as FinanceSubscription
+        return aS.next_renewal_ts - bS.next_renewal_ts
+      })
+      .map((r) => r.data as unknown as FinanceSubscription),
+  )
+
+  /** 所有保单（按 expiry_ts 升序；即将到期在前）。 */
+  const listPolicies = computed<FinancePolicy[]>(() =>
+    Array.from(policies.values())
+      .filter((r) => !r.deleted)
+      .sort((a, b) => {
+        const aP = a.data as unknown as FinancePolicy
+        const bP = b.data as unknown as FinancePolicy
+        return aP.expiry_ts - bP.expiry_ts
+      })
+      .map((r) => r.data as unknown as FinancePolicy),
+  )
+
+  /** 所有应收借款（按 due_ts 升序）。 */
+  const listLoans = computed<FinanceLoan[]>(() =>
+    Array.from(loans.values())
+      .filter((r) => !r.deleted)
+      .sort((a, b) => {
+        const aL = a.data as unknown as FinanceLoan
+        const bL = b.data as unknown as FinanceLoan
+        return aL.due_ts - bL.due_ts
+      })
+      .map((r) => r.data as unknown as FinanceLoan),
+  )
+
+  /** 所有合同（按 end_ts 升序）。 */
+  const listContracts = computed<FinanceContract[]>(() =>
+    Array.from(contracts.values())
+      .filter((r) => !r.deleted)
+      .sort((a, b) => {
+        const aC = a.data as unknown as FinanceContract
+        const bC = b.data as unknown as FinanceContract
+        return aC.end_ts - bC.end_ts
+      })
+      .map((r) => r.data as unknown as FinanceContract),
+  )
+
   // ========== 查询接口 ==========
 
   function byId(type: FinanceType, id: string): CachedFinanceRecord | undefined {
@@ -276,23 +345,31 @@ export const useFinanceStore = defineStore('finance', () => {
         return cards.get(id)
       case 'tx':
         return txs.get(id)
-      default:
-        // v2 子类型本期不实现。
-        return undefined
+      case 'subscription':
+        return subscriptions.get(id)
+      case 'policy':
+        return policies.get(id)
+      case 'loan':
+        return loans.get(id)
+      case 'contract':
+        return contracts.get(id)
     }
   }
 
   // ========== 内部工具 ==========
 
   /**
-   * 把明文 payload 包装为 CachedFinanceRecord，version 自增。
+ * 把明文 payload 包装为 CachedFinanceRecord，version 自增。
    *
    * 注意：createdAt 优先取 existing.createdAt（保持首次创建时间稳定），
    * updatedAt 在推送成功后由 pushChanges 覆写为服务端权威时间。
+   *
+   * v2 扩展：type ∈ {subscription, policy, loan, contract} 时同样适用，
+   * 通过校验函数 validateV2Payload 兜底。
    */
   function wrap(
     type: FinanceType,
-    data: FinancePayload,
+    data: FinancePayloadAll,
     existing?: CachedFinanceRecord,
   ): CachedFinanceRecord {
     const now = Date.now()
@@ -309,14 +386,30 @@ export const useFinanceStore = defineStore('finance', () => {
     }
   }
 
+  /**
+   * v2 子类型校验入口（store 写入前的硬闸门）。
+   *
+   * 校验失败抛 Error，调用方捕获后按"丢数据兜底"处理（v1 阶段策略）。
+   */
+  function assertValidV2(type: FinanceType, data: unknown): asserts data is FinanceV2Payload {
+    if (type !== 'subscription' && type !== 'policy' && type !== 'loan' && type !== 'contract') {
+      return
+    }
+    const r: ValidationResult = validateV2Payload(type, data)
+    if (!r.ok) throw new Error(`v2 ${type} 校验失败: ${r.reason}`)
+  }
+
   /** 把明文 payload 序列化为 JSON（沿用 schema snake_case 字段名）。 */
-  function toJson(data: FinancePayload): string {
+  function toJson(data: FinancePayloadAll): string {
     return JSON.stringify(data)
   }
 
   /**
    * 把远端 RemoteRecord（module=finance）解密后入 Map；墓碑删除；
    * 版本不回退；解密失败抛异常（与 4b event-rules.ingest 同纪律）。
+   *
+   * v2 扩展：type ∈ {subscription, policy, loan, contract} 时路由到对应 Map；
+   * 解密后立即调 validateV2Payload 兜底（保证入栈前数据合规）。
    */
   function ingest(remote: RemoteRecord): void {
     // 墓碑：按 type 路由删除本地缓存。
@@ -324,16 +417,25 @@ export const useFinanceStore = defineStore('finance', () => {
       accounts.delete(remote.id)
       cards.delete(remote.id)
       txs.delete(remote.id)
+      subscriptions.delete(remote.id)
+      policies.delete(remote.id)
+      loans.delete(remote.id)
+      contracts.delete(remote.id)
       return
     }
     const type = remote.type as FinanceType
-    const target = type === 'account' ? accounts : type === 'card' ? cards : type === 'tx' ? txs : null
+    const target = mapForType(type)
     if (target == null) return // 未知子类型：保留在服务端，不在 UI 暴露
     const existed = target.get(remote.id)
     // 版本不回退：低版本重复到达不覆盖缓存。
     if (existed && existed.version >= remote.version) return
     // 解密（失败抛异常，让上层观测）。
     const data = channel.open(remote.id, remote.module, remote.ciphertext, remote.version)
+    // v2 校验（v1 类型跳过）：失败抛异常（与 4b 同纪律）。
+    if (type === 'subscription' || type === 'policy' || type === 'loan' || type === 'contract') {
+      const r: ValidationResult = validateV2Payload(type, data)
+      if (!r.ok) throw new Error(`远端 v2 ${type} 校验失败: ${r.reason}`)
+    }
     target.set(remote.id, {
       id: remote.id,
       module: FINANCE_MODULE,
@@ -342,13 +444,28 @@ export const useFinanceStore = defineStore('finance', () => {
       createdAt: remote.created_at,
       updatedAt: remote.updated_at,
       deleted: false,
-      data,
+      data: data as FinancePayloadAll,
     })
     since = Math.max(since, remote.updated_at)
   }
 
   /**
-   * 推送单条 CachedFinanceRecord 上行（仅对 type ∈ {account,card,tx}）。
+   * 按 type 路由到对应 Map；v1+v2 共 7 子类型。
+   */
+  function mapForType(type: FinanceType): Map<string, CachedFinanceRecord> | null {
+    switch (type) {
+      case 'account': return accounts
+      case 'card': return cards
+      case 'tx': return txs
+      case 'subscription': return subscriptions
+      case 'policy': return policies
+      case 'loan': return loans
+      case 'contract': return contracts
+    }
+  }
+
+  /**
+   * 推送单条 CachedFinanceRecord 上行（v1+v2 共 7 子类型）。
    * version 严格递增；skipped>0 触发全量补同步，不写假状态。
    *
    * @returns true 表示推送成功并已写本地缓存；false 表示 skipped/失败
@@ -383,20 +500,25 @@ export const useFinanceStore = defineStore('finance', () => {
    * 从持久化通道恢复 entries；首屏 UI 渲染前调用。
    *
    * 幂等 —— 多次调用不会重复注入；hydrated=true 后再次调用直接返回。
+   *
+   * v2 扩展：hydrate 时按子类型还原；schemaVersion=1 时 v2 字段缺失（容错为
+   * 空数组）；schemaVersion=2 时按完整形态还原。
    */
   function hydrate(): void {
     if (hydrated.value) return
     const state = storage.read()
     if (state == null) {
+      schemaVersion.value = 2
       hydrated.value = true
       return
     }
     // schema 版本不匹配 → 按"丢数据"处理（v1 → v2 由 T-migration 接管）。
-    if (state.schemaVersion !== 1) {
+    if (state.schemaVersion !== 1 && state.schemaVersion !== 2) {
       hydrated.value = true
       return
     }
-    // 还原三类条目。
+    schemaVersion.value = state.schemaVersion
+    // 还原 v1 三类条目。
     for (const acc of state.accounts ?? []) {
       accounts.set(acc.id, {
         id: acc.id,
@@ -433,6 +555,55 @@ export const useFinanceStore = defineStore('finance', () => {
         data: tx,
       })
     }
+    // 还原 v2 四子类型（schemaVersion=1 时缺失, 自动视作空数组）。
+    for (const s of state.subscriptions ?? []) {
+      subscriptions.set(s.id, {
+        id: s.id,
+        module: FINANCE_MODULE,
+        type: 'subscription',
+        version: 1,
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+        deleted: false,
+        data: s,
+      })
+    }
+    for (const p of state.policies ?? []) {
+      policies.set(p.id, {
+        id: p.id,
+        module: FINANCE_MODULE,
+        type: 'policy',
+        version: 1,
+        createdAt: p.created_at,
+        updatedAt: p.updated_at,
+        deleted: false,
+        data: p,
+      })
+    }
+    for (const l of state.loans ?? []) {
+      loans.set(l.id, {
+        id: l.id,
+        module: FINANCE_MODULE,
+        type: 'loan',
+        version: 1,
+        createdAt: l.created_at,
+        updatedAt: l.updated_at,
+        deleted: false,
+        data: l,
+      })
+    }
+    for (const c of state.contracts ?? []) {
+      contracts.set(c.id, {
+        id: c.id,
+        module: FINANCE_MODULE,
+        type: 'contract',
+        version: 1,
+        createdAt: c.created_at,
+        updatedAt: c.updated_at,
+        deleted: false,
+        data: c,
+      })
+    }
     hydrated.value = true
   }
 
@@ -440,10 +611,12 @@ export const useFinanceStore = defineStore('finance', () => {
    * 把当前内存状态写入持久化通道（CRUD 后内部自动调用）。
    *
    * 失败不抛错（v1 阶段 localStorage 配额耗尽时静默降级，UI 层不感知）。
+   *
+   * v2 扩展：persist 同步落盘 4 子类型；schemaVersion 升 2。
    */
   function persist(): void {
     const state: PersistedFinanceState = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       accounts: Array.from(accounts.values())
         .filter((r) => !r.deleted)
         .map((r) => r.data as FinanceAccount),
@@ -453,7 +626,18 @@ export const useFinanceStore = defineStore('finance', () => {
       txs: Array.from(txs.values())
         .filter((r) => !r.deleted)
         .map((r) => r.data as FinanceTx),
-      loans: [],
+      subscriptions: Array.from(subscriptions.values())
+        .filter((r) => !r.deleted)
+        .map((r) => r.data as unknown as FinanceSubscription),
+      policies: Array.from(policies.values())
+        .filter((r) => !r.deleted)
+        .map((r) => r.data as unknown as FinancePolicy),
+      loans: Array.from(loans.values())
+        .filter((r) => !r.deleted)
+        .map((r) => r.data as unknown as FinanceLoan),
+      contracts: Array.from(contracts.values())
+        .filter((r) => !r.deleted)
+        .map((r) => r.data as unknown as FinanceContract),
     }
     storage.write(state)
   }
@@ -500,20 +684,25 @@ export const useFinanceStore = defineStore('finance', () => {
   }
 
   /**
-   * 批量推送一组明文 FinancePayload。
+   * 批量推送一组明文 payload（v1+v2 共 7 子类型）。
    *
    * 流程：对每个 payload 走 wrap → pushOne → 写回缓存；skipped>0 触发
    * 全量补同步；最后落盘持久化。
    *
    * 与 4b event-rules.pushChanges 同结构：串行推送，避免版本竞争。
    *
-   * @param payloads 明文 FinancePayload 数组（id 已就位；调用方负责生成）
+   * @param payloads 明文 payload 数组（id 已就位；调用方负责生成）
    */
-  async function pushChanges(payloads: FinancePayload[]): Promise<void> {
+  async function pushChanges(payloads: FinancePayloadAll[]): Promise<void> {
     for (const payload of payloads) {
       const type = payloadTypeOf(payload)
       if (type == null) continue
-      const target = type === 'account' ? accounts : type === 'card' ? cards : txs
+      // v2 子类型校验（兜底）：失败抛异常, 不写本地缓存。
+      if (type === 'subscription' || type === 'policy' || type === 'loan' || type === 'contract') {
+        assertValidV2(type, payload)
+      }
+      const target = mapForType(type)
+      if (target == null) continue
       const existing = target.get(payload.id)
       const rec = wrap(type, payload, existing)
       const ok = await pushOne(rec)
@@ -525,19 +714,25 @@ export const useFinanceStore = defineStore('finance', () => {
   }
 
   /**
-   * 由 FinancePayload 推导出 FinanceType 子类型（运行时类型守卫）。
-   * v2 子类型（policy/subscription/loan/contract）本期不在 store 内编辑。
-   *
+   * 由明文 payload 推导出 FinanceType 子类型（运行时类型守卫）。
    * 判别策略：按必备字段做收窄——
    *   - 含 `last4` → card；
    *   - 含 `account_id` + `amount` + `occurred_at` → tx；
-   *   - 含 `balance` + `currency` + `archived` → account。
+   *   - 含 `balance` + `currency` + `archived` → account；
+   *   - 含 `next_renewal_ts` + `billing_cycle` + `provider` → subscription；
+   *   - 含 `policy_number` + `premium_minor` + `expiry_ts` → policy；
+   *   - 含 `counterparty` + `principal_minor` + `due_ts` + `direction` → loan；
+   *   - 含 `signed_ts` + `end_ts` + `auto_renew` → contract。
    */
-  function payloadTypeOf(payload: FinancePayload): FinanceType | null {
+  function payloadTypeOf(payload: FinancePayloadAll): FinanceType | null {
     const p = payload as unknown as Record<string, unknown>
     if ('last4' in p && typeof p.last4 === 'string') return 'card'
     if ('account_id' in p && 'amount' in p && 'occurred_at' in p) return 'tx'
     if ('balance' in p && 'currency' in p && 'archived' in p) return 'account'
+    if ('next_renewal_ts' in p && 'billing_cycle' in p && 'provider' in p) return 'subscription'
+    if ('policy_number' in p && 'premium_minor' in p && 'expiry_ts' in p) return 'policy'
+    if ('counterparty' in p && 'principal_minor' in p && 'due_ts' in p && 'direction' in p) return 'loan'
+    if ('signed_ts' in p && 'end_ts' in p && 'auto_renew' in p) return 'contract'
     return null
   }
 
@@ -659,6 +854,185 @@ export const useFinanceStore = defineStore('finance', () => {
     await pullAll(since)
   }
 
+  /**
+   * 新建订阅（v2 子类型）。
+   * 校验通过后再写入；推送失败保留本地副本。
+   */
+  function addSubscription(data: FinanceSubscription): void {
+    assertValidV2('subscription', data)
+    const record = wrap('subscription', data)
+    subscriptions.set(record.id, record)
+    persist()
+    void pushChanges([data])
+  }
+
+  /** 更新订阅。 */
+  function updateSubscription(data: FinanceSubscription): void {
+    assertValidV2('subscription', data)
+    const existing = subscriptions.get(data.id)
+    const record = wrap('subscription', data, existing)
+    subscriptions.set(record.id, record)
+    persist()
+    void pushChanges([data])
+  }
+
+  /**
+   * 硬删除订阅（v2 子类型无归档语义 —— 订阅为事件性, 误录后可彻底删除）。
+   * 推送墓碑上行 + 增量回拉。
+   */
+  async function deleteSubscription(id: string): Promise<void> {
+    const existing = subscriptions.get(id)
+    if (!existing) return
+    const version = existing.version + 1
+    const now = Date.now()
+    const res = await channel.push({
+      id,
+      module: FINANCE_MODULE,
+      type: 'subscription',
+      ciphertext: '',
+      version,
+      device_id: 'web',
+      created_at: existing.createdAt,
+      updated_at: now,
+      deleted: true,
+    })
+    if (res.skipped === 0) {
+      subscriptions.delete(id)
+      persist()
+    }
+    since = Math.max(since, res.server_time)
+    await pullAll(since)
+  }
+
+  // ========== CRUD —— 保单（policy, v2） ==========
+
+  function addPolicy(data: FinancePolicy): void {
+    assertValidV2('policy', data)
+    const record = wrap('policy', data)
+    policies.set(record.id, record)
+    persist()
+    void pushChanges([data])
+  }
+
+  function updatePolicy(data: FinancePolicy): void {
+    assertValidV2('policy', data)
+    const existing = policies.get(data.id)
+    const record = wrap('policy', data, existing)
+    policies.set(record.id, record)
+    persist()
+    void pushChanges([data])
+  }
+
+  async function deletePolicy(id: string): Promise<void> {
+    const existing = policies.get(id)
+    if (!existing) return
+    const version = existing.version + 1
+    const now = Date.now()
+    const res = await channel.push({
+      id,
+      module: FINANCE_MODULE,
+      type: 'policy',
+      ciphertext: '',
+      version,
+      device_id: 'web',
+      created_at: existing.createdAt,
+      updated_at: now,
+      deleted: true,
+    })
+    if (res.skipped === 0) {
+      policies.delete(id)
+      persist()
+    }
+    since = Math.max(since, res.server_time)
+    await pullAll(since)
+  }
+
+  // ========== CRUD —— 应收借款（loan, v2） ==========
+
+  function addLoan(data: FinanceLoan): void {
+    assertValidV2('loan', data)
+    const record = wrap('loan', data)
+    loans.set(record.id, record)
+    persist()
+    void pushChanges([data])
+  }
+
+  function updateLoan(data: FinanceLoan): void {
+    assertValidV2('loan', data)
+    const existing = loans.get(data.id)
+    const record = wrap('loan', data, existing)
+    loans.set(record.id, record)
+    persist()
+    void pushChanges([data])
+  }
+
+  async function deleteLoan(id: string): Promise<void> {
+    const existing = loans.get(id)
+    if (!existing) return
+    const version = existing.version + 1
+    const now = Date.now()
+    const res = await channel.push({
+      id,
+      module: FINANCE_MODULE,
+      type: 'loan',
+      ciphertext: '',
+      version,
+      device_id: 'web',
+      created_at: existing.createdAt,
+      updated_at: now,
+      deleted: true,
+    })
+    if (res.skipped === 0) {
+      loans.delete(id)
+      persist()
+    }
+    since = Math.max(since, res.server_time)
+    await pullAll(since)
+  }
+
+  // ========== CRUD —— 合同（contract, v2） ==========
+
+  function addContract(data: FinanceContract): void {
+    assertValidV2('contract', data)
+    const record = wrap('contract', data)
+    contracts.set(record.id, record)
+    persist()
+    void pushChanges([data])
+  }
+
+  function updateContract(data: FinanceContract): void {
+    assertValidV2('contract', data)
+    const existing = contracts.get(data.id)
+    const record = wrap('contract', data, existing)
+    contracts.set(record.id, record)
+    persist()
+    void pushChanges([data])
+  }
+
+  async function deleteContract(id: string): Promise<void> {
+    const existing = contracts.get(id)
+    if (!existing) return
+    const version = existing.version + 1
+    const now = Date.now()
+    const res = await channel.push({
+      id,
+      module: FINANCE_MODULE,
+      type: 'contract',
+      ciphertext: '',
+      version,
+      device_id: 'web',
+      created_at: existing.createdAt,
+      updated_at: now,
+      deleted: true,
+    })
+    if (res.skipped === 0) {
+      contracts.delete(id)
+      persist()
+    }
+    since = Math.max(since, res.server_time)
+    await pullAll(since)
+  }
+
   // ========== 重置 / 测试钩子 ==========
 
   /**
@@ -668,6 +1042,10 @@ export const useFinanceStore = defineStore('finance', () => {
     accounts.clear()
     cards.clear()
     txs.clear()
+    subscriptions.clear()
+    policies.clear()
+    loans.clear()
+    contracts.clear()
     since = 0
     lastSyncAt.value = 0
     hydrated.value = false
@@ -695,6 +1073,10 @@ export const useFinanceStore = defineStore('finance', () => {
     accounts.clear()
     cards.clear()
     txs.clear()
+    subscriptions.clear()
+    policies.clear()
+    loans.clear()
+    contracts.clear()
     hydrated.value = false
     since = 0
   }
@@ -709,6 +1091,10 @@ export const useFinanceStore = defineStore('finance', () => {
     listAccounts,
     listCards,
     listTxs,
+    listSubscriptions,
+    listPolicies,
+    listLoans,
+    listContracts,
     // 查询
     byId,
     // 启动 / 持久化
@@ -729,6 +1115,22 @@ export const useFinanceStore = defineStore('finance', () => {
     addTx,
     updateTx,
     deleteTx,
+    // CRUD 订阅（v2）
+    addSubscription,
+    updateSubscription,
+    deleteSubscription,
+    // CRUD 保单（v2）
+    addPolicy,
+    updatePolicy,
+    deletePolicy,
+    // CRUD 应收借款（v2）
+    addLoan,
+    updateLoan,
+    deleteLoan,
+    // CRUD 合同（v2）
+    addContract,
+    updateContract,
+    deleteContract,
     // 重置
     reset,
     // 测试钩子
