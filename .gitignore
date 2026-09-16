@@ -24,3 +24,16 @@ android/build/
 .idea/
 .vscode/
 .DS_Store
+
+# 临时工作区与构建日志（避免误推）
+/chat/
+*.log
+android/android-gate*.log
+android/assembleDebug*.log
+android/compileDebug*.log
+
+# 规格目录下的门禁/评审产物（保留 .trae/specs/<stage>/spec.md & tasks.md；
+# gating-report.md / review.md 可按需提交，本规则先排除供用户按情况 add）
+.trae/specs/*/gating-report.md
+.trae/specs/*/review.md
+.trae/documents/everything_plan_improvements.md
