@@ -128,9 +128,20 @@
 
 ## Task 3: 附件完整闭环（块存储 + UI 集成）（P0）
 
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: Task 1
+- **Completion Evidence**:
+  - **Pass Condition**: finance_attachment Room 表 + v6→v7 迁移 + AttachmentRepository（upload/download/delete/pull/push）+ records 通道 type=attachment 零新协议 + 双端附件 UI（Web PDF.js/图片预览 + Android SAF/系统查看器）+ 单测 ≥16 用例；五门禁全绿（Android 316/316 + compileDebugKotlin；web 488/488 + vue-tsc 0 + vite build）。
+  - **Status**: `completed`（2026-09-17 提交 `04e1328`，commit 链 `4bd39c0..04e1328`，待推送 main）。
+  - **Completion Evidence**:
+    - TR-3.1：`AttachmentEntity.kt`（finance_attachment 表：id/record_id/mime/size/sha256/encrypted_payload/schema_version/module/created_at/updated_at/dirty/deleted；record_id 索引）+ `AttachmentDao.kt` 11 方法（upsert/getById/observeByRecordId/dirtyList/markDirty/markDeleted 等）；`EveDatabase.kt` version 7 + `MIGRATION_6_7`（CREATE TABLE + INDEX）。注：Entity 的 dirty/deleted 用 Int(0/1) 与既有 FinanceAccountEntity 的 Boolean 风格不同，Repository 内按 Int 口径处理。
+    - TR-3.2：`AttachmentRepository.kt` upload（size>0 / ≤50MB / sha256 64hex 前置校验 → CryptoEnvelope.sealRecord 本地块密文 → AttachmentEntity 双写 → recordsRepository.upsertFinanceAttachment 元数据密文）/ download（openRecord + 端侧 sha256 再校验，不一致 SecurityException）/ delete（markDeleted + tombstone `{"id","deleted":true}`）/ pullAndDecrypt（墓碑优先；非墓碑解元数据 JSON 入 Room，dirty=0）/ pushChanges（dirtyList → records 通道 → markDirty 0）；**零依赖 envelope 扩展**——AAD 仍 `eve:v1:record:{id}:finance:BE(uint64 version)`，type=`attachment` 子标识；`RecordsRepository` 标 `open class` + `upsertFinanceAttachment`/`decryptFinanceAttachment` 标 open（仅供单测桩子类化，生产语义不变）；`FinanceModule.TYPE_ATTACHMENT` 常量；`CollectorWorker` 尾部 financeRepo.pull 后挂 attachment pull+push；`ServiceLocator.attachmentRepo` 懒初始化。
+    - TR-3.3 Web：`web/src/finance/attachment.ts`（uploadFile/downloadFile/deleteFile/sha256Hex/白名单 MIME/50MB 上限；新增依赖 `pdfjs-dist@^4.0.0` 动态 import，worker 走 `new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).href`，首页 canvas 渲染）+ `AttachmentViewer.vue`（PDF/图片/其他三态，下载/删除，naive-ui）。
+    - TR-3.4 双端 UI：Android `AttachmentList.kt`（LazyColumn + 点击系统 ACTION_VIEW 查看，cacheDir 副本 + FileProvider 豁免路径规避 FileUriExposedException）+ `AttachmentUploader.kt`（SAF `ACTION_OPEN_DOCUMENT` 零新 Manifest 权限，takePersistableUriPermission）+ VM `bindAttachmentRepository/addAttachment/removeAttachment/attachmentsByRecordId`（viewModelScope 异步上传，同步返回 pending AttachmentRef）+ Policy/Contract 编辑器附件区 + strings；Web store `attachments/attachmentsByRecordId/attachmentCipherCache` 三索引 + `uploadAttachment` 包装（uploadFile 的 onUploaded 回调回灌元数据）+ `getAttachmentsForRecord` cipher 缺失也返回 + ingest 明文 Uint8Array 三段类型收窄；Policy/Contract 编辑器挂 AttachmentViewer。
+    - TR-3.5：Android `AttachmentRepositoryTest.kt` 8 用例（happy path + 50MB/0 字节/sha256 长度/sha256 非 hex + download 字节一致 + sha256 篡改 SecurityException + tombstone）+ `AttachmentPullDecryptTest.kt` 5 用例（空列表/有效记录入库/墓碑 markDeleted/非 attachment type 跳过/跨 module 跳过）+ `FinanceViewModelAttachmentTest.kt` 4 用例（addAttachment 合法字节/upload 失败转 Error 事件/removeAttachment/Flow 转发）= 17；Web `attachment.spec.ts`（上传/下载/删除/sha256/上限/MIME）+ `AttachmentViewer.spec.ts`（预览/上传集成/删除）。测试基建三处修复：①`testOptions.unitTests.isReturnDefaultValues=true` + `testImplementation(org.json:json:20240303)` 真实实现覆盖 android.jar JSONObject stub（否则链式 put 抛 RuntimeException/NPE）；②`kotlinx-coroutines-test:1.9.0` + 测试内 `Dispatchers.setMain(UnconfinedTestDispatcher())`/resetMain（viewModelScope 无 main looper）；③RecordsRepository 桩从 java.lang.reflect.Proxy（只能代理 interface）改为 open 子类 override。
+    - 门禁：Android `gradlew testDebugUnitTest 316/316`（0 failure / 0 ignored，较 B2 的 299 净增 17 = 8+5+4 全部来自 B3 三个新测试类）+ `compileDebugKotlin 0 error`；Web `vitest 32 files/488 tests`（较 B2 的 461 净增 27）+ `vue-tsc --noEmit exit 0` + `vite build exit 0`（13.88s）。
+    - Diff：commit `04e1328` 28 files / +5520 / -13（11 个 Android 新增文件 + 4 个 Web 新增文件 + 13 个修改文件；临时脚本 `.trae/parse-junit.ps1`、`tmp_calculate_times.ps1` 明确排除未提交）。
 - **Description**:
   - 新建 `android/app/src/main/java/com/everything/eve/data/finance/AttachmentDao.kt`：
     Room 表 `finance_attachment`（`id / record_id / mime / size / 
