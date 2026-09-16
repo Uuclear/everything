@@ -216,6 +216,479 @@ export interface FinanceTx {
 export type FinancePayload = FinanceAccount | FinanceCard | FinanceTx
 
 // -----------------------------------------------------------------------------
+// v2 子类型接口 —— Subscription / Policy / Loan / Contract（stage5-finance-v2 / TR-1.1）
+// -----------------------------------------------------------------------------
+
+/**
+ * 订阅条目（type='subscription'）明文 payload。
+ *
+ * v2 子类型：复用 v1 records 通道 + 同款 envelope（AAD `module="finance"` +
+ * `type="subscription"` 子标识），不新造 envelope。
+ *
+ * 提醒配置走 v1 events 单闹钟链式调度 + `kind="subscription_renewal"` 分支，
+ * 链路扩展点在 Reminders 通道（见 web/src/stores/finance.ts Task 4 TR-4.3）。
+ */
+export interface FinanceSubscription {
+  /** UUID v4 字符串。 */
+  id: string
+  /** schema 版本（v2 固定 2）。 */
+  schema_version: 2
+  /** 订阅名称（≤200 字符）。 */
+  name: string
+  /** 服务商（≤200 字符）。 */
+  provider: string
+  /** 金额（decimal-as-string；与 currency 配对）。 */
+  amount_minor: string
+  /** 货币代码（ISO 4217，默认 CNY）。 */
+  currency: CurrencyCode
+  /** 计费周期。 */
+  billing_cycle: 'monthly' | 'quarterly' | 'yearly' | 'custom_days'
+  /** 自定义周期天数（billing_cycle='custom_days' 时必填，其它为 null）。 */
+  custom_days: number | null
+  /** 起始时刻，Unix 毫秒。 */
+  start_ts: number
+  /** 下次扣费时刻，Unix 毫秒；由 nextSubscriptionRenewal 纯函数计算。 */
+  next_renewal_ts: number
+  /** 续费提醒偏移（分钟；如 [0, 1440] 表示"当日 + 前一天"）。 */
+  reminders: number[]
+  /** 是否启用；false 表示已停用但保留历史。 */
+  active: boolean
+  /** 分类。 */
+  category: 'entertainment' | 'productivity' | 'utility' | 'other'
+  /** 创建时刻。 */
+  created_at: number
+  /** 最后更新时刻。 */
+  updated_at: number
+}
+
+/**
+ * 保单条目（type='policy'）明文 payload。
+ *
+ * 保单号 policy_number 默认加密（policy_number_encrypted=true），
+ * 仅显示末四位或不显示（避免日志泄漏）。
+ *
+ * 附件走 v2 启用的 records 通道 type='attachment' 子标识（见 Task 3）。
+ */
+export interface FinancePolicy {
+  /** UUID v4 字符串。 */
+  id: string
+  /** schema 版本（v2 固定 2）。 */
+  schema_version: 2
+  /** 保单名称（≤200 字符）。 */
+  name: string
+  /** 保单号（≤100 字符；显示时按需截取末 4 位）。 */
+  policy_number: string
+  /** 保单号是否加密存储（默认 true；false 表示明文存档）。 */
+  policy_number_encrypted: boolean
+  /** 保险公司（≤200 字符）。 */
+  provider: string
+  /** 保费（decimal-as-string）。 */
+  premium_minor: string
+  /** 货币代码。 */
+  currency: CurrencyCode
+  /** 计费周期。 */
+  billing_cycle: 'monthly' | 'quarterly' | 'yearly' | 'single'
+  /** 起始时刻。 */
+  start_ts: number
+  /** 到期时刻。 */
+  expiry_ts: number
+  /** 到期提醒偏移（分钟；如 [0, 10080, 43200] 表示"当日 + 7天 + 30天"）。 */
+  reminders: number[]
+  /** 保额（decimal-as-string）。 */
+  coverage_minor: string
+  /** 是否启用。 */
+  active: boolean
+  /** 关联账户 id（如保费自动从某账户扣款）。 */
+  linked_account_id: string | null
+  /** 附件引用列表（v2 启用；走 records 通道 type='attachment'）。 */
+  attachments: AttachmentRef[]
+  /** 创建时刻。 */
+  created_at: number
+  /** 最后更新时刻。 */
+  updated_at: number
+}
+
+/** 应收借款方向。 */
+export type LoanDirection = 'lent' | 'borrowed'
+
+/** 应收借款状态。 */
+export type LoanStatus = 'active' | 'partially_paid' | 'paid' | 'overdue'
+
+/**
+ * 应收借款条目（type='loan'）明文 payload。
+ *
+ * v2 启用时纳入 v1 aggregator 的资产看板（net_assets += lent - borrowed）；
+ * aggregator 入参已留 `loans?: Loan[]`（见 web/src/finance/aggregator.ts T5 修订）。
+ */
+export interface FinanceLoan {
+  /** UUID v4 字符串。 */
+  id: string
+  /** schema 版本（v2 固定 2）。 */
+  schema_version: 2
+  /** 对手方（≤200 字符；不渲染到通知文案）。 */
+  counterparty: string
+  /** 本金（decimal-as-string）。 */
+  principal_minor: string
+  /** 货币代码。 */
+  currency: CurrencyCode
+  /** 借款方向：lent=我借出 / borrowed=我借入。 */
+  direction: LoanDirection
+  /** 放款时刻。 */
+  issue_ts: number
+  /** 到期时刻。 */
+  due_ts: number
+  /** 年化利率（基点 bps；10000 bps = 100%）。 */
+  interest_rate_apy_bps: number
+  /** 状态。 */
+  status: LoanStatus
+  /** 已还金额（decimal-as-string）。 */
+  paid_minor: string
+  /** 到期提醒偏移（分钟）。 */
+  reminders: number[]
+  /** 关联账户 id（可选）。 */
+  linked_account_id: string | null
+  /** 是否计入净资产（默认 true）；借入 false 时仅显示不计入。 */
+  include_in_net_assets: boolean
+  /** 创建时刻。 */
+  created_at: number
+  /** 最后更新时刻。 */
+  updated_at: number
+}
+
+/** 合同 / 发票类型。 */
+export type ContractKind = 'rental' | 'service' | 'purchase' | 'loan' | 'other'
+
+/** 合同状态。 */
+export type ContractStatus = 'active' | 'expired' | 'terminated' | 'renewed'
+
+/**
+ * 合同 / 发票条目（type='contract'）明文 payload。
+ *
+ * contract 不接入 v1 Reminders 通道主流程；notice_deadline_ts 提醒 v3 评估。
+ */
+export interface FinanceContract {
+  /** UUID v4 字符串。 */
+  id: string
+  /** schema 版本（v2 固定 2）。 */
+  schema_version: 2
+  /** 合同标题（≤200 字符）。 */
+  title: string
+  /** 对手方（≤200 字符）。 */
+  counterparty: string
+  /** 合同种类。 */
+  kind: ContractKind
+  /** 金额（decimal-as-string）。 */
+  amount_minor: string
+  /** 货币代码。 */
+  currency: CurrencyCode
+  /** 签约时刻。 */
+  signed_ts: number
+  /** 起始时刻。 */
+  start_ts: number
+  /** 结束时刻。 */
+  end_ts: number
+  /** 是否自动续约。 */
+  auto_renew: boolean
+  /** 提前通知期（天）。 */
+  notice_period_days: number
+  /** 通知截止时刻（Unix 毫秒；由 end_ts - notice_period_days 推算）。 */
+  notice_deadline_ts: number
+  /** 状态。 */
+  status: ContractStatus
+  /** 关联账户 id。 */
+  linked_account_id: string | null
+  /** 附件引用列表（v2 启用；走 records 通道 type='attachment'）。 */
+  attachments: AttachmentRef[]
+  /** 创建时刻。 */
+  created_at: number
+  /** 最后更新时刻。 */
+  updated_at: number
+}
+
+/**
+ * 附件引用（policy / contract 等 v2 记录挂的附件列表项）。
+ *
+ * 实际二进制走 records 通道 type='attachment'；这里只存元数据。
+ */
+export interface AttachmentRef {
+  /** 附件 UUID。 */
+  id: string
+  /** MIME 类型（如 application/pdf / image/jpeg）。 */
+  mime: string
+  /** 文件大小（字节；端侧校验 ≤ 50MB）。 */
+  size: number
+  /** 附件二进制 sha-256（hex 字符串）。 */
+  sha256: string
+}
+
+/**
+ * v2 财务条目明文 payload 联合。
+ *
+ * store / aggregator / 视图层按 `type` 字段做类型收窄；序列化由 envelope 链路
+ * 统一处理（明文 → sealRecord → pushRecords）。
+ */
+export type FinanceV2Payload =
+  | FinanceSubscription
+  | FinancePolicy
+  | FinanceLoan
+  | FinanceContract
+
+/** 全部财务条目明文 payload 联合（v1 三类 + v2 四类）。 */
+export type FinancePayloadAll = FinancePayload | FinanceV2Payload
+
+// -----------------------------------------------------------------------------
+// v2 子类型校验函数（stage5-finance-v2 / TR-1.1）
+// -----------------------------------------------------------------------------
+
+/** v2 子类型 schema_version 常量。 */
+export const FINANCE_V2_SCHEMA_VERSION = 2 as const
+
+/**
+ * v2 校验结果。
+ *
+ * - ok=true → 通过；
+ * - ok=false → 校验失败，`reason` 给出人类可读原因（不含敏感数据）。
+ */
+export type ValidationResult =
+  | { ok: true }
+  | { ok: false; reason: string }
+
+/**
+ * decimal-as-string 校验（金额字段：非负 + 最多 2 位小数 + > 0）。
+ *
+ * 用于 `amount_minor` / `principal_minor` / `premium_minor` / `coverage_minor`
+ * 等"必填金额"字段（值必须 > 0）。`paid_minor`（已还）允许 0，用
+ * `isValidDecimalNonNegative` 替代。
+ */
+export function isValidDecimalString(s: string): boolean {
+  if (typeof s !== 'string' || s.length === 0) return false
+  if (!/^\d+(\.\d{1,2})?$/.test(s)) return false
+  // 禁止全 0（必填金额必须 > 0）
+  return s !== '0' && s !== '0.0' && s !== '0.00'
+}
+
+/**
+ * decimal-as-string 非负校验（非负 + 最多 2 位小数，允许 0）。
+ *
+ * 用于 `paid_minor` / `remaining_minor` 等"累计 / 余量"字段。
+ */
+export function isValidDecimalNonNegative(s: string): boolean {
+  if (typeof s !== 'string' || s.length === 0) return false
+  return /^\d+(\.\d{1,2})?$/.test(s)
+}
+
+/** ISO 4217 三字母代码（粗校验：3 个大写字母）。 */
+export function isValidCurrencyCode(c: string): boolean {
+  return typeof c === 'string' && /^[A-Z]{3}$/.test(c)
+}
+
+/** sha-256 hex 字符串校验（64 个十六进制字符）。 */
+export function isValidSha256Hex(s: string): boolean {
+  return typeof s === 'string' && /^[0-9a-f]{64}$/.test(s)
+}
+
+/** 单文件 ≤ 50MB 限制（端侧校验；超限直接拒收）。 */
+export const ATTACHMENT_MAX_SIZE_BYTES = 50 * 1024 * 1024
+
+/**
+ * 校验订阅条目。
+ *
+ * @returns 校验结果；不抛异常（spec 零知识纪律：日志 / 提示不渲染金额 / 日期数字）。
+ */
+export function validateSubscription(p: FinanceSubscription): ValidationResult {
+  if (p.schema_version !== FINANCE_V2_SCHEMA_VERSION) {
+    return { ok: false, reason: 'schema_version 必须是 2' }
+  }
+  if (!p.id || typeof p.id !== 'string') return { ok: false, reason: 'id 缺失' }
+  if (!p.name || p.name.length === 0 || p.name.length > 200) {
+    return { ok: false, reason: 'name 长度需在 1-200 字符' }
+  }
+  if (!p.provider || p.provider.length === 0 || p.provider.length > 200) {
+    return { ok: false, reason: 'provider 长度需在 1-200 字符' }
+  }
+  if (!isValidDecimalString(p.amount_minor)) {
+    return { ok: false, reason: 'amount_minor 非法' }
+  }
+  if (!isValidCurrencyCode(p.currency)) {
+    return { ok: false, reason: 'currency 必须为 ISO 4217 三字母大写代码' }
+  }
+  const cycles = ['monthly', 'quarterly', 'yearly', 'custom_days'] as const
+  if (!cycles.includes(p.billing_cycle)) {
+    return { ok: false, reason: 'billing_cycle 非法' }
+  }
+  if (p.billing_cycle === 'custom_days') {
+    if (p.custom_days == null || p.custom_days <= 0 || !Number.isInteger(p.custom_days)) {
+      return { ok: false, reason: 'custom_days 在 billing_cycle=custom_days 时必须为正整数' }
+    }
+  } else if (p.custom_days !== null) {
+    return { ok: false, reason: 'custom_days 在非 custom_days 周期时必须为 null' }
+  }
+  if (p.next_renewal_ts < p.start_ts) {
+    return { ok: false, reason: 'next_renewal_ts 必须 >= start_ts' }
+  }
+  if (!Array.isArray(p.reminders) || p.reminders.some((r) => r < 0 || !Number.isInteger(r))) {
+    return { ok: false, reason: 'reminders 必须为非负整数数组（分钟偏移）' }
+  }
+  return { ok: true }
+}
+
+/**
+ * 校验保单条目。
+ */
+export function validatePolicy(p: FinancePolicy): ValidationResult {
+  if (p.schema_version !== FINANCE_V2_SCHEMA_VERSION) {
+    return { ok: false, reason: 'schema_version 必须是 2' }
+  }
+  if (!p.id || typeof p.id !== 'string') return { ok: false, reason: 'id 缺失' }
+  if (!p.name || p.name.length === 0 || p.name.length > 200) {
+    return { ok: false, reason: 'name 长度需在 1-200 字符' }
+  }
+  if (!p.policy_number || p.policy_number.length > 100) {
+    return { ok: false, reason: 'policy_number 长度需在 1-100 字符' }
+  }
+  if (!p.provider || p.provider.length === 0 || p.provider.length > 200) {
+    return { ok: false, reason: 'provider 长度需在 1-200 字符' }
+  }
+  if (!isValidDecimalString(p.premium_minor)) {
+    return { ok: false, reason: 'premium_minor 非法' }
+  }
+  if (!isValidCurrencyCode(p.currency)) {
+    return { ok: false, reason: 'currency 必须为 ISO 4217 三字母大写代码' }
+  }
+  const cycles = ['monthly', 'quarterly', 'yearly', 'single'] as const
+  if (!cycles.includes(p.billing_cycle)) {
+    return { ok: false, reason: 'billing_cycle 非法' }
+  }
+  if (p.expiry_ts < p.start_ts) {
+    return { ok: false, reason: 'expiry_ts 必须 >= start_ts' }
+  }
+  if (!isValidDecimalString(p.coverage_minor)) {
+    return { ok: false, reason: 'coverage_minor 非法' }
+  }
+  // 附件元数据校验
+  for (const a of p.attachments ?? []) {
+    if (!isValidSha256Hex(a.sha256)) return { ok: false, reason: 'attachment.sha256 非法' }
+    if (a.size <= 0 || a.size > ATTACHMENT_MAX_SIZE_BYTES) {
+      return { ok: false, reason: 'attachment.size 超 50MB 或非正' }
+    }
+    if (!a.mime || typeof a.mime !== 'string') return { ok: false, reason: 'attachment.mime 缺失' }
+  }
+  if (!Array.isArray(p.reminders) || p.reminders.some((r) => r < 0 || !Number.isInteger(r))) {
+    return { ok: false, reason: 'reminders 必须为非负整数数组（分钟偏移）' }
+  }
+  return { ok: true }
+}
+
+/**
+ * 校验应收借款条目。
+ */
+export function validateLoan(p: FinanceLoan): ValidationResult {
+  if (p.schema_version !== FINANCE_V2_SCHEMA_VERSION) {
+    return { ok: false, reason: 'schema_version 必须是 2' }
+  }
+  if (!p.id || typeof p.id !== 'string') return { ok: false, reason: 'id 缺失' }
+  if (!p.counterparty || p.counterparty.length === 0 || p.counterparty.length > 200) {
+    return { ok: false, reason: 'counterparty 长度需在 1-200 字符' }
+  }
+  if (!isValidDecimalString(p.principal_minor)) {
+    return { ok: false, reason: 'principal_minor 非法' }
+  }
+  if (!isValidCurrencyCode(p.currency)) {
+    return { ok: false, reason: 'currency 必须为 ISO 4217 三字母大写代码' }
+  }
+  if (p.direction !== 'lent' && p.direction !== 'borrowed') {
+    return { ok: false, reason: 'direction 非法' }
+  }
+  if (p.due_ts < p.issue_ts) {
+    return { ok: false, reason: 'due_ts 必须 >= issue_ts' }
+  }
+  if (!Number.isInteger(p.interest_rate_apy_bps) || p.interest_rate_apy_bps < 0) {
+    return { ok: false, reason: 'interest_rate_apy_bps 必须为非负整数' }
+  }
+  const statuses = ['active', 'partially_paid', 'paid', 'overdue'] as const
+  if (!statuses.includes(p.status)) return { ok: false, reason: 'status 非法' }
+  // paid_minor 允许 0（未还款），用 isValidDecimalNonNegative
+  if (!isValidDecimalNonNegative(p.paid_minor)) {
+    return { ok: false, reason: 'paid_minor 非法' }
+  }
+  // 已还本金不能超过本金
+  if (Number(p.paid_minor) > Number(p.principal_minor)) {
+    return { ok: false, reason: 'paid_minor 不能超过 principal_minor' }
+  }
+  if (!Array.isArray(p.reminders) || p.reminders.some((r) => r < 0 || !Number.isInteger(r))) {
+    return { ok: false, reason: 'reminders 必须为非负整数数组（分钟偏移）' }
+  }
+  return { ok: true }
+}
+
+/**
+ * 校验合同 / 发票条目。
+ */
+export function validateContract(p: FinanceContract): ValidationResult {
+  if (p.schema_version !== FINANCE_V2_SCHEMA_VERSION) {
+    return { ok: false, reason: 'schema_version 必须是 2' }
+  }
+  if (!p.id || typeof p.id !== 'string') return { ok: false, reason: 'id 缺失' }
+  if (!p.title || p.title.length === 0 || p.title.length > 200) {
+    return { ok: false, reason: 'title 长度需在 1-200 字符' }
+  }
+  if (!p.counterparty || p.counterparty.length === 0 || p.counterparty.length > 200) {
+    return { ok: false, reason: 'counterparty 长度需在 1-200 字符' }
+  }
+  const kinds = ['rental', 'service', 'purchase', 'loan', 'other'] as const
+  if (!kinds.includes(p.kind)) return { ok: false, reason: 'kind 非法' }
+  if (!isValidDecimalString(p.amount_minor)) {
+    return { ok: false, reason: 'amount_minor 非法' }
+  }
+  if (!isValidCurrencyCode(p.currency)) {
+    return { ok: false, reason: 'currency 必须为 ISO 4217 三字母大写代码' }
+  }
+  if (p.end_ts < p.start_ts) {
+    return { ok: false, reason: 'end_ts 必须 >= start_ts' }
+  }
+  if (!Number.isInteger(p.notice_period_days) || p.notice_period_days < 0) {
+    return { ok: false, reason: 'notice_period_days 必须为非负整数' }
+  }
+  // notice_deadline_ts 应 = end_ts - notice_period_days * 86400000
+  const expected = p.end_ts - p.notice_period_days * 86400000
+  if (p.notice_deadline_ts !== expected) {
+    return { ok: false, reason: 'notice_deadline_ts 必须等于 end_ts - notice_period_days * 86400000' }
+  }
+  const statuses = ['active', 'expired', 'terminated', 'renewed'] as const
+  if (!statuses.includes(p.status)) return { ok: false, reason: 'status 非法' }
+  // 附件元数据校验（同 policy）
+  for (const a of p.attachments ?? []) {
+    if (!isValidSha256Hex(a.sha256)) return { ok: false, reason: 'attachment.sha256 非法' }
+    if (a.size <= 0 || a.size > ATTACHMENT_MAX_SIZE_BYTES) {
+      return { ok: false, reason: 'attachment.size 超 50MB 或非正' }
+    }
+    if (!a.mime || typeof a.mime !== 'string') return { ok: false, reason: 'attachment.mime 缺失' }
+  }
+  return { ok: true }
+}
+
+/**
+ * v2 子类型校验统一入口（按 type 路由）。
+ */
+export function validateV2Payload(
+  type: FinanceType,
+  payload: unknown,
+): ValidationResult {
+  switch (type) {
+    case 'subscription':
+      return validateSubscription(payload as FinanceSubscription)
+    case 'policy':
+      return validatePolicy(payload as FinancePolicy)
+    case 'loan':
+      return validateLoan(payload as FinanceLoan)
+    case 'contract':
+      return validateContract(payload as FinanceContract)
+    default:
+      return { ok: false, reason: `不支持的 type=${String(type)}` }
+  }
+}
+
+// -----------------------------------------------------------------------------
 // 聚合视图类型 —— DashboardSnapshot / MonthlyReport / BudgetStatus
 // -----------------------------------------------------------------------------
 

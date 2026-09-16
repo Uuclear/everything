@@ -409,11 +409,11 @@ v1 仅启用前两类写入；订阅 / 保单 / 借款三类留 v2。
 
 ---
 
-## 7. v2 钩子说明
+## 7. v2 子类型（财务二版 stage5-finance-v2）
 
-v2 扩展模块（保单 / 订阅 / 应收借款 / 合同发票）本期**仅占位**，不下发编辑器
-与详情页。`schema_version=1` 字段保留；类型枚举常量预留；编辑器入口灰度
-开关（v1 隐藏）；提醒枚举预留 5 类（v1 仅启用前两类）。
+阶段 5 v2 在 v1 三类基础上扩展 4 子类型：**Subscription / Policy / Loan /
+Contract**。本期 v2 已落地数据契约 + 校验函数（[TR-1.1](#) / [TR-2.7](#)），
+编辑器 / 详情页 / 仪表盘卡片随后续批次展开。
 
 ### 7.1 类型常量（FinanceType）
 
@@ -422,41 +422,147 @@ v2 扩展模块（保单 / 订阅 / 应收借款 / 合同发票）本期**仅占
 | `ACCOUNT` | ✅ | ✅ |
 | `CARD` | ✅ | ✅ |
 | `TX` | ✅ | ✅ |
-| `POLICY`（保单） | ⏳ 占位 | ✅ |
-| `SUBSCRIPTION`（订阅） | ⏳ 占位 | ✅ |
-| `LOAN`（应收 / 借款） | ⏳ 占位 | ✅ |
-| `CONTRACT`（合同 / 发票） | ⏳ 占位 | ✅ |
+| `POLICY`（保单） | ⏳ v1 占位 | ✅ v2 启用 |
+| `SUBSCRIPTION`（订阅） | ⏳ v1 占位 | ✅ v2 启用 |
+| `LOAN`（应收 / 借款） | ⏳ v1 占位 | ✅ v2 启用 |
+| `CONTRACT`（合同 / 发票） | ⏳ v1 占位 | ✅ v2 启用 |
 
-### 7.2 schema_version=1 保留
+v2 启用时，类型枚举常量无需新增；4 子类型即 `FinanceType` 常量后 4 位。
 
-所有 v1 条目（account / card / tx）明文 payload 顶部保留 `schema_version=1`
-字段（int，固定 1），便于 v2 启用时按 version 路由扩展字段。
+### 7.2 schema_version
 
-### 7.3 编辑器接入点
+v1 条目（account / card / tx）明文 payload 顶部保留 `schema_version=1`
+字段；v2 4 子类型明文 payload 顶部固定 `schema_version=2`。解码器按
+version 路由扩展字段，向前兼容。
 
-v2 启用时按同款链路扩展：
+### 7.3 v2 子类型字段表（schema 真理源）
 
-| 接入点 | v1 位置 | v2 扩展方式 |
+#### 7.3.1 Subscription（订阅）
+
+| 字段 | 类型 | 备注 |
 |---|---|---|
-| Web 路由 | `Routes.FINANCE` | 新增 `Routes.FINANCE_POLICY` 等 |
-| Web store | `web/src/stores/finance.ts`（Pinia） | 扩展同款 `upsert / delete / list / byId` 链路 |
-| 编辑器组件 | `AccountEditorDialog.vue` / `CardEditorDialog.vue` / `TxEditorDialog.vue` | 新增 `PolicyEditorDialog.vue` 等 |
-| Android Room DAO | `FinanceAccountDao` / `FinanceCardDao` / `FinanceTxDao` | 新增 `FinancePolicyDao` 等 |
-| Android Room 表 | `finance_account` / `finance_card` / `finance_tx` | 新增 `finance_policy` 等 |
-| Android Repository | `FinanceRepository` | 内部已留扩展点（不强制运行） |
-| 提醒枚举 | 5 类 `ref_kind` | 启用后三类（`subscription_renewal` / `policy_expiry` / `loan_due`） |
+| `id` | string (UUID v4) | — |
+| `schema_version` | int (=2) | — |
+| `name` | string (≤200) | 订阅名称 |
+| `provider` | string (≤200) | 服务商 |
+| `amount_minor` | string (decimal-as-string) | 续费金额 |
+| `currency` | string (ISO 4217, 3 大写字母) | 默认 CNY |
+| `billing_cycle` | `'monthly' \| 'quarterly' \| 'yearly' \| 'custom_days'` | — |
+| `custom_days` | number \| null | 仅 custom_days 时必填 |
+| `start_ts` / `next_renewal_ts` | number (Unix 毫秒) | 下次扣费由 `nextSubscriptionRenewal` 纯函数计算 |
+| `reminders` | number[] (分钟偏移, 非负整数) | 走 v1 events 单闹钟链 |
+| `active` | boolean | — |
+| `category` | `'entertainment' \| 'productivity' \| 'utility' \| 'other'` | — |
+| `created_at` / `updated_at` | number (Unix 毫秒) | — |
 
-### 7.4 未来增强（非 v2 立即启用）
+#### 7.3.2 Policy（保单）
 
-- 附件上传（合同 / 发票 / 保单 PDF / 扫描件）：依赖阶段 7+ 附件能力前置；
+| 字段 | 类型 | 备注 |
+|---|---|---|
+| `id` | string (UUID v4) | — |
+| `schema_version` | int (=2) | — |
+| `name` | string (≤200) | 保单名称 |
+| `policy_number` | string (≤100) | 保单号 |
+| `policy_number_encrypted` | boolean (默认 true) | 显示时按需截取末 4 位 |
+| `provider` | string (≤200) | 保险公司 |
+| `premium_minor` / `coverage_minor` | string (decimal-as-string) | 保费 / 保额 |
+| `currency` | string | — |
+| `billing_cycle` | `'monthly' \| 'quarterly' \| 'yearly' \| 'single'` | — |
+| `start_ts` / `expiry_ts` | number (Unix 毫秒) | expiry 必须 >= start |
+| `reminders` | number[] | 到期提醒偏移（默认 `[0, 10080, 43200]`） |
+| `active` | boolean | — |
+| `linked_account_id` | string \| null | 关联账户 |
+| `attachments` | `AttachmentRef[]` | v2 启用，详见 §7.4 |
+
+#### 7.3.3 Loan（应收 / 借款）
+
+| 字段 | 类型 | 备注 |
+|---|---|---|
+| `id` | string (UUID v4) | — |
+| `schema_version` | int (=2) | — |
+| `counterparty` | string (≤200, 不渲染通知文案) | 对手方 |
+| `principal_minor` / `paid_minor` | string (decimal-as-string) | 本金 / 已还（≤ principal） |
+| `currency` | string | — |
+| `direction` | `'lent' \| 'borrowed'` | 我借出 / 我借入 |
+| `issue_ts` / `due_ts` | number (Unix 毫秒) | due >= issue |
+| `interest_rate_apy_bps` | number (非负整数) | 10000 bps = 100% |
+| `status` | `'active' \| 'partially_paid' \| 'paid' \| 'overdue'` | — |
+| `reminders` | number[] | 到期提醒偏移 |
+| `linked_account_id` | string \| null | — |
+| `include_in_net_assets` | boolean | 净资产聚合开关（默认 true） |
+| `created_at` / `updated_at` | number | — |
+
+**资产看板聚合**：aggregator 入参新增 `loans: LoanLike[]`，净资产计算
+`net_assets += lent - borrowed`（按主币种折算，v2 启用多币种时由 T5
+汇率包介入）。
+
+#### 7.3.4 Contract（合同 / 发票）
+
+| 字段 | 类型 | 备注 |
+|---|---|---|
+| `id` | string (UUID v4) | — |
+| `schema_version` | int (=2) | — |
+| `title` / `counterparty` | string (≤200) | — |
+| `kind` | `'rental' \| 'service' \| 'purchase' \| 'loan' \| 'other'` | — |
+| `amount_minor` | string (decimal-as-string) | 合同金额 |
+| `currency` | string | — |
+| `signed_ts` / `start_ts` / `end_ts` | number (Unix 毫秒) | end >= start |
+| `auto_renew` | boolean | — |
+| `notice_period_days` | number (非负整数) | 提前通知期（天） |
+| `notice_deadline_ts` | number (Unix 毫秒) | **必须等于 `end_ts - notice_period_days * 86400000`** |
+| `status` | `'active' \| 'expired' \| 'terminated' \| 'renewed'` | — |
+| `linked_account_id` | string \| null | — |
+| `attachments` | `AttachmentRef[]` | v2 启用，详见 §7.4 |
+
+**提醒**：contract 不接入 v1 Reminders 通道主流程；`notice_deadline_ts`
+触发评估列入 v3。
+
+### 7.4 附件元数据（AttachmentRef）
+
+v2 启用后，policy / contract 可挂附件。**二进制走 records 通道 type=
+'attachment' 子标识 + AAD `module="finance" + type + attachment_id`**，
+**复用** v1 records 通道，不新造独立协议。
+
+| 字段 | 类型 | 备注 |
+|---|---|---|
+| `id` | string (UUID v4) | 附件唯一 id |
+| `mime` | string | MIME 类型 |
+| `size` | number (字节) | 端侧校验 ≤ 50 MB；**超限直接拒收，不压缩 / 不分块** |
+| `sha256` | string (64 hex) | 二进制 sha-256 |
+
+### 7.5 校验函数（客户端纯函数层）
+
+- **Web**：`web/src/finance/types.ts` 导出 `validateSubscription /
+  validatePolicy / validateLoan / validateContract / validateV2Payload`；
+- **Android**：`android/app/src/main/java/com/everything/eve/finance/
+  FinanceRecords.kt` 导出 `FinanceRecords.validateSubscription / ...` +
+  `ValidationResult` sealed class。
+- 校验函数**不抛异常**，返回 `{ok: true} | {ok: false, reason}`；
+  `reason` **不含敏感数据**（金额 / 日期 / 账号数字），仅给"字段级错
+  误类别"，避免日志泄漏。
+- **幂等性**：合法入参不会被修改（单测覆盖）。
+- **三端契约**：同口径校验逻辑；待 finance.schema.json v2 草稿到位后
+  以 schema 为真理源校核。
+
+### 7.6 接入点（编辑器 / store / Room / 路由 / 仪表盘）
+
+| 接入点 | v2 扩展方式 |
+|---|---|
+| Web 路由 | `Routes.FINANCE_POLICY / _SUBSCRIPTION / _LOAN / _CONTRACT` |
+| Web store | `web/src/stores/finance.ts` 同款 `upsert / delete / list / byId` 链路 |
+| Web 编辑器 | `PolicyEditorDialog.vue` / `SubscriptionEditorDialog.vue` / `LoanEditorDialog.vue` / `ContractEditorDialog.vue` |
+| Android Room DAO | `FinancePolicyDao` / `FinanceSubscriptionDao` / `FinanceLoanDao` / `FinanceContractDao` |
+| Android Room 表 | `finance_policy / _subscription / _loan / _contract`（Room 迁移 v6 → v7） |
+| Android Repository | `FinanceRepository`（v2 启用后联动 records 通道 type='attachment'） |
+| 提醒枚举 | 启用后三类（`subscription_renewal / policy_expiry / loan_due`），**预算告警不接入 Reminders 通道**（仅 toast/banner） |
+
+### 7.7 v3 候选（非 v2 立即启用）
+
+- loan 分期扣款场景（`repayment_installment`，总到期 `loan_due` v2 已覆盖）；
+- 投资账户自动同步 / 自动再平衡（券商 API 直连）；
+- 合同 `notice_deadline_ts` 提醒（走 v2 评估，v3 实施）；
 - 银行 API / 银联开放接口直连同步；
-- 多币种 + 离线加密汇率包；
-- 投资账户实时行情；
-- 预算硬约束 + 超支告警 / SSE 推送；
-- AI 联动记账 + Agent 工具调用；
-- 应收借款 / 人情往来联动（与人际家庭模块打通）；
-- 净资产趋势图 + 现金流桑基图；
-- Web 端浏览器通知（Web Notification API 用户授权后接入）。
+- Web 端生物识别解锁（如 TouchID / FaceID）。
 
 ---
 
