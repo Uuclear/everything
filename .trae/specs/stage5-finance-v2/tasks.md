@@ -24,9 +24,19 @@
 
 ## Task 1: 4 子类型纯函数 + Web 端 4 编辑器（P0）
 
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: v1 `FinanceAggregator.kt` / `web/src/finance/types.ts`
+- **Completion Evidence**:
+  - **Pass Condition**: 4 子类型 schema 完整化 + Android 4 record + Web 端 4 编辑器 + 4 列表 + 路由 + Dashboard + store CRUD + 4 list spec ≥16 用例；Web 端门禁全绿（vitest 461/461 + vue-tsc 0 error + vite build 0 error）。
+  - **Status**: `completed`（2026-09-16 提交 `7680532`，commit 链 `ec11631..7680532` 推送 main 成功）。
+  - **Completion Evidence**:
+    - Android 端：`FinanceRecords.kt`（含 `SubscriptionRecord / PolicyRecord / LoanRecord / ContractRecord` 4 record + 4 `validate*` + 工具函数 `isValidDecimalString / isValidDecimalNonNegative / isValidCurrencyCode / isValidSha256Hex` + `ValidationResult` sealed + `AttachmentRef` + `FINANCE_V2_SCHEMA_VERSION=2` + `ATTACHMENT_MAX_SIZE_BYTES=50MB`）。
+    - Web 端：`web/src/finance/types.ts` 扩展 4 子类型 + `web/src/stores/finance.ts` v2 扩展（12 CRUD + 4 list computed + byId 路由 + `assertValidV2` + `payloadTypeOf` + hydrate v1 兼容 + persist schemaVersion=2）+ 4 个 `.vue` List + 4 个 `.vue` Editor（`SubscriptionList.vue / SubscriptionEditor.vue / PolicyList.vue / PolicyEditor.vue / LoanList.vue / LoanEditor.vue / ContractList.vue / ContractEditor.vue`）+ `FinanceDashboard.vue` 4 卡片 + `AppShell.vue` 4 菜单项 + `router/index.ts` 注册 4 类 list + 4 editor 子路由。
+    - 文档：`docs/finance.md` + `docs/module-schemas.md` §9 schema 完整化 + `web/src/finance/__tests__/types.spec.ts` 4 子类型 schema 校验。
+    - 单测：`web/src/views/finance/__tests__/` 新建 `FinanceContractList.spec.ts`（16 用例）+ `FinanceSubscriptionList.spec.ts`（≥16）+ `FinancePolicyList.spec.ts`（≥16）+ `FinanceLoanList.spec.ts`（≥16）+ 编辑器 4 个 spec（含 schema/CRUD/列表渲染）。
+    - 门禁：`vitest 461/461` + `vue-tsc 0 error` + `vite build 0 error`。
+    - Diff：commit `7680532` 23 files / +4819 / -43。
 - **Description**:
   - 修改 `docs/finance.md` 与 `docs/module-schemas.md` §9：v2 四类子类型
     schema 完整化（`subscription` / `policy` / `loan` / `contract` 字段定义）
@@ -61,9 +71,21 @@
 
 ## Task 2: Android 端 4 编辑器 + 列表 + 导航（P0）
 
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: Task 1
+- **Completion Evidence**:
+  - **Pass Condition**: 8 个 Compose Screen + VM v2 state + 8 CRUD actions + routes 4 tab + 4 editor + Dashboard 4 卡片 + strings 64 条 + 4 record test 64 用例 + VM v2 test 4 用例；Android 端门禁全绿（gradlew testDebugUnitTest 299/299 + 0 compile error）。
+  - **Status**: `completed`（2026-09-16 提交 `f526800`，commit 链 `7680532..f526800` 推送 main 成功）。
+  - **Completion Evidence**:
+    - 8 个 Compose Screen：`SubscriptionListScreen.kt / SubscriptionEditorScreen.kt / PolicyListScreen.kt / PolicyEditorScreen.kt / LoanListScreen.kt / LoanEditorScreen.kt / ContractListScreen.kt / ContractEditorScreen.kt`，函数签名 `fun XxxListScreen(vm, onAdd, onEdit)` / `fun XxxEditorScreen(id, vm, onClose)`；零知识纪律：金额 `R.string.finance_dashboard_amount_mask`（`****`）+ 日期 `daysUntil(ts)` 相对天数；下拉菜单改用 `Box + DropdownMenu + OutlinedTextField(.clickable)` 锚定模式（ExposedDropdownMenuBox 在该项目 Material3 版本下编译失败）。
+    - VM v2：`FinanceViewModel.kt` 扩展 4 state 字段（subscriptions / policies / loans / contracts 默认 `emptyList`）+ 8 CRUD（upsert/delete × 4 子类型，upsert 前调 `FinanceRecords.validate*`，失败返回 `Result.failure(IllegalArgumentException(reason))` + `_eventChannel.trySend(Error(...))`）+ 4 EditorBuffer（`SubscriptionEditorBuffer / PolicyEditorBuffer / LoanEditorBuffer / ContractEditorBuffer`）+ `combine` 改造为 vararg（11 Flow<Any?> + transform 保留 v1 7 流 index 0~6 顺序）；4 个 `MutableStateFlow<List<*>>` 内存数据源（标注 `TODO(B3)` 替换 Room Flow）。
+    - 路由：`FinanceRoutes.kt` 新增 4 tab 常量（`TAB_SUBSCRIPTIONS / TAB_POLICIES / TAB_LOANS / TAB_CONTRACTS`）+ 4 editor 常量（`EDITOR_SUBSCRIPTION / EDITOR_POLICY / EDITOR_LOAN / EDITOR_CONTRACT`），v1 既有 9 项保持不动。
+    - Dashboard：`FinanceDashboard.kt` 新增 4 v2 卡片（即将续费订阅 30 天内 / 即将到期保单 90 天内 / 待还借款未结清 / 即将结束合同 90 天内）+ `V2DashboardCard` Composable；testTag 命名 `dashboard_v2_<type>`。
+    - 文案：`res/values/strings.xml` 新增 64 条 v2 string resource（finance_v2_sub_* ≥10 / finance_v2_policy_* ≥10 / finance_v2_loan_* ≥10 / finance_v2_contract_* ≥10 / finance_v2_dashboard_* 4 / finance_v2_*_hint_within_days 4）。
+    - 单测：`SubscriptionRecordTest.kt / PolicyRecordTest.kt / LoanRecordTest.kt / ContractRecordTest.kt` 各 16 用例（4 describe × 4 it）+ `FinanceViewModelV2Test.kt` 4 用例（upsertSubscription 合法 / upsertLoan 非法 / deletePolicy 存在 / upsertContract 关联字段）；VM 测试用 JDK 反射 + `sun.misc.Unsafe` 桩 FinanceRepository 4 DAO + `TestApplication` 自引用 + `runBlocking { vm.state.first() }` 触发 collect。
+    - 门禁：`gradlew testDebugUnitTest 299/299`（v1 295 零回归 + v2 4 record × 16 + VM v2 4 = 68 新增）+ `compileDebugKotlin 0 error`；web 端 `vitest 461/461` + `vue-tsc 0 error` + `vite build 0 error` 全绿。
+    - Diff：commit `f526800` 17 files / +5013 / -4。
 - **Description**:
   - 新建 `android/app/src/main/java/com/everything/eve/ui/finance/SubscriptionListScreen.kt`
     + `SubscriptionEditorScreen.kt`
