@@ -1,0 +1,660 @@
+{
+  "comment": "阶段 4b — expand.ts 跨端共享测试 fixture（tasks.md Task 2 / TR-2.2）。",
+  "tz_anchor": "本机 CST (UTC+8) 锚定；spec tz_mode=local 即此语义。Android 镜像（Task 3）默认亦用 ZoneId.systemDefault()，大陆设备同 +08:00 时三端输出一致；非大陆设备需在测试入口 setProperty('user.timezone','Asia/Shanghai')。",
+  "ts_anchor_comment": "所有 from/to/start_ts/end_ts 以毫秒为单位；构造方式见 web/src/events/expand.test.ts 顶部 p() 工具（CST = UTC+8，本地 y/m/d h:mi → Date.UTC(y, m-1, d, h-8, mi)）。",
+  "cases": [
+    {
+      "name": "single-event-in-window",
+      "rule": {
+        "id": "ev-single-1",
+        "title": "单次事件-在窗口内",
+        "start_ts": 1767229200000,
+        "end_ts": 1767232800000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "blue",
+        "reminders": [15],
+        "rrule": null,
+        "exdates": []
+      },
+      "window": { "from": 1767196800000, "to": 1767283200000 },
+      "expected": [
+        {
+          "instance_id": "ev-single-1:1767229200000#0",
+          "rule_id": "ev-single-1",
+          "start_ts": 1767229200000,
+          "end_ts": 1767232800000,
+          "all_day": false,
+          "color": "blue",
+          "title": "单次事件-在窗口内",
+          "original_start_ts": 1767229200000
+        }
+      ]
+    },
+    {
+      "name": "single-event-out-of-window-before",
+      "rule": {
+        "id": "ev-single-2",
+        "title": "单次事件-窗口前",
+        "start_ts": 1767229200000,
+        "end_ts": 1767232800000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "green",
+        "reminders": [],
+        "rrule": null,
+        "exdates": []
+      },
+      "window": { "from": 1767283200000, "to": 1767369600000 },
+      "expected": []
+    },
+    {
+      "name": "single-event-out-of-window-after",
+      "rule": {
+        "id": "ev-single-3",
+        "title": "单次事件-窗口后",
+        "start_ts": 1769817600000,
+        "end_ts": 1769821200000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "red",
+        "reminders": [],
+        "rrule": null,
+        "exdates": []
+      },
+      "window": { "from": 1767196800000, "to": 1767283200000 },
+      "expected": []
+    },
+    {
+      "name": "single-event-partial-window",
+      "rule": {
+        "id": "ev-single-4",
+        "title": "单次事件-部分窗口（事件开始早于 window.from）",
+        "start_ts": 1767229200000,
+        "end_ts": 1767232800000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "amber",
+        "reminders": [0],
+        "rrule": null,
+        "exdates": []
+      },
+      "window": { "from": 1767232800000, "to": 1767283200000 },
+      "expected": []
+    },
+    {
+      "name": "daily-3-occurrences-no-exdate",
+      "rule": {
+        "id": "ev-daily-1",
+        "title": "每日 9:00，无 exdate",
+        "start_ts": 1767229200000,
+        "end_ts": 1767232800000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "violet",
+        "reminders": [0, 15],
+        "rrule": { "freq": "DAILY", "interval": 1, "end": { "kind": "never" } },
+        "exdates": []
+      },
+      "window": { "from": 1767196800000, "to": 1767456000000 },
+      "expected": [
+        {
+          "instance_id": "ev-daily-1:1767229200000#0",
+          "rule_id": "ev-daily-1",
+          "start_ts": 1767229200000,
+          "end_ts": 1767232800000,
+          "all_day": false,
+          "color": "violet",
+          "title": "每日 9:00，无 exdate",
+          "original_start_ts": 1767229200000
+        },
+        {
+          "instance_id": "ev-daily-1:1767229200000#1",
+          "rule_id": "ev-daily-1",
+          "start_ts": 1767315600000,
+          "end_ts": 1767319200000,
+          "all_day": false,
+          "color": "violet",
+          "title": "每日 9:00，无 exdate",
+          "original_start_ts": 1767229200000
+        },
+        {
+          "instance_id": "ev-daily-1:1767229200000#2",
+          "rule_id": "ev-daily-1",
+          "start_ts": 1767402000000,
+          "end_ts": 1767405600000,
+          "all_day": false,
+          "color": "violet",
+          "title": "每日 9:00，无 exdate",
+          "original_start_ts": 1767229200000
+        }
+      ]
+    },
+    {
+      "name": "daily-with-interval-2",
+      "rule": {
+        "id": "ev-daily-i2",
+        "title": "每日 隔天",
+        "start_ts": 1767229200000,
+        "end_ts": 1767232800000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "pink",
+        "reminders": [],
+        "rrule": { "freq": "DAILY", "interval": 2, "end": { "kind": "never" } },
+        "exdates": []
+      },
+      "window": { "from": 1767196800000, "to": 1767888000000 },
+      "expected": [
+        {
+          "instance_id": "ev-daily-i2:1767229200000#0",
+          "rule_id": "ev-daily-i2",
+          "start_ts": 1767229200000,
+          "end_ts": 1767232800000,
+          "all_day": false,
+          "color": "pink",
+          "title": "每日 隔天",
+          "original_start_ts": 1767229200000
+        },
+        {
+          "instance_id": "ev-daily-i2:1767229200000#1",
+          "rule_id": "ev-daily-i2",
+          "start_ts": 1767402000000,
+          "end_ts": 1767405600000,
+          "all_day": false,
+          "color": "pink",
+          "title": "每日 隔天",
+          "original_start_ts": 1767229200000
+        },
+        {
+          "instance_id": "ev-daily-i2:1767229200000#2",
+          "rule_id": "ev-daily-i2",
+          "start_ts": 1767574800000,
+          "end_ts": 1767578400000,
+          "all_day": false,
+          "color": "pink",
+          "title": "每日 隔天",
+          "original_start_ts": 1767229200000
+        },
+        {
+          "instance_id": "ev-daily-i2:1767229200000#3",
+          "rule_id": "ev-daily-i2",
+          "start_ts": 1767747600000,
+          "end_ts": 1767751200000,
+          "all_day": false,
+          "color": "pink",
+          "title": "每日 隔天",
+          "original_start_ts": 1767229200000
+        }
+      ]
+    },
+    {
+      "name": "weekly-monday-4-occurrences",
+      "rule": {
+        "id": "ev-weekly-mo",
+        "title": "每周一",
+        "start_ts": 1767574800000,
+        "end_ts": 1767578400000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "cyan",
+        "reminders": [60],
+        "rrule": { "freq": "WEEKLY", "interval": 1, "byweekday": ["MO"], "end": { "kind": "count", "count": 4 } },
+        "exdates": []
+      },
+      "window": { "from": 1767196800000, "to": 1769904000000 },
+      "expected": [
+        {
+          "instance_id": "ev-weekly-mo:1767574800000#0",
+          "rule_id": "ev-weekly-mo",
+          "start_ts": 1767574800000,
+          "end_ts": 1767578400000,
+          "all_day": false,
+          "color": "cyan",
+          "title": "每周一",
+          "original_start_ts": 1767574800000
+        },
+        {
+          "instance_id": "ev-weekly-mo:1767574800000#1",
+          "rule_id": "ev-weekly-mo",
+          "start_ts": 1768179600000,
+          "end_ts": 1768183200000,
+          "all_day": false,
+          "color": "cyan",
+          "title": "每周一",
+          "original_start_ts": 1767574800000
+        },
+        {
+          "instance_id": "ev-weekly-mo:1767574800000#2",
+          "rule_id": "ev-weekly-mo",
+          "start_ts": 1768784400000,
+          "end_ts": 1768788000000,
+          "all_day": false,
+          "color": "cyan",
+          "title": "每周一",
+          "original_start_ts": 1767574800000
+        },
+        {
+          "instance_id": "ev-weekly-mo:1767574800000#3",
+          "rule_id": "ev-weekly-mo",
+          "start_ts": 1769389200000,
+          "end_ts": 1769392800000,
+          "all_day": false,
+          "color": "cyan",
+          "title": "每周一",
+          "original_start_ts": 1767574800000
+        }
+      ]
+    },
+    {
+      "name": "weekly-mwf-12-occurrences-4-weeks",
+      "rule": {
+        "id": "ev-weekly-mwf",
+        "title": "每周 MWF",
+        "start_ts": 1767574800000,
+        "end_ts": 1767578400000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "slate",
+        "reminders": [],
+        "rrule": { "freq": "WEEKLY", "interval": 1, "byweekday": ["MO", "WE", "FR"], "end": { "kind": "count", "count": 12 } },
+        "exdates": []
+      },
+      "window": { "from": 1767196800000, "to": 1770076800000 },
+      "expected": [
+        { "instance_id": "ev-weekly-mwf:1767574800000#0", "rule_id": "ev-weekly-mwf", "start_ts": 1767574800000, "end_ts": 1767578400000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#1", "rule_id": "ev-weekly-mwf", "start_ts": 1767747600000, "end_ts": 1767751200000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#2", "rule_id": "ev-weekly-mwf", "start_ts": 1767920400000, "end_ts": 1767924000000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#3", "rule_id": "ev-weekly-mwf", "start_ts": 1768179600000, "end_ts": 1768183200000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#4", "rule_id": "ev-weekly-mwf", "start_ts": 1768352400000, "end_ts": 1768356000000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#5", "rule_id": "ev-weekly-mwf", "start_ts": 1768525200000, "end_ts": 1768528800000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#6", "rule_id": "ev-weekly-mwf", "start_ts": 1768784400000, "end_ts": 1768788000000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#7", "rule_id": "ev-weekly-mwf", "start_ts": 1768957200000, "end_ts": 1768960800000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#8", "rule_id": "ev-weekly-mwf", "start_ts": 1769130000000, "end_ts": 1769133600000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#9", "rule_id": "ev-weekly-mwf", "start_ts": 1769389200000, "end_ts": 1769392800000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#10", "rule_id": "ev-weekly-mwf", "start_ts": 1769562000000, "end_ts": 1769565600000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-weekly-mwf:1767574800000#11", "rule_id": "ev-weekly-mwf", "start_ts": 1769734800000, "end_ts": 1769738400000, "all_day": false, "color": "slate", "title": "每周 MWF", "original_start_ts": 1767574800000 }
+      ]
+    },
+    {
+      "name": "monthly-second-tuesday-6-occurrences",
+      "rule": {
+        "id": "ev-m-2nd-tue",
+        "title": "每月第 2 个周二",
+        "start_ts": 1773104400000,
+        "end_ts": 1773108000000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "violet",
+        "reminders": [],
+        "rrule": { "freq": "MONTHLY", "interval": 1, "byweekday": ["TU"], "end": { "kind": "count", "count": 6 } },
+        "exdates": []
+      },
+      "window": { "from": 1773004800000, "to": 1786502400000 },
+      "expected": [
+        { "instance_id": "ev-m-2nd-tue:1773104400000#0", "rule_id": "ev-m-2nd-tue", "start_ts": 1773104400000, "end_ts": 1773108000000, "all_day": false, "color": "violet", "title": "每月第 2 个周二", "original_start_ts": 1773104400000 },
+        { "instance_id": "ev-m-2nd-tue:1773104400000#1", "rule_id": "ev-m-2nd-tue", "start_ts": 1776128400000, "end_ts": 1776132000000, "all_day": false, "color": "violet", "title": "每月第 2 个周二", "original_start_ts": 1773104400000 },
+        { "instance_id": "ev-m-2nd-tue:1773104400000#2", "rule_id": "ev-m-2nd-tue", "start_ts": 1778547600000, "end_ts": 1778551200000, "all_day": false, "color": "violet", "title": "每月第 2 个周二", "original_start_ts": 1773104400000 },
+        { "instance_id": "ev-m-2nd-tue:1773104400000#3", "rule_id": "ev-m-2nd-tue", "start_ts": 1780966800000, "end_ts": 1780970400000, "all_day": false, "color": "violet", "title": "每月第 2 个周二", "original_start_ts": 1773104400000 },
+        { "instance_id": "ev-m-2nd-tue:1773104400000#4", "rule_id": "ev-m-2nd-tue", "start_ts": 1783990800000, "end_ts": 1783994400000, "all_day": false, "color": "violet", "title": "每月第 2 个周二", "original_start_ts": 1773104400000 },
+        { "instance_id": "ev-m-2nd-tue:1773104400000#5", "rule_id": "ev-m-2nd-tue", "start_ts": 1786410000000, "end_ts": 1786413600000, "all_day": false, "color": "violet", "title": "每月第 2 个周二", "original_start_ts": 1773104400000 }
+      ]
+    },
+    {
+      "name": "yearly-leap-day-feb29",
+      "rule": {
+        "id": "ev-y-leap",
+        "title": "每年 2/29 闰年生效",
+        "start_ts": 1709168400000,
+        "end_ts": 1709172000000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "green",
+        "reminders": [],
+        "rrule": { "freq": "YEARLY", "interval": 1, "end": { "kind": "never" } },
+        "exdates": []
+      },
+      "window": { "from": 1709078400000, "to": 1835452800000 },
+      "expected": [
+        { "instance_id": "ev-y-leap:1709168400000#0", "rule_id": "ev-y-leap", "start_ts": 1709168400000, "end_ts": 1709172000000, "all_day": false, "color": "green", "title": "每年 2/29 闰年生效", "original_start_ts": 1709168400000 },
+        { "instance_id": "ev-y-leap:1709168400000#1", "rule_id": "ev-y-leap", "start_ts": 1835398800000, "end_ts": 1835402400000, "all_day": false, "color": "green", "title": "每年 2/29 闰年生效", "original_start_ts": 1709168400000 }
+      ]
+    },
+    {
+      "name": "yearly-non-leap-skip",
+      "rule": {
+        "id": "ev-y-leap-skip",
+        "title": "2/29 非闰年跳过",
+        "start_ts": 1709168400000,
+        "end_ts": 1709172000000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "amber",
+        "reminders": [],
+        "rrule": { "freq": "YEARLY", "interval": 1, "end": { "kind": "never" } },
+        "exdates": []
+      },
+      "window": { "from": 1740700800000, "to": 1740787200000 },
+      "expected": []
+    },
+    {
+      "name": "count-end-3-occurrences",
+      "rule": {
+        "id": "ev-cnt-3",
+        "title": "count=3 终止",
+        "start_ts": 1767229200000,
+        "end_ts": 1767232800000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "blue",
+        "reminders": [],
+        "rrule": { "freq": "DAILY", "interval": 1, "end": { "kind": "count", "count": 3 } },
+        "exdates": []
+      },
+      "window": { "from": 1767196800000, "to": 1767888000000 },
+      "expected": [
+        { "instance_id": "ev-cnt-3:1767229200000#0", "rule_id": "ev-cnt-3", "start_ts": 1767229200000, "end_ts": 1767232800000, "all_day": false, "color": "blue", "title": "count=3 终止", "original_start_ts": 1767229200000 },
+        { "instance_id": "ev-cnt-3:1767229200000#1", "rule_id": "ev-cnt-3", "start_ts": 1767315600000, "end_ts": 1767319200000, "all_day": false, "color": "blue", "title": "count=3 终止", "original_start_ts": 1767229200000 },
+        { "instance_id": "ev-cnt-3:1767229200000#2", "rule_id": "ev-cnt-3", "start_ts": 1767402000000, "end_ts": 1767405600000, "all_day": false, "color": "blue", "title": "count=3 终止", "original_start_ts": 1767229200000 }
+      ]
+    },
+    {
+      "name": "date-end-feb15-stops",
+      "rule": {
+        "id": "ev-date-feb15",
+        "title": "until=2026-02-15 终止",
+        "start_ts": 1771030800000,
+        "end_ts": 1771034400000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "red",
+        "reminders": [],
+        "rrule": { "freq": "DAILY", "interval": 1, "end": { "kind": "date", "until": "2026-02-15" } },
+        "exdates": []
+      },
+      "window": { "from": 1770940800000, "to": 1771372800000 },
+      "expected": [
+        { "instance_id": "ev-date-feb15:1771030800000#0", "rule_id": "ev-date-feb15", "start_ts": 1771030800000, "end_ts": 1771034400000, "all_day": false, "color": "red", "title": "until=2026-02-15 终止", "original_start_ts": 1771030800000 },
+        { "instance_id": "ev-date-feb15:1771030800000#1", "rule_id": "ev-date-feb15", "start_ts": 1771117200000, "end_ts": 1771120800000, "all_day": false, "color": "red", "title": "until=2026-02-15 终止", "original_start_ts": 1771030800000 }
+      ]
+    },
+    {
+      "name": "exdate-skips-mid-sequence",
+      "rule": {
+        "id": "ev-ex-mid",
+        "title": "exdate 命中中间实例",
+        "start_ts": 1767229200000,
+        "end_ts": 1767232800000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "pink",
+        "reminders": [],
+        "rrule": { "freq": "DAILY", "interval": 1, "end": { "kind": "never" } },
+        "exdates": ["2026-01-02"]
+      },
+      "window": { "from": 1767196800000, "to": 1767542400000 },
+      "expected": [
+        { "instance_id": "ev-ex-mid:1767229200000#0", "rule_id": "ev-ex-mid", "start_ts": 1767229200000, "end_ts": 1767232800000, "all_day": false, "color": "pink", "title": "exdate 命中中间实例", "original_start_ts": 1767229200000 },
+        { "instance_id": "ev-ex-mid:1767229200000#1", "rule_id": "ev-ex-mid", "start_ts": 1767402000000, "end_ts": 1767405600000, "all_day": false, "color": "pink", "title": "exdate 命中中间实例", "original_start_ts": 1767229200000 },
+        { "instance_id": "ev-ex-mid:1767229200000#2", "rule_id": "ev-ex-mid", "start_ts": 1767488400000, "end_ts": 1767492000000, "all_day": false, "color": "pink", "title": "exdate 命中中间实例", "original_start_ts": 1767229200000 }
+      ]
+    },
+    {
+      "name": "exdate-skips-first",
+      "rule": {
+        "id": "ev-ex-first",
+        "title": "exdate 命中首实例",
+        "start_ts": 1767229200000,
+        "end_ts": 1767232800000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "cyan",
+        "reminders": [],
+        "rrule": { "freq": "DAILY", "interval": 1, "end": { "kind": "never" } },
+        "exdates": ["2026-01-01"]
+      },
+      "window": { "from": 1767196800000, "to": 1767542400000 },
+      "expected": [
+        { "instance_id": "ev-ex-first:1767229200000#0", "rule_id": "ev-ex-first", "start_ts": 1767315600000, "end_ts": 1767319200000, "all_day": false, "color": "cyan", "title": "exdate 命中首实例", "original_start_ts": 1767229200000 },
+        { "instance_id": "ev-ex-first:1767229200000#1", "rule_id": "ev-ex-first", "start_ts": 1767402000000, "end_ts": 1767405600000, "all_day": false, "color": "cyan", "title": "exdate 命中首实例", "original_start_ts": 1767229200000 },
+        { "instance_id": "ev-ex-first:1767229200000#2", "rule_id": "ev-ex-first", "start_ts": 1767488400000, "end_ts": 1767492000000, "all_day": false, "color": "cyan", "title": "exdate 命中首实例", "original_start_ts": 1767229200000 }
+      ]
+    },
+    {
+      "name": "weekly-dst-spring-forward-us",
+      "rule": {
+        "id": "ev-weekly-dst-sf",
+        "title": "WEEKLY 跨 DST 切换日（北美 spring forward）保持本地 9:00",
+        "start_ts": 1772326800000,
+        "end_ts": 1772330400000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "slate",
+        "reminders": [],
+        "rrule": { "freq": "WEEKLY", "interval": 1, "byweekday": ["SU"], "end": { "kind": "count", "count": 3 } },
+        "exdates": []
+      },
+      "comment": "本机 CST 无 DST；用例验证算法结构：跨多周保持同一本地 9:00 CST，UTC ms 差恒为 7*86400000。",
+      "window": { "from": 1772323200000, "to": 1774137600000 },
+      "expected": [
+        { "instance_id": "ev-weekly-dst-sf:1772326800000#0", "rule_id": "ev-weekly-dst-sf", "start_ts": 1772326800000, "end_ts": 1772330400000, "all_day": false, "color": "slate", "title": "WEEKLY 跨 DST 切换日（北美 spring forward）保持本地 9:00", "original_start_ts": 1772326800000 },
+        { "instance_id": "ev-weekly-dst-sf:1772326800000#1", "rule_id": "ev-weekly-dst-sf", "start_ts": 1772931600000, "end_ts": 1772935200000, "all_day": false, "color": "slate", "title": "WEEKLY 跨 DST 切换日（北美 spring forward）保持本地 9:00", "original_start_ts": 1772326800000 },
+        { "instance_id": "ev-weekly-dst-sf:1772326800000#2", "rule_id": "ev-weekly-dst-sf", "start_ts": 1773536400000, "end_ts": 1773540000000, "all_day": false, "color": "slate", "title": "WEEKLY 跨 DST 切换日（北美 spring forward）保持本地 9:00", "original_start_ts": 1772326800000 }
+      ]
+    },
+    {
+      "name": "weekly-dst-fall-back",
+      "rule": {
+        "id": "ev-weekly-dst-fb",
+        "title": "WEEKLY 跨 DST 切换日（北美 fall back）保持本地 9:00",
+        "start_ts": 1769994000000,
+        "end_ts": 1769997600000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "violet",
+        "reminders": [],
+        "rrule": { "freq": "WEEKLY", "interval": 1, "byweekday": ["MO"], "end": { "kind": "count", "count": 3 } },
+        "exdates": []
+      },
+      "comment": "本机 CST 无 DST；用例验证算法结构：跨多周保持同一本地 9:00 CST。",
+      "window": { "from": 1769904000000, "to": 1771804800000 },
+      "expected": [
+        { "instance_id": "ev-weekly-dst-fb:1769994000000#0", "rule_id": "ev-weekly-dst-fb", "start_ts": 1769994000000, "end_ts": 1769997600000, "all_day": false, "color": "violet", "title": "WEEKLY 跨 DST 切换日（北美 fall back）保持本地 9:00", "original_start_ts": 1769994000000 },
+        { "instance_id": "ev-weekly-dst-fb:1769994000000#1", "rule_id": "ev-weekly-dst-fb", "start_ts": 1770598800000, "end_ts": 1770602400000, "all_day": false, "color": "violet", "title": "WEEKLY 跨 DST 切换日（北美 fall back）保持本地 9:00", "original_start_ts": 1769994000000 },
+        { "instance_id": "ev-weekly-dst-fb:1769994000000#2", "rule_id": "ev-weekly-dst-fb", "start_ts": 1771203600000, "end_ts": 1771207200000, "all_day": false, "color": "violet", "title": "WEEKLY 跨 DST 切换日（北美 fall back）保持本地 9:00", "original_start_ts": 1769994000000 }
+      ]
+    },
+    {
+      "name": "window-boundary-from-inclusive",
+      "rule": {
+        "id": "ev-bnd-from",
+        "title": "窗口 from 含（恰好命中 from）",
+        "start_ts": 1767574800000,
+        "end_ts": 1767578400000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "amber",
+        "reminders": [],
+        "rrule": { "freq": "WEEKLY", "interval": 1, "byweekday": ["MO"], "end": { "kind": "count", "count": 1 } },
+        "exdates": []
+      },
+      "window": { "from": 1767574800000, "to": 1768179600000 },
+      "expected": [
+        { "instance_id": "ev-bnd-from:1767574800000#0", "rule_id": "ev-bnd-from", "start_ts": 1767574800000, "end_ts": 1767578400000, "all_day": false, "color": "amber", "title": "窗口 from 含（恰好命中 from）", "original_start_ts": 1767574800000 }
+      ]
+    },
+    {
+      "name": "window-boundary-to-exclusive",
+      "rule": {
+        "id": "ev-bnd-to",
+        "title": "窗口 to 不含（恰好命中 to 丢弃）",
+        "start_ts": 1767574800000,
+        "end_ts": 1767578400000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "green",
+        "reminders": [],
+        "rrule": { "freq": "WEEKLY", "interval": 1, "byweekday": ["MO"], "end": { "kind": "count", "count": 2 } },
+        "exdates": []
+      },
+      "window": { "from": 1767196800000, "to": 1768179600000 },
+      "expected": [
+        { "instance_id": "ev-bnd-to:1767574800000#0", "rule_id": "ev-bnd-to", "start_ts": 1767574800000, "end_ts": 1767578400000, "all_day": false, "color": "green", "title": "窗口 to 不含（恰好命中 to 丢弃）", "original_start_ts": 1767574800000 }
+      ]
+    },
+    {
+      "name": "all-day-multi-day-event",
+      "rule": {
+        "id": "ev-allday-2d",
+        "title": "all-day 跨 2 天",
+        "start_ts": 1773072000000,
+        "end_ts": 1773244800000,
+        "all_day": true,
+        "tz_mode": "local",
+        "location_text": "会议室",
+        "note": null,
+        "color": "blue",
+        "reminders": [1440],
+        "rrule": null,
+        "exdates": []
+      },
+      "comment": "all_day=true，duration = 2*86400000（跨 3/10, 3/11 两本地日）。",
+      "window": { "from": 1773004800000, "to": 1773350400000 },
+      "expected": [
+        { "instance_id": "ev-allday-2d:1773072000000#0", "rule_id": "ev-allday-2d", "start_ts": 1773072000000, "end_ts": 1773244800000, "all_day": true, "color": "blue", "title": "all-day 跨 2 天", "original_start_ts": 1773072000000 }
+      ]
+    },
+    {
+      "name": "interval-3-weekly",
+      "rule": {
+        "id": "ev-w-i3",
+        "title": "每周一 间隔 3 周",
+        "start_ts": 1767574800000,
+        "end_ts": 1767578400000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "violet",
+        "reminders": [],
+        "rrule": { "freq": "WEEKLY", "interval": 3, "byweekday": ["MO"], "end": { "kind": "count", "count": 3 } },
+        "exdates": []
+      },
+      "window": { "from": 1767196800000, "to": 1771804800000 },
+      "expected": [
+        { "instance_id": "ev-w-i3:1767574800000#0", "rule_id": "ev-w-i3", "start_ts": 1767574800000, "end_ts": 1767578400000, "all_day": false, "color": "violet", "title": "每周一 间隔 3 周", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-w-i3:1767574800000#1", "rule_id": "ev-w-i3", "start_ts": 1769389200000, "end_ts": 1769392800000, "all_day": false, "color": "violet", "title": "每周一 间隔 3 周", "original_start_ts": 1767574800000 },
+        { "instance_id": "ev-w-i3:1767574800000#2", "rule_id": "ev-w-i3", "start_ts": 1771203600000, "end_ts": 1771207200000, "all_day": false, "color": "violet", "title": "每周一 间隔 3 周", "original_start_ts": 1767574800000 }
+      ]
+    },
+    {
+      "name": "count-end-with-exdates-not-counted",
+      "rule": {
+        "id": "ev-cnt-ex",
+        "title": "count=5，exdate 不消耗 count 配额（权威口径：仅 emitted 计入 count）",
+        "start_ts": 1767229200000,
+        "end_ts": 1767232800000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "pink",
+        "reminders": [],
+        "rrule": { "freq": "DAILY", "interval": 1, "end": { "kind": "count", "count": 5 } },
+        "exdates": ["2026-01-03"]
+      },
+      "comment": "权威口径（spec FR-2 / tasks.md Task 2）：count 累计展开次数不含 exdate 跳过的实例。展开序列：1/1 (#0), 1/2 (#1), 1/3 (skipped，不消耗 count), 1/4 (#2), 1/5 (#3), 1/6 (#4), 1/7 达 emitted=5 = count=5 停止 → 实际 5 个 emitted。若按旧错口径（含 skipped），tried=7 才停，会多出 1/7。",
+      "window": { "from": 1767196800000, "to": 1767888000000 },
+      "expected": [
+        { "instance_id": "ev-cnt-ex:1767229200000#0", "rule_id": "ev-cnt-ex", "start_ts": 1767229200000, "end_ts": 1767232800000, "all_day": false, "color": "pink", "title": "count=5，exdate 不消耗 count 配额（权威口径：仅 emitted 计入 count）", "original_start_ts": 1767229200000 },
+        { "instance_id": "ev-cnt-ex:1767229200000#1", "rule_id": "ev-cnt-ex", "start_ts": 1767315600000, "end_ts": 1767319200000, "all_day": false, "color": "pink", "title": "count=5，exdate 不消耗 count 配额（权威口径：仅 emitted 计入 count）", "original_start_ts": 1767229200000 },
+        { "instance_id": "ev-cnt-ex:1767229200000#2", "rule_id": "ev-cnt-ex", "start_ts": 1767488400000, "end_ts": 1767492000000, "all_day": false, "color": "pink", "title": "count=5，exdate 不消耗 count 配额（权威口径：仅 emitted 计入 count）", "original_start_ts": 1767229200000 },
+        { "instance_id": "ev-cnt-ex:1767229200000#3", "rule_id": "ev-cnt-ex", "start_ts": 1767574800000, "end_ts": 1767578400000, "all_day": false, "color": "pink", "title": "count=5，exdate 不消耗 count 配额（权威口径：仅 emitted 计入 count）", "original_start_ts": 1767229200000 },
+        { "instance_id": "ev-cnt-ex:1767229200000#4", "rule_id": "ev-cnt-ex", "start_ts": 1767661200000, "end_ts": 1767664800000, "all_day": false, "color": "pink", "title": "count=5，exdate 不消耗 count 配额（权威口径：仅 emitted 计入 count）", "original_start_ts": 1767229200000 }
+      ]
+    },
+    {
+      "name": "empty-rrule-treated-as-null",
+      "rule": {
+        "id": "ev-empty-rrule",
+        "title": "空 rrule 当作单次事件",
+        "start_ts": 1767229200000,
+        "end_ts": 1767232800000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "amber",
+        "reminders": [],
+        "rrule": { "freq": "DAILY", "interval": 0, "end": { "kind": "never" } },
+        "exdates": []
+      },
+      "window": { "from": 1767196800000, "to": 1767283200000 },
+      "expected": [
+        { "instance_id": "ev-empty-rrule:1767229200000#0", "rule_id": "ev-empty-rrule", "start_ts": 1767229200000, "end_ts": 1767232800000, "all_day": false, "color": "amber", "title": "空 rrule 当作单次事件", "original_start_ts": 1767229200000 }
+      ]
+    },
+    {
+      "name": "monthly-second-tuesday-month-without-5th",
+      "rule": {
+        "id": "ev-m-5th-tue",
+        "title": "MONTHLY 第 5 个周二（4/5 月无第 5 个，跳过）",
+        "start_ts": 1774918800000,
+        "end_ts": 1774922400000,
+        "all_day": false,
+        "tz_mode": "local",
+        "location_text": null,
+        "note": null,
+        "color": "violet",
+        "reminders": [],
+        "rrule": { "freq": "MONTHLY", "interval": 1, "byweekday": ["TU"], "end": { "kind": "never" } },
+        "exdates": []
+      },
+      "comment": "start_ts = 3/31（第 5 个周二）；4 月无第 5 个 → 跳过；5 月无第 5 个 → 跳过；6/30（第 5 个） → 7/8 月均无 → 跳过；9/29（第 5 个）。",
+      "window": { "from": 1774915200000, "to": 1790784000000 },
+      "expected": [
+        { "instance_id": "ev-m-5th-tue:1774918800000#0", "rule_id": "ev-m-5th-tue", "start_ts": 1774918800000, "end_ts": 1774922400000, "all_day": false, "color": "violet", "title": "MONTHLY 第 5 个周二（4/5 月无第 5 个，跳过）", "original_start_ts": 1774918800000 },
+        { "instance_id": "ev-m-5th-tue:1774918800000#1", "rule_id": "ev-m-5th-tue", "start_ts": 1782781200000, "end_ts": 1782784800000, "all_day": false, "color": "violet", "title": "MONTHLY 第 5 个周二（4/5 月无第 5 个，跳过）", "original_start_ts": 1774918800000 },
+        { "instance_id": "ev-m-5th-tue:1774918800000#2", "rule_id": "ev-m-5th-tue", "start_ts": 1790643600000, "end_ts": 1790647200000, "all_day": false, "color": "violet", "title": "MONTHLY 第 5 个周二（4/5 月无第 5 个，跳过）", "original_start_ts": 1774918800000 }
+      ]
+    }
+  ]
+}

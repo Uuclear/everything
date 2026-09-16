@@ -1,7 +1,7 @@
 // Package crypto 定义三端（Go/Web/Android）必须一致的零知识加密原语。
 //
 // 信封规范（详见 docs/crypto.md）：
-//   - 密钥派生：Argon2id，time=3，memory=64MiB，threads=2，输出 32 字节，salt 16 字节
+//   - 密钥派生：Argon2id，time=3，memory=64MiB，threads=1，输出 32 字节，salt 16 字节
 //   - 内容加密：XChaCha20-Poly1305（IETF），随机 24 字节 nonce
 //   - 密文布局：nonce(24) || ciphertext
 //   - 每条记录以 AAD 绑定 id / module / version，防止密文被搬移或重放
@@ -27,6 +27,9 @@ const (
 	KeyLen       uint32 = chacha20poly1305.KeySize // 32
 	SaltLen             = 16
 	nonceLen            = chacha20poly1305.NonceSizeX // 24
+
+	// DevicePublicKeyLen 设备 X25519 公钥长度（crypto_box 身份密钥）。
+	DevicePublicKeyLen = 32
 )
 
 // ErrDecrypt 在密钥错误、密文被篡改或 AAD 不匹配时返回（不区分具体原因）。
@@ -86,6 +89,18 @@ func WrapMasterKey(kek, mk []byte) ([]byte, error) { return Seal(kek, mk, wrapAA
 
 // UnwrapMasterKey 用 KEK 解开主密钥。
 func UnwrapMasterKey(kek, wrapped []byte) ([]byte, error) { return Open(kek, wrapped, wrapAAD) }
+
+// recoveryWrapAAD 是恢复密钥（REK）包裹 MK 时的固定 AAD，与主密码包裹域分离，
+// 防止一种包裹密文被搬到另一种场景重放。三端必须逐字节一致。
+var recoveryWrapAAD = []byte("eve:v1:master-key-recovery/v1")
+
+// WrapForRecovery 用恢复码派生的 REK 包裹主密钥（忘记主密码时的恢复通道）。
+func WrapForRecovery(rek, mk []byte) ([]byte, error) { return Seal(rek, mk, recoveryWrapAAD) }
+
+// UnwrapForRecovery 用 REK 解开主密钥。
+func UnwrapForRecovery(rek, wrapped []byte) ([]byte, error) {
+	return Open(rek, wrapped, recoveryWrapAAD)
+}
 
 // RecordAAD 生成记录信封的 AAD：eve:v1:record:<id>:<module>:<version>。
 // 三端必须逐字节一致，故版本号使用大端定长 8 字节而非文本，避免编码歧义。

@@ -4,7 +4,8 @@
 //   - XChaCha20-Poly1305 IETF：随机 24B nonce，密文布局 nonce||ciphertext
 //   - 记录 AAD："eve:v1:record:" + id + ":" + module + ":" + BE(uint64 version)
 //   - 主密钥包裹 AAD："eve:v1:master-key/v1"
-import _sodium from 'libsodium-wrappers'
+// 必须使用 sumo 完整版：Argon2id（crypto_pwhash）不在标准版构建中。
+import _sodium from 'libsodium-wrappers-sumo'
 
 export const KEY_LEN = 32
 export const SALT_LEN = 16
@@ -53,6 +54,24 @@ export function unwrapMasterKey(sodium: Sodium, kek: Uint8Array, wrapped: Uint8A
   return open(sodium, kek, wrapped, WRAP_AAD)
 }
 
+// 恢复密钥包裹使用独立 AAD 域（与主密码 KEK 包裹严格分离，杜绝跨场景密文混用）。
+// 必须与 server/internal/crypto/envelope.go 的 recoveryAAD 逐字节一致。
+const RECOVERY_WRAP_AAD = new TextEncoder().encode('eve:v1:master-key-recovery/v1')
+
+/** 用恢复密钥派生的 REK 包裹 MK（注册与恢复码轮换时调用）。 */
+export function wrapForRecovery(sodium: Sodium, rek: Uint8Array, mk: Uint8Array): Uint8Array {
+  return seal(sodium, rek, mk, RECOVERY_WRAP_AAD)
+}
+
+/** 用恢复码派生的 REK 解开 MK（忘记主密码的恢复向导调用）。 */
+export function unwrapForRecovery(
+  sodium: Sodium,
+  rek: Uint8Array,
+  wrapped: Uint8Array,
+): Uint8Array {
+  return open(sodium, rek, wrapped, RECOVERY_WRAP_AAD)
+}
+
 export function recordAAD(id: string, module: string, version: number): Uint8Array {
   const prefix = new TextEncoder().encode(`eve:v1:record:${id}:${module}:`)
   const out = new Uint8Array(prefix.length + 8)
@@ -84,12 +103,32 @@ export function openRecord(
   return open(sodium, key, sealed, recordAAD(id, module, version))
 }
 
+// ---- 位置轨迹块（阶段 4a）AAD 域 ----
+// 与 Android CryptoEnvelope.locationBlockAAD 逐字节一致（Task 5 契约锚点）：
+// 块不可变、幂等，因此无版本号段。
+
+export function locationBlockAAD(blockId: string): Uint8Array {
+  return new TextEncoder().encode(`eve:v1:location-block:${blockId}`)
+}
+
+export function openLocationBlock(
+  sodium: Sodium,
+  key: Uint8Array,
+  sealed: Uint8Array,
+  blockId: string,
+): Uint8Array {
+  return open(sodium, key, sealed, locationBlockAAD(blockId))
+}
+
 function seal(sodium: Sodium, key: Uint8Array, plaintext: Uint8Array, aad: Uint8Array): Uint8Array {
   const nonce = sodium.randombytes_buf(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES)
+  // 注意 libsodium-wrappers 0.7.13+ 的参数顺序为
+  // (message, additional_data, secret_nonce, public_nonce, key)，
+  // secret_nonce 固定 null（由我们外置随机 public nonce）。
   const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
     plaintext,
-    null,
     aad,
+    null,
     nonce,
     key,
   )

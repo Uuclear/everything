@@ -1,0 +1,27 @@
+-- 0004 位置轨迹月表约定登记（阶段 4a，spec FR-6 / AC-6）。
+--
+-- 位置轨迹密文块按块 start_ts 的 UTC 月份归属，存入 locations_YYYYMM 月表。
+-- 月表不在迁移中预建，而是由写入路径（vault.LocationStore.UpsertBlocks）
+-- 以 CREATE TABLE IF NOT EXISTS 动态建表：DDL 为
+-- server/internal/vault/location_store.go 内常量模板（monthTableDDL/monthIndexDDL），
+-- 表名仅由该包 monthTable(startTs) 纯函数生成（整数时间戳格式化，严禁拼接外部输入）。
+--
+-- 月表 DDL（与代码常量逐字段一致，spec FR-6 口径）：
+--   CREATE TABLE IF NOT EXISTS locations_YYYYMM (
+--       id          TEXT PRIMARY KEY,    -- 块 id {deviceId}:{startTs}:{endTs}，全局唯一
+--       user_id     TEXT NOT NULL,       -- 与 records 同口径的用户隔离
+--       device_id   TEXT NOT NULL,       -- 采集设备 id（token claims 覆盖，服务端权威）
+--       start_ts    INTEGER NOT NULL,    -- 块首点 UTC 毫秒（月表归属与范围查询依据）
+--       end_ts      INTEGER NOT NULL,    -- 块末点 UTC 毫秒
+--       point_count INTEGER NOT NULL,    -- 块内轨迹点数
+--       cipher      BLOB NOT NULL,       -- XChaCha20-Poly1305 密文，服务端永不解密
+--       created_at  INTEGER NOT NULL     -- 服务端权威写入时间（UTC 毫秒）
+--   );
+--   CREATE INDEX IF NOT EXISTS idx_locations_YYYYMM_user_ts
+--       ON locations_YYYYMM(user_id, start_ts);
+--
+-- 读取/删除路径先查 sqlite_master 枚举已建月表（name LIKE 'locations_______'，
+-- LIKE 的 _ 为单字符通配，"_YYYYMM" 共 7 字符，故为 7 个下划线），
+-- 仅对已建表执行 user_id 隔离的范围 SQL（start_ts BETWEEN ? AND ?）。
+-- 本迁移仅登记上述约定，无可执行 DDL；以 SELECT 1 占位满足迁移框架执行要求。
+SELECT 1;

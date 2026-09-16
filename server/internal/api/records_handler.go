@@ -16,7 +16,10 @@ type batchRequest struct {
 func (s *Server) upsertRecords(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFrom(r)
 	var req batchRequest
-	if !decodeJSON(w, r, &req) || len(req.Records) == 0 {
+	if !decodeJSON(w, r, &req) {
+		return // decodeJSON 已写出 400 错误响应
+	}
+	if len(req.Records) == 0 {
 		writeError(w, http.StatusBadRequest, "bad_request", "records 为空")
 		return
 	}
@@ -28,20 +31,20 @@ func (s *Server) upsertRecords(w http.ResponseWriter, r *http.Request) {
 	modules := make(map[string]struct{})
 	for i := range req.Records {
 		rec := &req.Records[i]
-		if rec.ID == "" || rec.Module == "" || len(rec.Ciphertext) == 0 {
+		// 墓碑记录（删除同步）允许空 ciphertext；普通记录必须携带加密信封。
+		if rec.ID == "" || rec.Module == "" || (!rec.Deleted && len(rec.Ciphertext) == 0) {
 			writeError(w, http.StatusBadRequest, "bad_request", "记录缺少 id/module/ciphertext")
 			return
 		}
 		rec.DeviceID = claims.DeviceID
-		if rec.UpdatedAt == 0 {
-			rec.UpdatedAt = now
-		}
+		// created_at 缺省时回填服务端时间（展示字段，允许客户端自带本地时钟）；
+		// updated_at 不由客户端决定——ApplyBatch 统一以服务端权威时间覆盖（FU-1）。
 		if rec.CreatedAt == 0 {
-			rec.CreatedAt = rec.UpdatedAt
+			rec.CreatedAt = now
 		}
 		modules[rec.Module] = struct{}{}
 	}
-	result, err := s.vault.ApplyBatch(claims.UserID, req.Records)
+	result, err := s.vault.ApplyBatch(claims.UserID, req.Records, now)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "写入失败")
 		return

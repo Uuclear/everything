@@ -29,11 +29,15 @@ func New(database *sql.DB) *Store { return &Store{db: database} }
 type BatchResult struct {
 	Applied int `json:"applied"`
 	Skipped int `json:"skipped"`
+	// ServerTime 是本批写入使用的服务端权威时间（毫秒）。
+	// 客户端推送成功后应以此校准本地游标，避免设备时钟偏差污染增量同步（FU-1）。
+	ServerTime int64 `json:"server_time"`
 }
 
 // ApplyBatch 按 (user_id, id) 幂等 upsert；仅当传入版本号严格大于库中版本时覆盖。
-func (s *Store) ApplyBatch(userID string, records []Record) (BatchResult, error) {
-	res := BatchResult{}
+// updated_at 一律以服务端时间 now 覆盖（客户端时钟不可信，仅 created_at 保留客户端值用于展示）。
+func (s *Store) ApplyBatch(userID string, records []Record, now int64) (BatchResult, error) {
+	res := BatchResult{ServerTime: now}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return res, err
@@ -64,12 +68,12 @@ func (s *Store) ApplyBatch(userID string, records []Record) (BatchResult, error)
 		}
 		if err == sql.ErrNoRows || !current.Valid {
 			if _, err := ins.Exec(r.ID, userID, r.Module, r.Type, r.Ciphertext, r.Version,
-				r.DeviceID, r.CreatedAt, r.UpdatedAt, deleted); err != nil {
+				r.DeviceID, r.CreatedAt, now, deleted); err != nil {
 				return res, err
 			}
 		} else {
 			if _, err := upd.Exec(r.Module, r.Type, r.Ciphertext, r.Version, r.DeviceID,
-				r.CreatedAt, r.UpdatedAt, deleted, userID, r.ID); err != nil {
+				r.CreatedAt, now, deleted, userID, r.ID); err != nil {
 				return res, err
 			}
 		}

@@ -1,10 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 阶段 0/1：仅网络能力；短信/通话记录/定位/通知权限在阶段 3/4 按需申请 -->
+    <!-- 阶段 0/1：仅网络能力；定位/通知权限在阶段 4 按需申请 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 阶段 3：数据采集只读最小集（spec FR-7）。运行时逐个申请，绝不申请写权限。 -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+
+    <!-- 阶段 4a：位置轨迹（spec FR-2，恰六项，无 ACTIVITY_RECOGNITION 等） -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- 后台定位"始终允许"：仅声明，不伪造运行时弹窗，由用户去系统设置页选择 -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 阶段 4b Task 5 / TR-5.5：日程提醒精确闹钟权限（spec FR-6 / AC-6） -->
+    <!-- API 31+（Android 12+）：SCHEDULE_EXACT_ALARM 用户设置页手动开关；
+         本应用声明此权限以便 ReminderScheduler.setExactAndAllowWhileIdle
+         能注册精确闹钟；用户拒绝时降级 setAndAllowWhileIdle + 写
+         event_reminder_log kind=alarm_killed。 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- API 33+（Android 13+）：USE_EXACT_ALARM 系统自动授予（calendar /
+         alarm clock 类应用）；显式声明以向用户明示意图。 -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
     <application
         android:name=".EveApplication"
@@ -26,5 +50,26 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 阶段 4a：轨迹前台定位服务（非导出，仅应用内拉起） -->
+        <service
+            android:name=".collector.location.LocationTrackingService"
+            android:foregroundServiceType="location"
+            android:exported="false" />
+
+        <!-- 阶段 4a：开机自愈（轨迹分支；系统广播需 exported=true） -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 阶段 4b Task 5 / TR-5.5：闹钟触发接收器（非导出，仅应用内
+             PendingIntent 触发；不接收外部广播避免被第三方唤醒滥用）。 -->
+        <receiver
+            android:name=".reminder.ReminderReceiver"
+            android:exported="false" />
     </application>
 </manifest>

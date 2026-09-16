@@ -5,9 +5,27 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/everything-personal/eve/internal/auth"
 )
 
+// eventsToken 为 EventSource 建连换发 5 分钟一次性短期令牌（approved 设备）。
+// 浏览器 EventSource 不能携带 Authorization 头，故 SSE 走 ?token= 鉴权。
+func (s *Server) eventsToken(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFrom(r)
+	token, err := s.auth.IssueEventsToken(claims.UserID, claims.DeviceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "事件令牌签发失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events_token": token,
+		"expires_in":   int64(auth.EventsTokenTTL.Seconds()),
+	})
+}
+
 // events 以 SSE 推送当前用户的资料库变更；断线后客户端用 since= 增量补拉兜底。
+// 鉴权由 requireEventsAccess 双入口完成（Authorization approved 或 ?token= events）。
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFrom(r)
 	flusher, ok := w.(http.Flusher)

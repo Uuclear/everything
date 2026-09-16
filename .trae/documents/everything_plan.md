@@ -122,9 +122,16 @@ everything/
 ### 实施进度
 
 - ✅ **阶段 0 — 工程骨架**（2026-09-15 完成）：monorepo、Go/Vue3/Android 三端工程、版本化迁移、Makefile、GoReleaser、多架构 Dockerfile + compose、GitHub Actions CI（四作业）、systemd 单元与配置示例。
-- ✅ **阶段 1 — 核心底座**（骨架完成）：注册（first/open/closed 策略）、Argon2id 登录验证器、MK 包裹与登录解锁、JWT+刷新令牌、设备表、records 加密信封版本化幂等同步、`since` 增量拉取、SSE 事件总线、审计日志；Web/Android 双端加密笔记闭环。Go e2e 测试通过；四目标交叉编译通过；amd64 镜像容器实测通过。
-  - 遗留（阶段 1 收尾）：设备扫码审批与恢复密钥、Web 端 EventSource 签名查询通道、Room 显式迁移、TOTP 二次验证。
-- ⏳ 阶段 2–8：待启动。
+- ✅ **阶段 1 — 核心底座**（2026-09-15 全部完成）：注册（first/open/closed 策略）、Argon2id 登录验证器、MK 包裹与登录解锁、JWT 多 scope 令牌、刷新令牌联表吊销、records 加密信封版本化幂等同步、`since` 增量拉取、SSE 事件总线（Web 签名 events 令牌通道）、FR-25 审计 14 类事件；恢复密钥（Crockford Base32，注册强制备份 + 恢复重置轮换）、设备审批（6 位配对码 + X25519 端到端下发 MK，TTL 15 分钟）、TOTP 二次验证（RFC6238，服务端限流 + 恢复码兜底禁用）、Android Room 显式迁移 `Migration(1,2)`。Go e2e 测试通过；四目标交叉编译通过；Android Crockford 单测 9/9 通过。
+- ✅ **阶段 2 — 密码库核心**（2026-09-15 完成，Web 端完整 UI）：pass 模块 login/note/card 三类条目 + 密码生成器 + 条目内 RFC6238 TOTP 动态口令 + 客户端搜索；identity 模块证件（id_card/passport/driver_license/generic）与红/橙/黄到期提醒；Android 同步兼容（双模块读取）+ 审批端 + MFA 登录。
+  - 阶段 2 未做（按规格留待后续）：Android 密码库完整 UI、附件。
+- ✅ **阶段 3 — 安卓采集器**（2026-09-16 完成）：通讯录/短信/通话记录只读采集——ContentProvider 适配层 + 复合游标增量 + 结构比对变化检测（version+1 重封）；Room v3 `collector_state` 显式迁移；唯一周期任务 `eve.collector-sync`（采集+同步合一）；采集页权限向导（运行时逐项申请/永久拒绝引导）、合规告知、五态状态行与国产 ROM 保活指引；module-schemas/android 文档同步。
+  - 阶段 3 未做（按规格留待后续）：**附件上传不在本期**（顺延）；位置轨迹属阶段 4 范围。
+- ✅ **阶段 4a — 位置轨迹**（2026-09-16 代码落地；全量门禁复跑见 `.trae/specs/stage4-location-tracking/tasks.md` Task 12）：Android 前台定位服务采集（恰六项权限、启动四分支前置检查、静止降频 300s/60s、精度 >100m 过滤、MK 不可用停采、BootReceiver 开机自愈降级）→ Room 明文缓冲封块即删 + 24h 过期 → XChaCha20-Poly1305 密文块上行（块 id `{deviceId}:{startTs}:{endTs}` 双端幂等）；服务端零知识月表 `locations_YYYYMM`（≤256KB/块、≤50 块/批、≤62 天跨度，审计仅计数/范围）；Web 轨迹页（按月装载、日历选日、当日统计与时间线、leaflet 地图、1x/4x/16x/60x 回放、visit 命名写 `place` 记录幂等覆盖）；文档同步（crypto/module-schemas/android/README）。
+  - **日程/日历/任务/提醒属阶段 4b**，不在本期；轨迹增强八项（热图/Fog of War、交通方式分类、统计洞察页、GPX/GeoJSON 导入导出、Live 实时模式、地理围栏提醒、Android 端轨迹查看、照片集成）已登记在阶段 4a spec 的 Future Enhancements，本期不承诺。
+- ✅ **阶段 4b — 日程/日历**（2026-09-16 文档同步 T11 落地，详见 `.trae/specs/stage4b-calendar/tasks.md` Task 11）：Web + Android 双端事件 CRUD、月/周视图、RRULE B 档子集重复规则、Android 本地精确闹钟（AlarmManager `setExactAndAllowWhileIdle`，权限降级见 README）；事件作为 `module="event"` 记录走既有 records 加密信道（沿用 §5 AAD 与第 1 节信封，**不新造 envelope / AAD 前缀**，服务端零改动）；动态展开 + 链式 AlarmManager 调度，重复事件不物化实例（`expand(rule, window)` 跨端共享纯函数）；Room v4→v5 显式迁移；FU-7 真机冒烟与 instrumented 三套件并入阶段 4a 同款关闭条件清单。文档同步（crypto/android/README/everything_plan）。
+  - 阶段 4b 未做（按规格留待后续）：RRULE 全档扩展（当前仅 B 档子集）、编辑器与服务端 AI Agent 联动（建日程工具调用）、Web 端浏览器通知（依赖浏览器 Notification API）。
+- ⏳ 阶段 4c–8：待启动。
 
 ## 八、本次批准后首先落地的内容（阶段 0 + 阶段 1 骨架）
 

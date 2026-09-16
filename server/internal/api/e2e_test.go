@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -102,21 +103,57 @@ func TestEndToEndRegisterSyncDecrypt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 0002 协议：注册必须携带设备 X25519 公钥与恢复密钥材料。
+	devPub := make([]byte, crypto.DevicePublicKeyLen)
+	if _, err := io.ReadFull(rand.Reader, devPub); err != nil {
+		t.Fatal(err)
+	}
+	recoveryCode := "test-recovery-code"
+	recAuthSalt, err := crypto.NewSalt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recKEKSalt, err := crypto.NewSalt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recVerifier, err := crypto.DeriveKey(recoveryCode, recAuthSalt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rek, err := crypto.DeriveKey(recoveryCode, recKEKSalt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrappedRecovery, err := crypto.WrapForRecovery(rek, c.mk)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// 1) 注册。
 	status, out := c.do(http.MethodPost, "/api/v1/auth/register", map[string]any{
 		"username": c.username, "auth_salt": c.authSalt, "kek_salt": c.kekSalt,
 		"auth_verifier": verifier, "wrapped_master_key": wrapped, "device_name": c.device,
+		"device_public_key":           devPub,
+		"recovery_auth_salt":          recAuthSalt,
+		"recovery_kek_salt":           recKEKSalt,
+		"recovery_verifier":           recVerifier,
+		"wrapped_master_key_recovery": wrappedRecovery,
 	}, false)
 	if status != http.StatusCreated {
 		t.Fatalf("注册失败: %d %v", status, out)
 	}
 	c.token = out["access_token"].(string)
 
-	// 2) 重复注册（first 策略下应被拒绝）。
+	// 2) 重复注册（first 策略下应被拒绝；材料合法性先于策略校验通过后才到 403）。
 	status, _ = c.do(http.MethodPost, "/api/v1/auth/register", map[string]any{
 		"username": "bob", "auth_salt": c.authSalt, "kek_salt": c.kekSalt,
 		"auth_verifier": verifier, "wrapped_master_key": wrapped, "device_name": c.device,
+		"device_public_key":           devPub,
+		"recovery_auth_salt":          recAuthSalt,
+		"recovery_kek_salt":           recKEKSalt,
+		"recovery_verifier":           recVerifier,
+		"wrapped_master_key_recovery": wrappedRecovery,
 	}, false)
 	if status != http.StatusForbidden {
 		t.Fatalf("首个用户后注册应关闭，得到 %d", status)
@@ -165,13 +202,21 @@ func TestEndToEndRegisterSyncDecrypt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 0002 协议登录须携带 32B 设备公钥；此处复用注册设备公钥，模拟"已批准设备重复登录"。
+	// 完整的新设备 pending→审批→换发流程将在 T6 端到端测试中覆盖。
 	status, login := c2.do(http.MethodPost, "/api/v1/auth/login", map[string]any{
-		"username": "alice", "auth_verifier": v2, "device_name": "second-device",
+		"username":          "alice",
+		"auth_verifier":     v2,
+		"device_name":       "second-device",
+		"device_public_key": base64.StdEncoding.EncodeToString(devPub),
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("登录失败: %d", status)
 	}
-	c2.token = login["access_token"].(string)
+	if login["status"].(string) != "approved" {
+		t.Fatalf("已批准设备重复登录应返回 approved，实际 %v", login["status"])
+	}
+	c2.token = login["bundle"].(map[string]any)["access_token"].(string)
 	kek2, err := crypto.DeriveKey(c2.password, c2.kekSalt)
 	if err != nil {
 		t.Fatal(err)

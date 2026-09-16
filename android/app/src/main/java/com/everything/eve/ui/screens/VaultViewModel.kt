@@ -10,6 +10,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class NoteView(val id: String, val title: String, val body: String, val updatedAt: Long)
 
@@ -20,10 +23,14 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
         if (!unlocked) emptyList() else records.mapNotNull { it.toNoteView() }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /** 最近一次成功同步时间（毫秒），顶栏展示“上次同步 HH:mm”。 */
+    val lastSyncAt = ServiceLocator.repo.observeLastSuccessfulSync()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
     fun createNote(title: String, body: String) {
         viewModelScope.launch {
             ServiceLocator.repo.createNote(title, body)
-            SyncScheduler.requestImmediate(getApplication())
+            SyncScheduler.requestCollectNow(getApplication())
         }
     }
 
@@ -44,4 +51,10 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
         } catch (_: Exception) {
             null
         }
+}
+
+/** 毫秒 → “HH:mm”；0/null 给空串由调用方兜底。 */
+fun formatSyncTime(ms: Long?): String {
+    if (ms == null || ms == 0L) return "未同步"
+    return "上次同步 " + SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ms))
 }
