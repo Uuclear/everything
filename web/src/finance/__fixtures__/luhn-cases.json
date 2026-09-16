@@ -1,0 +1,11 @@
+[
+  { "input": "4111111111111111", "expected": true },
+  { "input": "4111 1111 1111 1111", "expected": true },
+  { "input": "4111-1111-1111-1111", "expected": true },
+  { "input": "4111111111111112", "expected": false },
+  { "input": "", "expected": false },
+  { "input": "abcd", "expected": false },
+  { "input": "1", "expected": false },
+  { "input": "5555555555554444", "expected": true },
+  { "input": "6212345678901232", "expected": true }
+]

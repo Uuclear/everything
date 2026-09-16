@@ -23,6 +23,11 @@ import {
 // 文件名说明：eventsStore 实际导出名为 `useEventRulesStore`，因其文件名
 // `event-rules.ts`（不与 4a SSE channel `events.ts` 冲突）。
 import { useEventRulesStore } from './event-rules'
+// 阶段 5 / Task 10（TR-11.1）挂载点：finance 模块独立 Pinia store
+// （web/src/stores/finance.ts）。同样在 vault.sync 末尾追加 financeStore.pullAll
+// try-catch 块；财务模块与事件模块使用各自的 CryptoChannel 与 since 游标，
+// 互不干扰；任一模块解密失败不破坏 4a vault 闭环。
+import { useFinanceStore } from './finance'
 
 /**
  * 命名地点（module=place）解密缓存记录（阶段 4a / tasks.md Task 9）。
@@ -218,6 +223,17 @@ export const useVaultStore = defineStore('vault', () => {
       await eventsStore.pullAll(full ? 0 : since)
     } catch (e) {
       // 单模块同步失败不破坏 4a 闭环（与 ingest 容错纪律一致）
+    }
+    // ---- 阶段 5 / TR-11.1 挂载点：财务模块拉取 ----
+    // 与 eventsStore 同款 try-catch：finance 模块走独立 CryptoChannel；
+    // 调用 financeStore.pullAll 时 sinceMs 复用 vault 已累计水位；
+    // full=true 走 sinceMs=0 全量。解密失败抛异常由本 try-catch 吞掉，
+    // 4a vault 闭环不因此中断。
+    try {
+      const financeStore = useFinanceStore()
+      await financeStore.pullAll(full ? 0 : since)
+    } catch (e) {
+      // 单模块同步失败不破坏 4a 闭环（与事件模块同策略）
     }
   }
 

@@ -13,6 +13,14 @@ import com.everything.eve.data.event.EventDao
 import com.everything.eve.data.event.EventEntity
 import com.everything.eve.data.event.EventReminderLogDao
 import com.everything.eve.data.event.EventReminderLogEntity
+import com.everything.eve.data.finance.dao.FinanceAccountDao
+import com.everything.eve.data.finance.dao.FinanceCardDao
+import com.everything.eve.data.finance.dao.FinanceReminderLogDao
+import com.everything.eve.data.finance.dao.FinanceTxDao
+import com.everything.eve.data.finance.entity.FinanceAccountEntity
+import com.everything.eve.data.finance.entity.FinanceCardEntity
+import com.everything.eve.data.finance.entity.FinanceReminderLogEntity
+import com.everything.eve.data.finance.entity.FinanceTxEntity
 
 @Database(
     entities = [
@@ -24,8 +32,13 @@ import com.everything.eve.data.event.EventReminderLogEntity
         // 阶段 4b：日程/日历模块（v5 迁移新增）
         EventEntity::class,
         EventReminderLogEntity::class,
+        // 阶段 5：财务模块（v6 迁移新增——账户/卡/流水/提醒日志四表）
+        FinanceAccountEntity::class,
+        FinanceCardEntity::class,
+        FinanceTxEntity::class,
+        FinanceReminderLogEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class EveDatabase : RoomDatabase() {
@@ -40,6 +53,18 @@ abstract class EveDatabase : RoomDatabase() {
 
     /** 阶段 4b：提醒降级日志 DAO（v5 迁移新增）。 */
     abstract fun eventReminderLogDao(): EventReminderLogDao
+
+    /** 阶段 5：财务账户 DAO（v6 迁移新增）。 */
+    abstract fun financeAccountDao(): FinanceAccountDao
+
+    /** 阶段 5：财务银行卡 DAO（v6 迁移新增）。 */
+    abstract fun financeCardDao(): FinanceCardDao
+
+    /** 阶段 5：财务流水 DAO（v6 迁移新增）。 */
+    abstract fun financeTxDao(): FinanceTxDao
+
+    /** 阶段 5：财务提醒降级日志 DAO（v6 迁移新增）。 */
+    abstract fun financeReminderLogDao(): FinanceReminderLogDao
 
     companion object {
         /**
@@ -193,9 +218,181 @@ abstract class EveDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v5 → v6：新增财务四张表（账户/银行卡/流水/提醒日志）。
+         *
+         * 与 4a v3→v4 / 4b v4→v5 同模式：仅 CREATE TABLE IF NOT EXISTS + 索引，
+         * 不 ALTER/DROP 既有七表（records / sync_state / collector_state /
+         * location_points / location_outbox / event / event_reminder_log），
+         * 保证既有数据零影响。
+         *
+         * finance_account（spec FR-1.1 字段表）：
+         *  - 14 列（含 schema_version / module / type / dirty / deleted 五列系统
+         *    字段，与 FinanceAccountEntity 一一对应）；
+         *  - 索引 (updated_at) 服务增量同步游标，(dirty) 服务同步推送对账。
+         *
+         * finance_card（spec FR-1.2 字段表）：
+         *  - 21 列（含 credit_limit / used_limit / billing_day / due_day /
+         *    brand / expiry_month / expiry_year 等信用卡专用字段）；
+         *  - **零知识红线**：卡号完整 PAN **不入库**；本表只存 `last4`
+         *    （已通过 Luhn 校验的末四位）。
+         *
+         * finance_tx（spec FR-1.3 字段表）：
+         *  - 18 列（含 account_id / card_id / transfer_to_account_id 三组关联
+         *    字段，关联账户/卡被删除后保留为历史引用）；
+         *  - 索引 (occurred_at) 服务按时间排序与月报聚合，
+         *    (account_id) 服务按账户过滤。
+         *
+         * finance_reminder_log（spec FR-4）：
+         *  - 自增 INTEGER PRIMARY KEY AUTOINCREMENT；
+         *  - 4 列（ref_id / ref_kind / fire_at / delivered）全 NOT NULL；
+         *  - 严禁写 title/amount/last4 等明文（NFR-1 零知识红线）；
+         *  - ref_kind 五枚举（v1 启用前两类，v2 占位后三类）。
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // ---- 步骤 1：建 finance_account 表（spec FR-1.1）----
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS finance_account (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        currency TEXT NOT NULL,
+                        balance TEXT NOT NULL,
+                        note TEXT,
+                        icon TEXT,
+                        color TEXT,
+                        archived INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        schema_version INTEGER NOT NULL DEFAULT 1,
+                        module TEXT NOT NULL DEFAULT 'finance',
+                        type TEXT NOT NULL DEFAULT 'account',
+                        dirty INTEGER NOT NULL DEFAULT 1,
+                        deleted INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_account_updated_at " +
+                        "ON finance_account (updated_at)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_account_dirty " +
+                        "ON finance_account (dirty)",
+                )
+
+                // ---- 步骤 2：建 finance_card 表（spec FR-1.2）----
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS finance_card (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        issuer TEXT NOT NULL,
+                        last4 TEXT NOT NULL,
+                        currency TEXT NOT NULL,
+                        credit_limit TEXT,
+                        used_limit TEXT,
+                        billing_day INTEGER,
+                        due_day INTEGER,
+                        brand TEXT,
+                        expiry_month INTEGER,
+                        expiry_year INTEGER,
+                        holder TEXT,
+                        note TEXT,
+                        icon TEXT,
+                        color TEXT,
+                        archived INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        schema_version INTEGER NOT NULL DEFAULT 1,
+                        module TEXT NOT NULL DEFAULT 'finance',
+                        type TEXT NOT NULL DEFAULT 'card',
+                        dirty INTEGER NOT NULL DEFAULT 1,
+                        deleted INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_card_updated_at " +
+                        "ON finance_card (updated_at)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_card_dirty " +
+                        "ON finance_card (dirty)",
+                )
+
+                // ---- 步骤 3：建 finance_tx 表（spec FR-1.3）----
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS finance_tx (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        account_id TEXT NOT NULL,
+                        card_id TEXT,
+                        kind TEXT NOT NULL,
+                        amount TEXT NOT NULL,
+                        currency TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        occurred_at INTEGER NOT NULL,
+                        note TEXT,
+                        icon TEXT,
+                        color TEXT,
+                        transfer_to_account_id TEXT,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        schema_version INTEGER NOT NULL DEFAULT 1,
+                        module TEXT NOT NULL DEFAULT 'finance',
+                        type TEXT NOT NULL DEFAULT 'tx',
+                        dirty INTEGER NOT NULL DEFAULT 1,
+                        deleted INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_tx_updated_at " +
+                        "ON finance_tx (updated_at)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_tx_occurred_at " +
+                        "ON finance_tx (occurred_at)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_tx_account_id " +
+                        "ON finance_tx (account_id)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_tx_dirty " +
+                        "ON finance_tx (dirty)",
+                )
+
+                // ---- 步骤 4：建 finance_reminder_log 表（spec FR-4）----
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS finance_reminder_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        ref_id TEXT NOT NULL,
+                        ref_kind TEXT NOT NULL,
+                        fire_at INTEGER NOT NULL,
+                        delivered INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_reminder_log_fire_at " +
+                        "ON finance_reminder_log (fire_at)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_reminder_log_ref " +
+                        "ON finance_reminder_log (ref_id, ref_kind)",
+                )
+            }
+        }
+
         fun build(context: Context): EveDatabase =
             Room.databaseBuilder(context, EveDatabase::class.java, "eve.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build()
     }
 }

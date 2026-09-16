@@ -12,6 +12,12 @@ import SecurityView from '../views/SecurityView.vue'
 import LocationsView from '../views/LocationsView.vue'
 // 阶段 4b — 日程/日历视图：与既有密码库/轨迹同级，在 /vault 主框架内。
 import CalendarView from '../views/CalendarView.vue'
+// 阶段 5 — 财务视图：与轨迹 / 日历同级, 在 /finance 主框架内（独立子应用
+// 框架, 便于后续拆分子包 / 权限独立配置）。
+import FinanceView from '../views/FinanceView.vue'
+import FinanceAccountEditor from '../views/finance/FinanceAccountEditor.vue'
+import FinanceCardEditor from '../views/finance/FinanceCardEditor.vue'
+import FinanceTxEditor from '../views/finance/FinanceTxEditor.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(), // hash 模式对单二进制 SPA 托管最友好
@@ -35,6 +41,29 @@ export const router = createRouter({
         // 设备与安全设置也在主框架内（侧边导航进入）。
         { path: 'devices', name: 'devices', component: DevicesView },
         { path: 'security', name: 'security', component: SecurityView },
+      ],
+    },
+    // 阶段 5 — 财务独立子框架（继承全局登录守卫）。
+    {
+      path: '/finance',
+      component: AppShell,
+      children: [
+        { path: '', name: 'finance', component: FinanceView },
+        {
+          path: 'editor/account/:id?',
+          name: 'finance-editor-account',
+          component: FinanceAccountEditor,
+        },
+        {
+          path: 'editor/card/:id?',
+          name: 'finance-editor-card',
+          component: FinanceCardEditor,
+        },
+        {
+          path: 'editor/tx/:id?',
+          name: 'finance-editor-tx',
+          component: FinanceTxEditor,
+        },
       ],
     },
   ],

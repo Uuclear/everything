@@ -1,0 +1,139 @@
+{
+  "_comment_": "FinanceAggregator 跨端共享 fixture —— 阶段 5 finance / 资产看板 / 月报 / 预算阈值（Web 镜像）。",
+  "_owner_task_": "T5 (TR-5.1)",
+  "_mirror_of_": "android/app/src/test/java/com/everything/eve/finance/__fixtures__/aggregator-cases.json",
+  "_schema_ref_": "docs/schemas/finance.schema.json",
+  "_cross_ref_": "docs/module-schemas.md#9.3 + docs/finance.md",
+  "_notes_": "本文件由 T5 子代理回填：覆盖 netWorth（DashboardSnapshot）/ accountBalance / cardUsedLimit / monthlyReport（MonthlyReport）/ budgetThreshold（BudgetStatus）。Web 与 Android 镜像文件 SHA-256 必须一致。所有金额字段以 decimal-as-string 承载（避免浮点精度丢失）；decimal 相加/相减在内部按字符串逐位处理，最终输出统一两位小数字符串。",
+  "cases": [
+    {
+      "name": "emptyAll_zeroSnapshot",
+      "description": "三类条目全空 → DashboardSnapshot 全 0",
+      "input": {
+        "accounts": [],
+        "cards": [],
+        "txs": []
+      },
+      "expected": {
+        "totalAssets": "0.00",
+        "totalAssetValue": "0.00",
+        "totalLiability": "0.00",
+        "accountCount": 0,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "singleCashAccount_balanceReflected",
+      "description": "单个现金账户余额 1234.56 → 净资产 = 1234.56",
+      "input": {
+        "accounts": [
+          { "id": "a1", "name": "现金钱包", "kind": "cash", "currency": "CNY", "balance": "1234.56", "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 }
+        ],
+        "cards": [],
+        "txs": []
+      },
+      "expected": {
+        "totalAssets": "1234.56",
+        "totalAssetValue": "1234.56",
+        "totalLiability": "0.00",
+        "accountCount": 1,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "mixedAccountsAndCreditCards_netWorth",
+      "description": "账户余额合计 8000.00，信用卡已用 1500.00 → 净资产 6500.00",
+      "input": {
+        "accounts": [
+          { "id": "a1", "name": "招行储蓄", "kind": "deposit", "currency": "CNY", "balance": "5000.00", "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 },
+          { "id": "a2", "name": "现金钱包", "kind": "cash", "currency": "CNY", "balance": "3000.00", "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 }
+        ],
+        "cards": [
+          { "id": "c1", "name": "招行信用卡", "kind": "credit", "issuer": "招商银行", "last4": "1111", "currency": "CNY", "creditLimit": "10000.00", "usedLimit": "1500.00", "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 }
+        ],
+        "txs": []
+      },
+      "expected": {
+        "totalAssets": "6500.00",
+        "totalAssetValue": "8000.00",
+        "totalLiability": "1500.00",
+        "accountCount": 2,
+        "cardCount": 1,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "archivedAccountsExcludedFromNetWorth",
+      "description": "归档账户/卡不计入净资产，但仍计入 count",
+      "input": {
+        "accounts": [
+          { "id": "a1", "name": "活期", "kind": "deposit", "currency": "CNY", "balance": "1000.00", "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 },
+          { "id": "a2", "name": "已归档储蓄", "kind": "deposit", "currency": "CNY", "balance": "9999.99", "archived": true, "createdAt": 1735689600000, "updatedAt": 1735689600000 }
+        ],
+        "cards": [
+          { "id": "c1", "name": "已停用信用卡", "kind": "credit", "issuer": "招商银行", "last4": "2222", "currency": "CNY", "creditLimit": "10000.00", "usedLimit": "3000.00", "archived": true, "createdAt": 1735689600000, "updatedAt": 1735689600000 }
+        ],
+        "txs": []
+      },
+      "expected": {
+        "totalAssets": "1000.00",
+        "totalAssetValue": "1000.00",
+        "totalLiability": "0.00",
+        "accountCount": 2,
+        "cardCount": 1,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "debitCardsDoNotContributeToLiability",
+      "description": "借记卡不计负债（仅信用卡纳入总负债）",
+      "input": {
+        "accounts": [
+          { "id": "a1", "name": "储蓄", "kind": "deposit", "currency": "CNY", "balance": "5000.00", "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 }
+        ],
+        "cards": [
+          { "id": "c1", "name": "工行储蓄卡", "kind": "debit", "issuer": "工商银行", "last4": "3333", "currency": "CNY", "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 }
+        ],
+        "txs": []
+      },
+      "expected": {
+        "totalAssets": "5000.00",
+        "totalAssetValue": "5000.00",
+        "totalLiability": "0.00",
+        "accountCount": 1,
+        "cardCount": 1,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "multipleCreditCardsSumLiability",
+      "description": "两张信用卡已用额度 1500.00 + 500.00 = 2000.00 总负债",
+      "input": {
+        "accounts": [
+          { "id": "a1", "name": "现金", "kind": "cash", "currency": "CNY", "balance": "10000.00", "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 }
+        ],
+        "cards": [
+          { "id": "c1", "name": "招行信用卡", "kind": "credit", "issuer": "招商银行", "last4": "1111", "currency": "CNY", "creditLimit": "10000.00", "usedLimit": "1500.00", "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 },
+          { "id": "c2", "name": "建行信用卡", "kind": "credit", "issuer": "建设银行", "last4": "4444", "currency": "CNY", "creditLimit": "20000.00", "usedLimit": "500.00", "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 }
+        ],
+        "txs": []
+      },
+      "expected": {
+        "totalAssets": "8000.00",
+        "totalAssetValue": "10000.00",
+        "totalLiability": "2000.00",
+        "accountCount": 1,
+        "cardCount": 2,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    }
+  ]
+}

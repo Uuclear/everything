@@ -56,6 +56,9 @@ fun VaultScreen(
     // 阶段 4b Task 9 / TR-9.1：日历入口回调（沿用 4a 既有 onOpenCollector / onOpenDevices
     // 模式镜像新增；AppNav.kt 中绑定 nav.navigate(Routes.CALENDAR)）。
     onOpenCalendar: () -> Unit,
+    // 阶段 5 Task 10 / TR-10.1：财务入口回调（沿用 4b CALENDAR 同款模式镜像新增；
+    // AppNav.kt 中绑定 nav.navigate(Routes.FINANCE) → FinanceScreen）。
+    onOpenFinance: () -> Unit,
     vm: VaultViewModel = viewModel(),
 ) {
     val unlocked by ServiceLocator.auth.isUnlocked.collectAsState()
@@ -80,6 +83,11 @@ fun VaultScreen(
                     // 阶段 4b Task 9 / TR-9.1：日历入口（沿用 4a 既有「采集/设备」TextButton 镜像模式；
                     // 调 onOpenCalendar → AppNav 路由到 CalendarScreen）。
                     TextButton(onClick = onOpenCalendar) { Text(stringResource(R.string.nav_calendar)) }
+                    // 阶段 5 Task 10 / TR-10.1：财务入口（沿用 4b CALENDAR 同款镜像——
+                    // 顶部「财务」TextButton → onOpenFinance → AppNav 路由到 FinanceScreen。
+                    // 使用 stringResource(R.string.nav_finance) 而非硬编码，与 4b 日历入口
+                    // 文案加载方式保持一致）。
+                    TextButton(onClick = onOpenFinance) { Text(stringResource(R.string.nav_finance)) }
                     TextButton(onClick = { vm.syncNow() }) {
                         Text("同步\n${formatSyncTime(lastSync)}")
                     }

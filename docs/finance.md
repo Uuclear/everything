@@ -1,0 +1,540 @@
+# 财务模块（finance，阶段 5 v1）
+
+> **For agentic workers:** 本文件为财务模块**独立文档**，与
+> [`module-schemas.md`](module-schemas.md) 第 9 章配套引用；字段定义以
+> [`docs/schemas/finance.schema.json`](schemas/finance.schema.json)
+> （JSON Schema Draft 2020-12）为机器可读准绳，本文件为人类可读骨架。
+>
+> **零知识纪律**（继承 4a / 4b）：服务端只见密文与 records 元数据；明文账户名 /
+> 卡号 / 金额 / 分类 / 备注仅驻留 Android Room 与 Web 浏览器内存，**不写**
+> SharedPreferences / localStorage / IndexedDB / 日志 / 通知文案 / 崩溃消息。
+> 通知文案**绝不**渲染金额数字 / 卡号后四位 / 具体日期数字。
+
+---
+
+## 目录
+
+1. [模块定位与边界](#1-模块定位与边界)
+2. [分类体系](#2-分类体系)
+3. [月报聚合规则](#3-月报聚合规则)
+4. [资产看板定义](#4-资产看板定义)
+5. [Luhn 校验](#5-luhn-校验)
+6. [提醒触发规则](#6-提醒触发规则)
+7. [v2 钩子说明](#7-v2-钩子说明)
+8. [跨端共享 fixture 命名规范](#8-跨端共享-fixture-命名规范)
+9. [交叉引用](#9-交叉引用)
+
+---
+
+## 1. 模块定位与边界
+
+### 1.1 module 与 type 子类型
+
+财务作为**单一 module** = `"finance"`，所有子类型通过 `type` 字段区分。
+完全复用阶段 1 records 信封（XChaCha20-Poly1305 + AAD
+`eve:v1:record:{id}:{module}:{BE(uint64 version)}`，`module="finance"`），
+与 4a `place` / 4b `event` **三端逐字节一致**——**不新造** envelope 参数
+或服务端接口。
+
+```
+module = "finance"
+type   ∈ { "account", "card", "tx", "policy", "subscription", "loan", "contract" }
+```
+
+**取舍说明**：选 A（单 module + type 子类型）而非 B（按子类型拆 module）：
+财务是高度聚合场景——资产看板需要交叉查询（账户余额 + 信用卡已用额度 +
+应收/借款），单一 module 下客户端聚合更直接；records envelope 与版本管理
+按 module 维度升级更顺畅。
+
+**v1 实际只下发三种 type**：`account` / `card` / `tx`；
+`policy` / `subscription` / `loan` / `contract` 在 v2 启用，本期**仅占位常量
+与 schema_version=1 钩子**，**不下发编辑器**。
+
+### 1.2 服务端零知识边界
+
+服务端 Chi `approved` 分组下 `/records/batch` 已承载批量幂等（阶段 0–4b 既有
+实现）。财务模块**完全复用**既有链路：
+
+- 服务端不解密 / 不校验 amount / 不缓存明文余额；
+- 服务端不引入新表 / 新列 / 新接口；
+- finance 与 place / event 同走 `/records/batch`；
+- 服务端可见的元数据仅限 records 表已有列（`id` / `module` / `type`
+  因投递校验入索引，但财务字段均处于密文中）。
+
+### 1.3 客户端聚合（不上行）
+
+净资产 / 总资产 / 总负债 / 分类饼图 / 月报预算阈值全部**在客户端
+聚合**，**不上行服务端**。聚合算法抽为跨端共享纯函数（Web
+`web/src/finance/aggregator.ts` + Android `FinanceAggregator.kt`），由 JVM 与
+Vitest 单测覆盖，三端 fixture 镜像加载 + SHA-256 一致。
+
+### 1.4 与既有架构的关系
+
+| 模块 | module | type | 加密链路 | 服务端可见 |
+|---|---|---|---|---|
+| 阶段 1 `pass` | `pass` | `login` / `note` / `card` | records + AAD | 密文 + 元数据 |
+| 阶段 4a `place` | `place` | `place` | records + AAD | 密文 + 元数据 |
+| 阶段 4b `event` | `event` | `event` | records + AAD | 密文 + 元数据 |
+| **阶段 5 `finance`** | **`finance`** | **`account` / `card` / `tx` (+ v2 占位 4 类)** | **records + AAD** | **密文 + 元数据** |
+
+财务模块严格遵循 `docs/development.md` "新增业务模块不改 records 表"的约定
+——仅定义模块 JSON Schema + 客户端表单即可。
+
+---
+
+## 2. 分类体系
+
+财务记账默认分类（v1 内置常量），**不持久化分类字典到服务端**，仅客户端
+内置 + 自定义自然扩展。
+
+### 2.1 默认分类列表
+
+| kind | 默认分类 |
+|---|---|
+| `expense`（支出） | 餐饮 / 交通 / 居家 / 购物 / 娱乐 / 医疗 / 教育 / 通讯 / 旅行 / 其他 |
+| `income`（收入） | 工资 / 奖金 / 投资 / 兼职 / 红包 / 退款 / 其他 |
+| `transfer`（转账） | 无分类（仅记录金额 + 双方账户 / 卡） |
+
+### 2.2 用户自定义分类自然扩展机制
+
+用户可在编辑器中输入自定义分类字符串（如"咖啡""健身"），作为新分类自然
+扩展：
+
+- 分类列表 = `default_categories ∪ {历史流水中出现过的 category 去重}`；
+- 完全本地聚合，**不上行**；
+- 自定义分类不持久化到服务端（避免泄漏用户语义习惯）。
+
+### 2.3 字段约束
+
+- `category` 长度 ≤20 字符（Android schema 与 fixture 锁定）；
+- 前端表单校验非空；
+- 服务端不解密故无二次校验。
+
+### 2.4 `transfer` 的中性属性
+
+`transfer`（账户间转账）**不计入收入 / 支出**——它属于账户间内部调动，
+不构成真实收支。这一约定贯穿月报聚合（§3）、资产看板（§4）与预算阈值（§3.2）
+三处口径。
+
+---
+
+## 3. 月报聚合规则
+
+月报页（v1）展示当月收支汇总，**完全在客户端计算**，**不上行服务端**。
+聚合入口为跨端共享纯函数
+[`FinanceAggregator.monthlyReport(...)`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt)，
+其 Web 镜像为 `web/src/finance/aggregator.ts` 的 `monthlyReport` 函数。
+
+### 3.1 汇总口径
+
+`monthlyReport(yearMonth, txs, accounts)` 函数签名与字段：
+
+```
+yearMonth       = "YYYY-MM"           # 年月键（本地日历月）
+income          = decimal-as-string   # 当月收入合计（仅 kind="income"）
+expense         = decimal-as-string   # 当月支出合计（仅 kind="expense"）
+net             = decimal-as-string   # = income - expense（cents 整数减法）
+txCount         = int                 # 当月流水条数（含三类）
+categoryBreakdown = Map<category, decimal-as-string>   # 仅 expense 分类
+```
+
+**算法骨架**（与 [FinanceAggregator.kt](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt) §monthlyReport 完全一致）：
+
+1. 按 `tx.occurredAt` 的本地日历日拆出 `YYYY-MM` 分量（与 4b `Recurrence.kt` 同款 CST 口径）；
+2. 仅命中 `yearMonth` 的流水参与；
+3. `kind="income"` 累加进 `income`；
+4. `kind="expense"` 累加进 `expense` + 计入 `categoryBreakdown`；
+5. `kind="transfer"` **不计入** income / expense（仅计入 `txCount`）；
+6. `net = income - expense`（cents 整数减法，负数 = 当月净流出）。
+
+### 3.2 预算阈值（可选设置）
+
+`FinanceAggregator.budgetThreshold(monthlyIncome, monthlyExpense, threshold)`
+返回 `BudgetStatus` 三档枚举：
+
+| 比值（expense / income） | 状态 | 文案 |
+|---|---|---|
+| `< 1.0` | `OK` | 支出未达月收入（绿） |
+| `1.0 ≤ 比值 < 1.5` | `WARNING` | 超支预警（黄） |
+| `≥ 1.5` | `EXCEEDED` | 严重超支（红） |
+
+**特殊约定**：`monthlyIncome = 0`（零收入）时一律返回 `OK`，不抛错。
+实现中通过 `ratioX10000 = (expenseCents * 10000) / incomeCents` 做 cents 整数
+比较，避免 Long 截断误差。
+
+**纪律**：
+
+- **不阻断**保存：超支不拦截新流水录入；
+- **不上行**服务端：预算值仅存 Android DataStore + Web 内存 +
+  用户导出 JSON 备份，**不写** records；
+- 阈值系数 `threshold` 默认 `0.8`（支出达收入 80% 预警）。
+
+### 3.3 时区与月分桶
+
+`occurred_at` 取设备本地时区语义（与 4b event 同款 `tz_mode=local`），按本地
+日历日聚合当月汇总。`FinanceAggregator.yearMonthOf(ts)` 内部实现：
+
+```
+shifted = ts + TZ_OFFSET_MIN * 60_000
+return "%04d-%02d".format(year, monthValue)   // 用 UTC 字段读
+```
+
+**不持久化月度快照**，按需即时计算（O(N) 单用户量级 < 30ms）。
+
+---
+
+## 4. 资产看板定义
+
+资产看板**完全在客户端聚合**，**不上行服务端**。聚合入口为
+[`FinanceAggregator.netWorth(...)`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt)
+对应 Web `aggregator.ts` 的 `aggregate` 函数。
+
+### 4.1 公式
+
+实现位于
+[`FinanceAggregator.netWorth`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt)：
+
+- **总资产（`totalAssetValue`）** = `Σ(非归档账户 balance)`
+  - 仅 `archived=false` 的账户；
+  - 信用卡"信用额度"非自有资产，**不计入**；
+- **总负债（`totalLiability`）** = `Σ(非归档信用卡 usedLimit)`
+  - 卡过滤：`archived=false` 且 `kind="credit"`；
+  - 借记卡不计负债（schema 语义对齐）；
+- **净资产（`totalAssets`）** = `totalAssetValue - totalLiability`
+  - cents 整数运算天然避免浮点精度丢失；
+  - 负数表示"资不抵债"，业务允许；
+- **货币（`currency`）** = `accounts[0].currency ?? "CNY"`；
+- **计数（`accountCount` / `cardCount` / `txCount`）** = 列表计数（含归档条目）。
+
+### 4.2 边界条件
+
+- `accounts` / `cards` / `txs` 任一为空 → 返回全零 `DashboardSnapshot`，不抛错；
+- `usedLimit` / `balance` 为 null 或非数字 → 视为 `"0.00"`，跳过该项；
+- 卡片兜底 currency 在 T5 当前实现仅做"账户优先 → DEFAULT_CURRENCY 二级降级"
+  （CardLike 当前未承载 currency 字段；Web 镜像行为一致）。
+
+### 4.3 DashboardSnapshot 字段
+
+```
+totalAssets          decimal-as-string   # 净资产（= 总资产 - 总负债）
+totalAssetValue      decimal-as-string   # 总资产（仅账户余额）
+totalLiability       decimal-as-string   # 总负债（信用卡已用）
+accountCount         int                 # 列表计数（含归档）
+cardCount            int                 # 列表计数（含归档）
+txCount              int                 # 流水总数
+currency             string (ISO 4217)   # 全空时 = "CNY"
+```
+
+### 4.4 单账户 / 单卡聚合
+
+辅助函数供卡片详情页 / 编辑器校验用：
+
+- `accountBalance(account, txs)`：起点 = `account.balance`，按 `tx.accountId` /
+  `tx.transferToAccountId` 双向调整（`income` +、`expense` −、`transfer` 转出 −
+  / 转入 +）。
+- `cardUsedLimit(card, txs)`：起点 = `card.usedLimit ?? "0"`，仅 `tx.cardId
+  == card.id` 参与；`expense` +、`income` 还款 −；**钳位到 0**（不会为负）。
+
+### 4.5 看板为本地视图
+
+- 仅在内存 + 浏览器 / Compose 渲染层展示；
+- **不写入** records 表；
+- **不参与同步**；
+- 刷新策略：账户 / 卡 / 流水变更后即时重算（O(N) 单用户量级 < 50ms）。
+
+---
+
+## 5. Luhn 校验
+
+UI 录入完整卡号（13–19 位数字）时做 **Luhn 校验**，校验通过后**仅保留后四位**
+入信封（**完整卡号不持久化**）。
+
+### 5.1 算法描述
+
+Luhn 算法（mod 10）步骤：
+
+1. 从右到左遍历卡号各位数字；
+2. 偶数位（从右数第 2、4、6……位）数字 ×2，若结果 >9 则将十位与个位相加
+   （等价于 `n - 9`）；
+3. 所有位求和；
+4. 总和 mod 10 == 0 即合法。
+
+### 5.2 实现锚点
+
+跨端纯函数镜像：
+
+| 端 | 文件 | 关键常量 |
+|---|---|---|
+| Web | `web/src/finance/luhn.ts` | `MIN_PAN_LENGTH=13`、`MAX_PAN_LENGTH=19`、`SEPARATOR_CHARS=" -"`、`LAST4_LENGTH=4`、`MODULUS=10`、`DOUBLE_MULTIPLIER=2` |
+| Android | [`Luhn.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/Luhn.kt) | 同上 |
+
+**步骤**：
+
+1. `luhnValidate(pan)`：剥离 `" "` / `"-"` 分隔符 → 长度 `13 ≤ len ≤ 19` →
+   纯数字校验 → 模 10 累加；
+2. `extractLast4(pan)`：Luhn 校验通过后取末 4 位数字字符串。
+
+### 5.3 BIN 推断表（`brand` 字段）
+
+按卡号前缀（BIN 段）推断发卡品牌，写入 `finance_card.brand` 字段：
+
+| 品牌 | BIN 段 |
+|---|---|
+| `visa` | `4` |
+| `master` | `51-55` / `2221-2720` |
+| `unionpay` | `62` / `81` |
+| `amex` | `34` / `37` |
+| `jcb` | `3528-3589` |
+| `discover` | `6011` / `65` / `644-649` / `622126-622925` |
+| `unknown` | 未识别 |
+
+### 5.4 仅后四位入库纪律
+
+- **完整卡号不入库**（不进 Room / localStorage / IndexedDB / 服务端）；
+- **后四位**（4 位数字字符串）入 `card.last4` 字段；
+- UI 列表仅展示脱敏（如"•••• 1234"）；
+- 校验失败弹错并清空输入框，**不持久化**任何位；
+- 空串不触发校验（`last4` 必填校验由前端表单把关）。
+
+### 5.5 跨端实现
+
+| 端 | 文件 |
+|---|---|
+| Web | `web/src/finance/luhn.ts`（纯函数，Vitest 覆盖） |
+| Android | [`Luhn.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/Luhn.kt)（纯函数镜像，JUnit 覆盖） |
+
+---
+
+## 6. 提醒触发规则
+
+财务提醒**完全复用**阶段 4b `ReminderScheduler.nextTrigger / scheduleNext /
+rebuildChain`，**不新建**第二个 Scheduler；通过"扩展模块分支"接入。
+计算入口为跨端共享纯函数
+[`NextCardFiring.nextTrigger(...)`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/NextCardFiring.kt)
+对应 Web `web/src/finance/nextCardFiring.ts`。
+
+### 6.1 触发时机常量
+
+| 触发点 | 常量 | 备注 |
+|---|---|---|
+| 信用卡账单日 `billing_day` **T+0** | `TRIGGER_HOUR=9`、`TRIGGER_MINUTE=0` | v1 启用 |
+| 信用卡还款日 `billing_day + due_day` **T-1** | `PAYMENT_DUE_DAYS_BEFORE=1` | v1 启用（仅 `due_day` 非空时） |
+| 订阅扣费日 **T-1** | （同 1 天） | v2 钩子（`subscription_renewal`） |
+| 保单到期 **T-30** | （30 天） | v2 钩子（`policy_expiry`） |
+| 应收借款到期 **T-7** | （7 天） | v2 钩子（`loan_due`） |
+
+### 6.2 单点日期算法（双触发口径）
+
+[`NextCardFiring.nextTrigger(card, nowMs)`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/NextCardFiring.kt) 算法骨架：
+
+1. **早退守卫**：`card.archived=true` 或 `card.billingDay=null` → 返回 `null`；
+2. **拆 `nowMs` 本地日历分量**：用 CST UTC+8 口径（与 4b Recurrence.kt 同款）；
+3. **账单日候选**（当月 + 下月，选 `> nowMs`）：
+   - 当月 `billingDay` T+0 09:00 CST；
+   - 下月 `billingDay` T+0 09:00 CST；
+5. **还款日 T-1 候选**（仅 `card.dueDay` 非空时）：
+   - 还款日 = `billingDay + dueDayOffset`；
+   - 超过当月最大天数 → 钳位到当月最大日（31 在 2 月按 28/29 计）；
+   - T-1 = 还款日 − 1 天（月初 1 日时 `minusDays` 退到上月最后一天）；
+6. **取两类候选最小值**（最近一次未来触发）；
+7. 全过期 → 返回 `null`（业务语义：近期无提醒）。
+
+### 6.3 跨月滚动与月底裁剪
+
+`due_day` 为 offset 模式：`billing_day + due_day_offset` 跨月滚动——
+
+- 如 `billing_day=5, due_day=25` → 还款日 = 当月 30 日；
+- 31 在 2 月按当月最大日裁剪（如 `billing_day=1, due_day=30` 在 2 月 = 28/29 日）；
+- 当 `due_day=1` 时，T-1 通过 `LocalDate.minusDays(1)` 自动退到上月最后一天。
+
+### 6.4 批量与链式调度
+
+[`NextCardFiring.upcomingTriggers(cards, nowMs, limit=5)`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/NextCardFiring.kt)：
+
+- 遍历所有卡，收集非 null 候选；
+- 按 ms 升序排序，取前 N 条（默认 N=5）；
+- 与 [`ReminderScheduler.rebuildChain(ctx)`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/reminder/ReminderScheduler.kt)
+  的"全局最小触发点"语义对齐。
+
+### 6.5 调度复用与 module 路由
+
+财务提醒**复用**阶段 4b [`ReminderScheduler`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/reminder/ReminderScheduler.kt)：
+
+- **单闹钟 requestCode** `0x45564556` = "EVEEV" hex，event + finance 共用；
+- `rebuildChain(ctx)` 阶段 5 扩展：合并事件 + 财务两类触发，取全局最小
+  `nextTrigger` 写**单闹钟**（严禁新建第二条调度链路）；
+- Intent extras 新增 `EXTRA_MODULE` / `EXTRA_REF_KIND` / `REF_ID=card.id` 三字段；
+- 触发常量：
+  - `MODULE_EVENT="event"` / `MODULE_FINANCE="finance"`；
+  - `REF_KIND_CARD_STATEMENT_DUE="card_statement_due"`；
+  - `REF_KIND_CARD_PAYMENT_DUE="card_payment_due"`；
+- `LOOKAHEAD_MS` = 14 天、`MAX_MONTH_LOOKAHEAD` = 24 个月（与 4b 同款）。
+
+### 6.6 模块分支路由（ReminderReceiver）
+
+[`ReminderReceiver`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/reminder/ReminderReceiver.kt)
+按 `module` 字段分支：
+
+| module | DAO | 通知文案 |
+|---|---|---|
+| `"event"`（或缺失，4b 兼容） | `EventDao` | title + "即将开始 / N 分钟后开始" |
+| `"finance"` | `FinanceCardDao` | 抽象文案（账单 / 还款），**不渲染金额 / 卡号后四位 / 具体日期** |
+
+**零知识红线**：通知文案**绝不**渲染金额 / 卡号后四位 / 具体日期数字。
+通知 id 用 `cardId.hashCode()`（同一卡片覆盖，不同卡片并行）。channelId =
+`"events"`（与事件共用，不新建 channel）。
+
+### 6.7 通知文案模板（v1 启用）
+
+| `ref_kind` | 文案模板 |
+|---|---|
+| `card_statement_due` | "💳 信用卡账单已生成" |
+| `card_payment_due` | "💳 信用卡还款临近" |
+
+跳转路由携带 `record_id` + `record_kind`，路由至 `Routes.FINANCE` 编辑器。
+
+### 6.8 提醒日志表（Room v6）
+
+`finance_reminder_log`（独立于 4b `event_reminder_log`）字段（4 列）：
+
+| 列 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | INTEGER PK AUTOINCREMENT | — | 自增 |
+| `ref_id` | TEXT | 是 | finance 条目 id（v1 即 `card.id`） |
+| `ref_kind` | TEXT | 是 | `card_statement_due` / `card_payment_due`（v2 启用后三类） |
+| `fire_at` | INTEGER | 是 | Unix 毫秒（触发时刻） |
+| `delivered` | INTEGER | 否 | 0/1；通知是否成功投递（POST_NOTIFICATIONS 拒绝时 = 0） |
+
+v1 仅启用前两类写入；订阅 / 保单 / 借款三类留 v2。
+
+---
+
+## 7. v2 钩子说明
+
+v2 扩展模块（保单 / 订阅 / 应收借款 / 合同发票）本期**仅占位**，不下发编辑器
+与详情页。`schema_version=1` 字段保留；类型枚举常量预留；编辑器入口灰度
+开关（v1 隐藏）；提醒枚举预留 5 类（v1 仅启用前两类）。
+
+### 7.1 类型常量（FinanceType）
+
+| 常量 | v1 启用 | v2 启用 |
+|---|---|---|
+| `ACCOUNT` | ✅ | ✅ |
+| `CARD` | ✅ | ✅ |
+| `TX` | ✅ | ✅ |
+| `POLICY`（保单） | ⏳ 占位 | ✅ |
+| `SUBSCRIPTION`（订阅） | ⏳ 占位 | ✅ |
+| `LOAN`（应收 / 借款） | ⏳ 占位 | ✅ |
+| `CONTRACT`（合同 / 发票） | ⏳ 占位 | ✅ |
+
+### 7.2 schema_version=1 保留
+
+所有 v1 条目（account / card / tx）明文 payload 顶部保留 `schema_version=1`
+字段（int，固定 1），便于 v2 启用时按 version 路由扩展字段。
+
+### 7.3 编辑器接入点
+
+v2 启用时按同款链路扩展：
+
+| 接入点 | v1 位置 | v2 扩展方式 |
+|---|---|---|
+| Web 路由 | `Routes.FINANCE` | 新增 `Routes.FINANCE_POLICY` 等 |
+| Web store | `web/src/stores/finance.ts`（Pinia） | 扩展同款 `upsert / delete / list / byId` 链路 |
+| 编辑器组件 | `AccountEditorDialog.vue` / `CardEditorDialog.vue` / `TxEditorDialog.vue` | 新增 `PolicyEditorDialog.vue` 等 |
+| Android Room DAO | `FinanceAccountDao` / `FinanceCardDao` / `FinanceTxDao` | 新增 `FinancePolicyDao` 等 |
+| Android Room 表 | `finance_account` / `finance_card` / `finance_tx` | 新增 `finance_policy` 等 |
+| Android Repository | `FinanceRepository` | 内部已留扩展点（不强制运行） |
+| 提醒枚举 | 5 类 `ref_kind` | 启用后三类（`subscription_renewal` / `policy_expiry` / `loan_due`） |
+
+### 7.4 未来增强（非 v2 立即启用）
+
+- 附件上传（合同 / 发票 / 保单 PDF / 扫描件）：依赖阶段 7+ 附件能力前置；
+- 银行 API / 银联开放接口直连同步；
+- 多币种 + 离线加密汇率包；
+- 投资账户实时行情；
+- 预算硬约束 + 超支告警 / SSE 推送；
+- AI 联动记账 + Agent 工具调用；
+- 应收借款 / 人情往来联动（与人际家庭模块打通）；
+- 净资产趋势图 + 现金流桑基图；
+- Web 端浏览器通知（Web Notification API 用户授权后接入）。
+
+---
+
+## 8. 跨端共享 fixture 命名规范
+
+跨端共享 fixture 镜像加载 + SHA-256 一致，文件位置与命名约定：
+
+### 8.1 Web 端
+
+```
+web/src/finance/__fixtures__/
+  ├─ luhn-cases.json              # Luhn 校验 + 后四位提取（≥6 用例）
+  ├─ aggregator-cases.json        # netWorth / accountBalance / cardUsedLimit
+  │                                 / monthlyReport / budgetThreshold（≥16 用例）
+  ├─ next-card-firing-cases.json  # nextTrigger / upcomingTriggers
+  └─ account-cases.json / card-cases.json / tx-cases.json   # 三类条目输入
+```
+
+### 8.2 Android 端（test resources）
+
+```
+android/app/src/test/resources/finance/__fixtures__/
+  ├─ luhn-cases.json              # Luhn 镜像（与 Web 同 SHA-256）
+  ├─ aggregator-cases.json        # 五个聚合函数镜像（同 SHA-256）
+  ├─ next-card-firing-cases.json  # 双触发候选镜像（同 SHA-256）
+  └─ account-cases.json / card-cases.json / tx-cases.json   # 三类条目输入
+```
+
+### 8.3 Android 端（test java fixtures）
+
+```
+android/app/src/test/java/com/everything/eve/finance/__fixtures__/
+  └─ account-cases.json / card-cases.json / tx-cases.json   # 三类条目输入
+```
+
+### 8.4 命名与字段规范
+
+- 文件名：**复数 + 中横线 + cases.json**（如 `luhn-cases.json`）；
+- 根字段：`cases` 数组，每条用例含 `name` / `input` / `expected`；
+- 时间戳字段：所有 `ts_*` / `*_at` 字段一律 Unix 毫秒 int64；
+- 金额字段：所有 `*_minor` 或 `balance` / `amount` 一律 **decimal-as-string**
+  （避免 JS / Kotlin Double 精度丢失）；
+- 字符串字段：UI 语义"必填 / 选填 / 默认"在每条用例的 `expected` 同步给出。
+
+### 8.5 三端 fixture 哈希一致性
+
+Web 与 Android 端对应 fixture 文件 SHA-256 **逐字节一致**，由 Task 2 / Task 3
+/ Task 5 / Task 8 实施时执行 SHA-256 比对并写入 Evidence 段。
+
+---
+
+## 9. 交叉引用
+
+| 引用对象 | 路径 / 章节 | 用途 |
+|---|---|---|
+| 模块明文 JSON Schema | [`module-schemas.md`](module-schemas.md) 第 9 章"finance 模块" | 字段定义的人类可读规范 |
+| JSON Schema 机器可读 | [`docs/schemas/finance.schema.json`](schemas/finance.schema.json) | Draft 2020-12 校验 |
+| 加密与 AAD 规则 | [`crypto.md`](crypto.md) §5.1 | AAD 沿用 `eve:v1:record:{id}:{module}:{BE(uint64 version)}`（module=`"finance"`） |
+| ReminderScheduler 复用 | [`android.md`](android.md) "财务模块（阶段 5）" | 4b 链式 AlarmManager 财务复用路径 |
+| Room v5→v6 迁移 | [`android.md`](android.md) "财务模块（阶段 5）" | finance_* 四表扩展 |
+| Android 纯函数聚合 | [`FinanceAggregator.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt) | 五个聚合 API 实现 |
+| Android 触发计算 | [`NextCardFiring.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/NextCardFiring.kt) | nextTrigger / upcomingTriggers |
+| Android Luhn 校验 | [`Luhn.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/Luhn.kt) | 卡号校验 + 后四位提取 |
+| Android 链式调度 | [`ReminderScheduler.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/reminder/ReminderScheduler.kt) | 单闹钟 + module 路由 |
+| Android 接收路由 | [`ReminderReceiver.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/reminder/ReminderReceiver.kt) | event / finance 分支 |
+| Android Room v6 | [`EveDatabase.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/EveDatabase.kt) | MIGRATION_5_6 + 四表 schema |
+| FR-1 字段详细定义 | `.trae/specs/stage5-finance/spec.md` §FR-1 | account / card / tx 三类字段源 |
+| 实施任务分解 | `.trae/specs/stage5-finance/tasks.md` Task 1 ~ Task 13 | 批派发序列与子任务 |
+| 4a 轨迹 place 模块 | [`module-schemas.md`](module-schemas.md) 第 7 章 | module=place 链路参考 |
+| 4b 日程 event 模块 | [`module-schemas.md`](module-schemas.md) 第 8 章 | module=event 链路参考 |
+
+---
+
+## 备注
+
+- 本文档为阶段 5 财务 v1 文档同步（T12）落地结果，与实际实现（Room v6 /
+  FinanceAggregator / NextCardFiring / Luhn / ReminderScheduler /
+  ReminderReceiver）逐字段一致；
+- 字段如有变更：`module-schemas.md` 第 9 章 / `finance.schema.json` / Web
+  `types.ts` / Android `Finance*Entity.kt` / 本文件**五端必须**同改 + 同步
+  更新 fixture（保持 SHA-256 一致仍由 fixture 派生）。

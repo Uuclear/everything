@@ -1,0 +1,96 @@
+{
+  "_comment_": "NextCardFiring 跨端共享 fixture —— 阶段 5 finance / 信用卡下一触发时刻（Web 镜像）。",
+  "_owner_task_": "T5 (TR-5.2)",
+  "_mirror_of_": "android/app/src/test/java/com/everything/eve/finance/__fixtures__/nextCardFiring-cases.json",
+  "_schema_ref_": "docs/schemas/finance.schema.json#/$defs/FinanceCard",
+  "_cross_ref_": "docs/finance.md#5",
+  "_notes_": "本文件由 T5 子代理回填：覆盖账单日 T+0 09:00 / 还款日 T-1 09:00 两类触发；归档卡 / 缺 billing_day / 缺 due_day 场景均返回 null。锚定时刻 nowMs = 1767229200000（CST 2026-01-01 09:00:00）；所有 expected 触发时刻按 CST 本地日历推算后转 Unix 毫秒。Web 与 Android 镜像文件 SHA-256 必须一致。nextTrigger 取两类候选中最近一次未来触发；如两个候选均已过则下个月滚动。",
+  "_anchor_now_ms": 1767229200000,
+  "_anchor_now_cst_iso": "2026-01-01T09:00:00+08:00",
+  "cases": [
+    {
+      "name": "statementDay_inFuture_firesThatDayAt0900",
+      "description": "账单日 15 日未过 → 返回当月 15 日 09:00（CST）的 ms",
+      "input": {
+        "card": { "id": "c1", "name": "招行信用卡", "kind": "credit", "issuer": "招商银行", "last4": "1111", "currency": "CNY", "billingDay": 15, "dueDay": 25, "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 },
+        "nowMs": 1767229200000
+      },
+      "expected": {
+        "triggerMs": 1768438800000,
+        "triggerCstIso": "2026-01-15T09:00:00+08:00"
+      }
+    },
+    {
+      "name": "statementDay_alreadyPassed_paymentDueFiresFirst",
+      "description": "nowMs 在账单日 T+0 09:00 之后但还款日 T-1 09:00 之前 → 返回还款日前一天 09:00",
+      "input": {
+        "card": { "id": "c2", "name": "建行信用卡", "kind": "credit", "issuer": "建设银行", "last4": "2222", "currency": "CNY", "billingDay": 5, "dueDay": 25, "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 },
+        "nowMs": 1768000800000
+      },
+      "expected": {
+        "triggerMs": 1769648400000,
+        "triggerCstIso": "2026-01-29T09:00:00+08:00",
+        "_note_": "账单日 1/5 09:00 CST = 1767574800000 < nowMs 1768000800000（CST 2026-01-09 17:00）已过；还款日 = 5+25=30（1 月有 31 天），T-1 = 1/29 09:00 CST = 1769648400000 > nowMs。"
+      }
+    },
+    {
+      "name": "paymentDueDay_oneDayBeforeDue",
+      "description": "账单日 1 日，还款日（billingDay + dueDayOffset=20）= 当月 21 日 → 还款日 T-1 = 当月 20 日 09:00（账单日已过但还款日未过）",
+      "input": {
+        "card": { "id": "c3", "name": "工行信用卡", "kind": "credit", "issuer": "工商银行", "last4": "3333", "currency": "CNY", "billingDay": 1, "dueDay": 20, "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 },
+        "nowMs": 1767229200000
+      },
+      "expected": {
+        "triggerMs": 1768870800000,
+        "triggerCstIso": "2026-01-20T09:00:00+08:00"
+      }
+    },
+    {
+      "name": "billingAndDueBothPassed_rollsToNextMonth",
+      "description": "nowMs 在当月账单日和还款日 T-1 之后 → 返回下月账单日 T+0 09:00",
+      "input": {
+        "card": { "id": "c4", "name": "中行信用卡", "kind": "credit", "issuer": "中国银行", "last4": "4444", "currency": "CNY", "billingDay": 3, "dueDay": 20, "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 },
+        "nowMs": 1769302800000
+      },
+      "expected": {
+        "triggerMs": 1770080400000,
+        "triggerCstIso": "2026-02-03T09:00:00+08:00",
+        "_note_": "账单日 1/3 09:00 CST = 1767488400000 < nowMs 1769302800000（CST 2026-01-21 09:00），已过；还款日 = 1/23，T-1 = 1/22 09:00 CST = 1769130000000 < nowMs，亦已过；下月账单日 2/3 09:00 CST = 1770080400000 > nowMs。"
+      }
+    },
+    {
+      "name": "archivedCard_returnsNull",
+      "description": "归档卡 → 返回 null（不触发）",
+      "input": {
+        "card": { "id": "c5", "name": "已停用信用卡", "kind": "credit", "issuer": "招商银行", "last4": "5555", "currency": "CNY", "billingDay": 15, "dueDay": 25, "archived": true, "createdAt": 1735689600000, "updatedAt": 1735689600000 },
+        "nowMs": 1767229200000
+      },
+      "expected": {
+        "triggerMs": null
+      }
+    },
+    {
+      "name": "missingBillingDay_returnsNull",
+      "description": "缺 billingDay → 返回 null",
+      "input": {
+        "card": { "id": "c6", "name": "未配置信用卡", "kind": "credit", "issuer": "招商银行", "last4": "6666", "currency": "CNY", "billingDay": null, "dueDay": 25, "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 },
+        "nowMs": 1767229200000
+      },
+      "expected": {
+        "triggerMs": null
+      }
+    },
+    {
+      "name": "missingDueDay_returnsStatementDayTrigger",
+      "description": "缺 dueDay → 仅返回账单日触发，还款日跳过",
+      "input": {
+        "card": { "id": "c7", "name": "仅账单信用卡", "kind": "credit", "issuer": "招商银行", "last4": "7777", "currency": "CNY", "billingDay": 15, "dueDay": null, "archived": false, "createdAt": 1735689600000, "updatedAt": 1735689600000 },
+        "nowMs": 1767229200000
+      },
+      "expected": {
+        "triggerMs": 1768438800000,
+        "triggerCstIso": "2026-01-15T09:00:00+08:00"
+      }
+    }
+  ]
+}

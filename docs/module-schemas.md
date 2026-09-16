@@ -32,7 +32,17 @@
    - [8.3 RRULE B 档子集](#83-rrule-b-档子集)
    - [8.4 JSON Schema 示例（完整事件）](#84-json-schema-示例完整事件)
    - [8.5 跨端一致性要求](#85-跨端一致性要求)
-9. [Android 本期 UI 支持矩阵](#9-android-本期-ui-支持矩阵)
+9. [finance 模块（阶段 5 v1）](#9-finance-模块阶段-5-v1)
+   - [9.1 模块挂载点与 AAD 沿用](#91-模块挂载点与-aad-沿用)
+   - [9.2 类型枚举与 v2 子类型占位](#92-类型枚举与-v2-子类型占位)
+   - [9.3 字段定义：type=account](#93-字段定义typeaccount)
+   - [9.4 字段定义：type=card](#94-字段定义typecard)
+   - [9.5 字段定义：type=tx](#95-字段定义typetx)
+   - [9.6 调色板（color 枚举，扩展自 4a/4b 既有）](#96-调色板color-枚举扩展自-4a4b-既有)
+   - [9.7 隐私字段标记与卡号后四位截取纪律](#97-隐私字段标记与卡号后四位截取纪律)
+   - [9.8 跨端一致性要求](#98-跨端一致性要求)
+   - [9.9 Android Room v6 schema 与 §9.3–9.5 字段映射](#99-android-room-v6-schema-与-93-95-字段映射)
+10. [Android 本期 UI 支持矩阵](#10-android-本期-ui-支持矩阵)
 
 ## 1. 总则
 
@@ -450,7 +460,406 @@ Web `locations/core/types.ts` 与之逐字段一致（三方契约，任何改�
 > 写入路径（轨迹页"标记地点"对话框 → `vault.savePlace`）与读取侧
 > （place 记录缓存与按 id 查名索引）均已随 Web 轨迹页落地。
 
-## 9. Android 本期 UI 支持矩阵
+## 9. finance 模块（阶段 5 v1）
+
+阶段 5 新增的财务管理模块。账户 / 银行卡 / 日常记账三类条目作为加密个人库中
+的一条记录，走既有 records 通道同步（与第 7 章 `place` 模块、第 8 章 `event`
+模块同款链路），复用 `CryptoEnvelope` 的 XChaCha20-Poly1305 与 AAD 规则，
+**不新造**任何加密原语或服务端接口。客户端聚合净资产 / 总资产 / 总负债 /
+分类饼图 / 趋势点 / 月报预算阈值，**不上行服务端**。
+
+本章节为人类可读字段定义，机器可读 JSON Schema 见
+[`docs/schemas/finance.schema.json`](schemas/finance.schema.json)（Draft 2020-12）。
+独立模块文档（分类体系 / 月报 / 资产看板 / Luhn / 提醒触发 / v2 钩子）见
+[`docs/finance.md`](finance.md)，与本节交叉引用。
+
+### 9.1 模块挂载点与 AAD 沿用
+
+finance 作为 records 表一条密文记录写入，明文载荷符合本节定义：
+
+- **`module = "finance"`**、`type ∈ { "account", "card", "tx", "policy",
+  "subscription", "loan", "contract" }`（与第 7 章 `place`、第 8 章 `event`
+  同款 `module`/`type` 双键约定；前者用于 records 投递索引，后者随明文写
+  入密文内供端侧识别）。
+- **AAD 沿用 `eve:v1:record:{id}:{module}:{BE(uint64 version)}`**，与既有
+  records 记录**逐字节一致**（module=`"finance"`），**不新造** envelope 参数；
+  详见 [crypto.md](crypto.md) §5.1。
+- 服务端在 records 投递（`server/internal/api/records_handler.go`）阶段
+  仅校验 `id`/`module` 非空与密文非空，**不**校验 `type`、不解密、不
+  解析财务字段、不缓存明文金额/账户名/卡号后四位。客户端遇到不识别的
+  `type` 仍按密文原样入库（保持前向兼容）。
+- 服务端可见的明文元数据仅限 records 表已有列（`id`/`module`/`type`
+  因投递校验入索引，但其余财务字段均处于密文中），不引入新表、新列、
+  新接口。
+
+### 9.2 类型枚举与 v2 子类型占位
+
+| type | v1 启用 | v2 启用 | 字段表 |
+|---|---|---|---|
+| `account`（账户） | ✅ | ✅ | 9.3（11 字段） |
+| `card`（银行卡 / 信用卡） | ✅ | ✅ | 9.4（17 字段） |
+| `tx`（日常记账） | ✅ | ✅ | 9.5（13 字段） |
+| `policy`（保单） | ⏳ 占位 | ✅ | v2 启用时按 9.3 + 保单专属字段扩展 |
+| `subscription`（订阅） | ⏳ 占位 | ✅ | v2 启用时按 9.4 + 订阅专属字段扩展 |
+| `loan`（应收 / 借款） | ⏳ 占位 | ✅ | v2 启用时按 9.3 + loan 专属字段扩展 |
+| `contract`（合同 / 发票） | ⏳ 占位 | ✅ | v2 启用时按 9.3 + 合同专属字段扩展 |
+
+`v1` 仅下发前三类（`account` / `card` / `tx`）；`policy` / `subscription` /
+`loan` / `contract` 在 v2 启用，本期**仅占位**——类型常量与 `schema_version=1`
+钩子保留，不下发编辑器与详情页。
+
+### 9.3 字段定义：type=account
+
+账户（type=account，11 字段）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | 客户端生成（UUID v4）；同时作为 records 主键与服务端投递主键。 |
+| `name` | string | 是 | 账户名称；UTF-8；1–40 字符；前端表单校验非空。 |
+| `kind` | enum | 是 | 账户类型：`cash` / `deposit` / `stock` / `wallet` / `other`（5 项；本期 v1 枚举固定 5 项）。 |
+| `currency` | string | 是 | ISO 4217 三字母货币代码；默认 `"CNY"`；本期 v1 不做汇率换算。 |
+| `balance` | string | 是 | **decimal-as-string**（避免浮点精度丢失），如 `"123.45"`；CNY = 元为最小显示单位；非负（支持透支的卡走 `type=card` 而非 account）。 |
+| `note` | string \| null | 否 | 纯文本备注；0–200 字符。 |
+| `icon` | string \| null | 否 | lucide-icon 名称（如 `"wallet"` / `"landmark"` 等）；选填，未填走默认图标。 |
+| `color` | enum | 否 | 调色板 key（见 9.6）；未填走默认色。 |
+| `archived` | boolean | 是 | 归档标志（软删除）；默认 `false`；归档后不计入资产看板、不参与聚合。 |
+| `created_at` | integer (int64) | 是 | 创建时刻，Unix 毫秒。 |
+| `updated_at` | integer (int64) | 是 | 最后更新时刻，Unix 毫秒；编辑即刷新。 |
+
+#### 字段口径补充
+
+- 所有时间戳字段（`created_at` / `updated_at`）一律 Unix 毫秒 `int64`，
+  与既有 4a / 4b 字段口径一致。
+- `balance` 用 decimal-as-string 是为了**避免 JavaScript Number 浮点精度丢失**
+  与 Kotlin `BigDecimal` 互转歧义；前端表单提交前必须做正则校验
+  （`/^-?\d+(\.\d+)?$/`）；服务端不解密故无二次校验。
+- `archived=true` 时 `include_in_net_assets` 自动视为 `false`（看板过滤口径，
+  与 4b `archived` 行为一致）。
+
+### 9.4 字段定义：type=card
+
+银行卡 / 信用卡（type=card，17 字段）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | 客户端生成（UUID v4）；records 主键 + 服务端投递主键。 |
+| `name` | string | 是 | 卡名（如"招行信用卡"）；UTF-8；1–40 字符。 |
+| `kind` | enum | 是 | 卡类型：`debit` / `credit`（2 项，本期 v1 枚举固定 2 项；预留 `prepaid` 扩展位由 v2 启用）。 |
+| `issuer` | string | 是 | 银行 / 发卡机构名（如"招商银行"）；1–40 字符。 |
+| `last4` | string | 是 | 卡号后四位数字字符串（**仅后四位入 schema，完整卡号不入**），4 字符 `0-9`；前端录入完整卡号（16-19 位）→ Luhn 校验后**仅保留后四位**。 |
+| `currency` | string | 是 | ISO 4217 三字母货币代码；默认 `"CNY"`。 |
+| `credit_limit` | string | 条件必填 | **decimal-as-string**；信用额度；信用卡必填（值非 `null`），借记卡选填（`null` 或 `"0"`）。 |
+| `used_limit` | string | 否 | **decimal-as-string**；已用额度；非负；`null` / `"0"` 时按"未用"标注。 |
+| `billing_day` | integer (int) | 否 | 账单日（每月 day_of_month），`1-31`；超出当月最大日按月底处理（如 31 在 2 月按 28/29）。 |
+| `due_day` | integer (int) | 否 | 还款日距账单日天数 offset，`1-31`（offset 模式：`statement_day + due_day_offset` 跨月滚动）；`null` 表示无还款日配置。 |
+| `note` | string \| null | 否 | 纯文本备注；0–200 字符。 |
+| `icon` | string \| null | 否 | lucide-icon 名称。 |
+| `color` | enum | 否 | 调色板 key（见 9.6）。 |
+| `archived` | boolean | 是 | 归档标志；默认 `false`。 |
+| `created_at` | integer (int64) | 是 | 创建时刻，Unix 毫秒。 |
+| `updated_at` | integer (int64) | 是 | 最后更新时刻，Unix 毫秒。 |
+| `include_in_net_assets` | boolean | 是 | 是否计入净资产看板；默认 `true`；归档自动视为 `false`。 |
+
+#### 字段口径补充
+
+- **`last4` 隐私字段纪律**：见 9.7 节。完整卡号**不入** schema / 不入 Room /
+  不入 localStorage / IndexedDB / 服务端；UI 录入完整卡号做 Luhn 校验，
+  校验通过后仅保留后四位。
+- `credit_limit` 与 `used_limit` 字段口径：仅信用卡（`kind="credit"`）必填 / 有效；
+  借记卡（`kind="debit"`）这两个字段为 `null` 或 `"0"`。
+- `due_day` 为 offset（**距账单日的天数**），非"具体日"模式；v2 可扩展
+  "具体日"模式（`due_day_kind: "offset" | "specific"`）。
+- `billing_day` + `due_day` 触发本地提醒：账单日 T-3 / 还款日 T-1（账单日 +
+  offset 跨月滚动）。详见 `docs/finance.md` §6。
+
+### 9.5 字段定义：type=tx
+
+日常记账（type=tx，13 字段）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | 客户端生成（UUID v4）；records 主键 + 服务端投递主键。 |
+| `account_id` | string (UUID) | 条件必填 | 出账方账户 id；外键到 `Account.id`；`kind ∈ {expense, income}` 必填，`kind="transfer"` 必填。 |
+| `card_id` | string (UUID) | 否 | 出账方卡 id；外键到 `Card.id`；**信用卡交易时填**（与 `account_id` 二选一，本期 v1 优先 `account_id`）。 |
+| `kind` | enum | 是 | 流水类型：`income` / `expense` / `transfer`（3 项）。 |
+| `amount` | string | 是 | **decimal-as-string**；金额，**正数**；`kind` 决定方向（`expense` 减余额、`income` 增余额、`transfer` 双向调整）。 |
+| `category` | string | 是 | 分类 ID 或自由文本（如"餐饮"）；1–20 字符；详见 `docs/finance.md` §2 分类体系。 |
+| `occurred_at` | integer (int64) | 是 | 流水发生时刻，Unix 毫秒；用户可改回历史日期补录。 |
+| `note` | string \| null | 否 | 纯文本备注；0–200 字符。 |
+| `transfer_to_account_id` | string (UUID) | 条件必填 | 转账入账方账户 id；外键到 `Account.id`；`kind="transfer"` 时必填，**且不能等于 `account_id`**。 |
+| `icon` | string \| null | 否 | lucide-icon 名称。 |
+| `color` | enum | 否 | 调色板 key（见 9.6）。 |
+| `created_at` | integer (int64) | 是 | 创建时刻，Unix 毫秒。 |
+| `updated_at` | integer (int64) | 是 | 最后更新时刻，Unix 毫秒。 |
+
+#### 字段口径补充
+
+- `amount` 字段**一律正数**（`/^-?\d+(\.\d+)?$/` 校验，但业务上不允许负数；
+  `kind` 决定方向）；前端表单强制 `> 0`。
+- `transfer` 流水**视作两条对向记录**（出账 + 入账），不引用对方 ID 的反向
+  引用——即同一笔转账生成两条 `tx` 记录（一笔 `kind="transfer"`、从 A 账户
+  出；另一笔 `kind="transfer"`、从 B 账户入 + `transfer_to_account_id` 指向
+  A 账户）。
+- `transfer` 的 `transfer_to_account_id` **不能等于** `account_id`（前端表单
+  校验拒绝保存）；取消转账对账等价于删两条 + 重录（不提供单条覆盖）。
+- 账户 / 卡被删除时其历史流水保留 `account_id=null` / `card_id=null` 墓碑，
+  避免历史断裂（与 4a place / 4b event 删除语义一致）。
+
+### 9.6 调色板（color 枚举，扩展自 4a/4b 既有）
+
+4a `place` 与 4b `event` 既有调色板为 8 色板（`blue` / `green` / `red` /
+`amber` / `violet` / `pink` / `cyan` / `slate`）。本期**仅新增**以下 key，
+**不修改**既有调色板：
+
+| 新增 key | 用途 | 取色 |
+|---|---|---|
+| `emerald` | 财务（账户绿、入账、收入） | `#10b981` |
+| `amber` | 财务（账单日提醒、转账） | `#f59e0b`（沿用 4a/4b 既有 `amber`） |
+| `rose` | 财务（信用卡、负债、支出） | `#f43f5e` |
+| `sky` | 财务（投资账户、订阅） | `#0ea5e9` |
+| `violet` | 财务（保单、合同） | `#8b5cf6`（沿用 4a/4b 既有 `violet`） |
+| `slate` | 财务（其他、归档） | `#64748b`（沿用 4a/4b 既有 `slate`） |
+| `lime` | 财务（现金、借记卡） | `#84cc16` |
+| `orange` | 财务（应收借款、待办） | `#f97316` |
+
+#### 纪律
+
+- **仅新增 key**：本节列出 8 个 key 名 + 颜色映射，**不修改**既有 4a / 4b
+  调色板的 key / 取色 / 默认行为；
+- 既有 8 色板（`blue` / `green` / `red` / `amber` / `violet` / `pink` /
+  `cyan` / `slate`）保持原状，财务模块可继续使用；
+- 财务三类条目（account / card / tx）默认色随 kind 推断（如 `account.kind
+  = "cash"` → `lime`、`account.kind = "stock"` → `sky`、`card.kind =
+  "credit"` → `rose` 等），用户可在编辑器手动覆盖。
+
+### 9.7 隐私字段标记与卡号后四位截取纪律
+
+财务模块相对 4a place / 4b event 涉及**更高敏感度**字段（金额 / 卡号 / 账户
+余额 / 流水分类），需明示隐私字段边界。
+
+#### 隐私字段标记表
+
+| 字段 | 敏感度 | 持久化边界 |
+|---|---|---|
+| `account.name` | 中 | 仅 Android Room + Web 内存 |
+| `account.balance` | 高 | 仅 Android Room + Web 内存；不写日志 |
+| `card.name` | 中 | 仅 Android Room + Web 内存 |
+| `card.issuer` | 中 | 仅 Android Room + Web 内存 |
+| **`card.last4`** | **高** | **仅入 schema 后四位**；完整卡号不入任何持久化层 |
+| `card.credit_limit` | 高 | 仅 Android Room + Web 内存；不写日志 |
+| `card.used_limit` | 高 | 仅 Android Room + Web 内存；不写日志 |
+| `card.billing_day` / `card.due_day` | 中 | 仅 Android Room + Web 内存 |
+| `tx.amount` | 高 | 仅 Android Room + Web 内存；不写日志 |
+| `tx.category` | 中 | 仅 Android Room + Web 内存 |
+| `tx.note` | 高 | 仅 Android Room + Web 内存 |
+| `tx.account_id` / `card_id` / `transfer_to_account_id` | 中 | 仅 Android Room + Web 内存（UUID 引用，不暴露明文账户名） |
+
+#### 卡号后四位截取说明
+
+1. **录入路径**：用户在编辑器输入完整卡号（16–19 位数字）；
+2. **Luhn 校验**：前端表单失焦时调 `luhnValidate(cardNumber)` 校验；
+3. **截取**：校验通过 → `extractLast4(cardNumber)` 提取后四位数字；
+4. **持久化**：仅 `last4`（4 位数字字符串）入 `card.last4` 字段；**完整卡号
+   不入** schema / Room / localStorage / IndexedDB / 服务端 / 通知文案 /
+   日志 / 崩溃消息；
+5. **校验失败**：弹错并清空输入框，**不持久化**任何位；
+6. **空串**：不触发校验（`last4` 必填校验由前端表单把关）。
+
+详见 `docs/finance.md` §5 Luhn 校验。
+
+#### 通知文案零知识纪律（继承 NFR-1）
+
+通知文案**不渲染金额数字 / 卡号后四位 / 具体日期数字**，仅渲染抽象文案
+（如"💳 信用卡账单日 3 天后"）+ 跳转路由 id——详见 `docs/finance.md` §6.4。
+
+### 9.8 跨端一致性要求
+
+字段定义为**跨端契约**：Web `web/src/finance/types.ts`（`FinanceAccount` /
+`FinanceCard` / `FinanceTx`）、Android `FinanceAccountEntity.kt` /
+`FinanceCardEntity.kt` / `FinanceTxEntity.kt` 与本表**逐字段一致**
+（命名 / 单位 / 枚举完全相同），任何字段变更须三端同改 + 同步更新本文档
++ 更新 `docs/schemas/finance.schema.json` + 更新 fixture（保持 SHA-256 一致
+仍由 fixture 派生）。
+
+- **单位约定**：所有金额字段（`balance` / `credit_limit` / `used_limit` /
+  `amount`）一律 **decimal-as-string**，避免浮点精度丢失；CNY = 元为最小
+  显示单位；服务端不解密故无二次校验。
+- **时间戳约定**：所有时间戳字段（`created_at` / `updated_at` /
+  `occurred_at`）一律 Unix 毫秒 `int64`，与既有 4a / 4b 字段口径一致。
+- **枚举约定**：所有 enum 字段（`kind` / `color`）的字符串值在 Web / Android
+  / JSON Schema / 本文档四处**逐字符一致**；任何枚举值新增必须三端同改 +
+  同步更新本文档与 JSON Schema。
+- **测试 fixture**：`web/src/finance/__fixtures__/account-cases.json` /
+  `card-cases.json` / `tx-cases.json`（与 Android 镜像加载，SHA-256 一致）
+  所有用例的字段名按本文档；任何字段变更后必须同步更新 fixture 并重跑
+  SHA-256 比对。
+
+### 9.9 Android Room v6 schema 与 §9.3–9.5 字段映射
+
+Android 端在 `EveDatabase.kt` 中以 `version = 6` 与 `MIGRATION_5_6`
+（[`EveDatabase.kt`](../../android/app/src/main/java/com/everything/eve/data/EveDatabase.kt)）
+将四张 finance 表显式落地。本节列出 Room 实际列与 §9.3–9.5 字段表
+（**明文 JSON / Web 契约**）的字段映射，以便后续 Room schema 演进的字段
+对照；明文 JSON 字段定义仍以 §9.3–9.5 为唯一准绳。
+
+#### 9.9.1 系统字段（5 列，三表共用）
+
+Room 表在业务字段之外**统一追加**以下 5 列系统字段，便于 records
+通道复用与对账：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `schema_version` | INTEGER NOT NULL DEFAULT 1 | 业务字段 schema 版本；v1 固定 1。 |
+| `module` | TEXT NOT NULL DEFAULT 'finance' | records 投递索引；finance 三表默认 `"finance"`。 |
+| `type` | TEXT NOT NULL DEFAULT 'account' / `'card'` / `'tx'` | records 子类型；与 §9.2 type 枚举一致。 |
+| `dirty` | INTEGER NOT NULL DEFAULT 1 | 0/1；本表写后未上行 records → 1；上行后置 0。 |
+| `deleted` | INTEGER NOT NULL DEFAULT 0 | 0/1；墓碑标志（见 §1.3 墓碑纪律）。 |
+
+#### 9.9.2 finance_account（type=account，14 列 = 9 业务字段 + 5 系统字段）
+
+业务字段与 §9.3 对应（9 字段），加 5 系统字段共 14 列：
+
+| Room 列 | 类型 | 对应 §9.3 字段 | 说明 |
+|---|---|---|---|
+| `id` | TEXT PK | `id` | UUID v4 字符串。 |
+| `name` | TEXT NOT NULL | `name` | 1–40 字符。 |
+| `kind` | TEXT NOT NULL | `kind` | `cash` / `deposit` / `stock` / `wallet` / `other`。 |
+| `currency` | TEXT NOT NULL | `currency` | ISO 4217，默认 `"CNY"`。 |
+| `balance` | TEXT NOT NULL | `balance` | decimal-as-string；**非负**。 |
+| `note` | TEXT | `note` | 0–200 字符；可空。 |
+| `icon` | TEXT | `icon` | lucide-icon 名；可空。 |
+| `color` | TEXT | `color` | 调色板 key；可空。 |
+| `archived` | INTEGER NOT NULL DEFAULT 0 | `archived` | 0/1；默认 `false`。 |
+| `created_at` | INTEGER NOT NULL | `created_at` | Unix 毫秒。 |
+| `updated_at` | INTEGER NOT NULL | `updated_at` | Unix 毫秒。 |
+| `schema_version` | INTEGER NOT NULL DEFAULT 1 | 系统字段 | 见 9.9.1。 |
+| `module` | TEXT NOT NULL DEFAULT 'finance' | 系统字段 | 见 9.9.1。 |
+| `type` | TEXT NOT NULL DEFAULT 'account' | 系统字段 | 见 9.9.1。 |
+| `dirty` | INTEGER NOT NULL DEFAULT 1 | 系统字段 | 见 9.9.1。 |
+| `deleted` | INTEGER NOT NULL DEFAULT 0 | 系统字段 | 见 9.9.1。 |
+
+> 索引：`idx_finance_account_updated_at (updated_at)` /
+> `idx_finance_account_dirty (dirty)`。
+
+#### 9.9.3 finance_card（type=card，19 列 = 14 业务字段 + 5 系统字段）
+
+业务字段与 §9.4 对应（14 字段，含 `brand` / `expiry_month` / `expiry_year` /
+`holder`），加 5 系统字段共 19 列：
+
+| Room 列 | 类型 | 对应 §9.4 字段 | 说明 |
+|---|---|---|---|
+| `id` | TEXT PK | `id` | UUID v4 字符串。 |
+| `name` | TEXT NOT NULL | `name` | 1–40 字符。 |
+| `kind` | TEXT NOT NULL | `kind` | `debit` / `credit`；v2 扩展 `prepaid`。 |
+| `issuer` | TEXT NOT NULL | `issuer` | 银行 / 发卡机构名。 |
+| `last4` | TEXT NOT NULL | `last4` | **仅后四位**数字字符串；完整卡号不入。 |
+| `currency` | TEXT NOT NULL | `currency` | ISO 4217，默认 `"CNY"`。 |
+| `credit_limit` | TEXT | `credit_limit` | decimal-as-string；信用卡必填非空。 |
+| `used_limit` | TEXT | `used_limit` | decimal-as-string；可空 / `"0"`。 |
+| `billing_day` | INTEGER | `billing_day` | 1–31；可空。 |
+| `due_day` | INTEGER | `due_day` | offset（1–31，距账单日天数）；可空。 |
+| `brand` | TEXT | — | **BIN 推断**：`visa` / `master` / `unionpay` / `amex` / `jcb` / `discover` / `unknown`；不入 §9.4 明文 JSON（仅 Room 缓存；录入完整卡号时由前端解析并存入 Room 辅助字段）。 |
+| `expiry_month` | INTEGER | — | 到期月（1–12）；不入 §9.4 明文 JSON（仅 Room 缓存）。 |
+| `expiry_year` | INTEGER | — | 到期年（4 位整数）；不入 §9.4 明文 JSON（仅 Room 缓存）。 |
+| `holder` | TEXT | — | 持卡人姓名；不入 §9.4 明文 JSON（仅 Room 缓存）。 |
+| `note` | TEXT | `note` | 0–200 字符；可空。 |
+| `icon` | TEXT | `icon` | 可空。 |
+| `color` | TEXT | `color` | 可空。 |
+| `archived` | INTEGER NOT NULL DEFAULT 0 | `archived` | 0/1。 |
+| `created_at` | INTEGER NOT NULL | `created_at` | Unix 毫秒。 |
+| `updated_at` | INTEGER NOT NULL | `updated_at` | Unix 毫秒。 |
+| `schema_version` | INTEGER NOT NULL DEFAULT 1 | 系统字段 | 见 9.9.1。 |
+| `module` | TEXT NOT NULL DEFAULT 'finance' | 系统字段 | 见 9.9.1。 |
+| `type` | TEXT NOT NULL DEFAULT 'card' | 系统字段 | 见 9.9.1。 |
+| `dirty` | INTEGER NOT NULL DEFAULT 1 | 系统字段 | 见 9.9.1。 |
+| `deleted` | INTEGER NOT NULL DEFAULT 0 | 系统字段 | 见 9.9.1。 |
+
+> 索引：`idx_finance_card_updated_at (updated_at)` /
+> `idx_finance_card_dirty (dirty)`。
+>
+> 字段对照说明：`brand` / `expiry_month` / `expiry_year` / `holder` 四列
+> 是**录入辅助字段**，不入 §9.4 明文 JSON（明文仍仅承载 §9.4 表字段），
+> Room 缓存便于 UI 展示与提醒排程；明文合同与 §9.4 一致，**不冲突**。
+
+#### 9.9.4 finance_tx（type=tx，18 列 = 13 业务字段 + 5 系统字段）
+
+业务字段与 §9.5 对应（13 字段），加 5 系统字段共 18 列：
+
+| Room 列 | 类型 | 对应 §9.5 字段 | 说明 |
+|---|---|---|---|
+| `id` | TEXT PK | `id` | UUID v4 字符串。 |
+| `account_id` | TEXT NOT NULL | `account_id` | 外键到 `Account.id`。 |
+| `card_id` | TEXT | `card_id` | 可空。 |
+| `kind` | TEXT NOT NULL | `kind` | `income` / `expense` / `transfer`。 |
+| `amount` | TEXT NOT NULL | `amount` | decimal-as-string；**正数**。 |
+| `currency` | TEXT NOT NULL | `currency` | ISO 4217。 |
+| `category` | TEXT NOT NULL | `category` | 分类 ID 或自由文本。 |
+| `occurred_at` | INTEGER NOT NULL | `occurred_at` | Unix 毫秒。 |
+| `note` | TEXT | `note` | 可空。 |
+| `icon` | TEXT | `icon` | 可空。 |
+| `color` | TEXT | `color` | 可空。 |
+| `transfer_to_account_id` | TEXT | `transfer_to_account_id` | 转账入账方；`kind="transfer"` 时必填且 ≠ `account_id`。 |
+| `created_at` | INTEGER NOT NULL | `created_at` | Unix 毫秒。 |
+| `updated_at` | INTEGER NOT NULL | `updated_at` | Unix 毫秒。 |
+| `schema_version` | INTEGER NOT NULL DEFAULT 1 | 系统字段 | 见 9.9.1。 |
+| `module` | TEXT NOT NULL DEFAULT 'finance' | 系统字段 | 见 9.9.1。 |
+| `type` | TEXT NOT NULL DEFAULT 'tx' | 系统字段 | 见 9.9.1。 |
+| `dirty` | INTEGER NOT NULL DEFAULT 1 | 系统字段 | 见 9.9.1。 |
+| `deleted` | INTEGER NOT NULL DEFAULT 0 | 系统字段 | 见 9.9.1。 |
+
+> 索引：`idx_finance_tx_updated_at (updated_at)` /
+> `idx_finance_tx_occurred_at (occurred_at)` /
+> `idx_finance_tx_account_id (account_id)` /
+> `idx_finance_tx_dirty (dirty)`。
+
+#### 9.9.5 finance_reminder_log（4 列 + 自增主键）
+
+唯一非业务记录类表：仅承担"触发 → 已送达"对账日志，无系统字段：
+
+| Room 列 | 类型 | 说明 |
+|---|---|---|
+| `id` | INTEGER PK AUTOINCREMENT NOT NULL | 自增主键；本表不参与 records 同步。 |
+| `ref_id` | TEXT NOT NULL | 引用对象 id（finance_card.id 等）。 |
+| `ref_kind` | TEXT NOT NULL | 引用类型：`card_statement_due` / `card_payment_due` / 后续 v2 扩展。 |
+| `fire_at` | INTEGER NOT NULL | 触发时刻，Unix 毫秒。 |
+| `delivered` | INTEGER NOT NULL DEFAULT 0 | 0/1；Receiver 投送通知成功后置 1。 |
+
+> 索引：`idx_finance_reminder_log_fire_at (fire_at)` /
+> `idx_finance_reminder_log_ref (ref_id, ref_kind)`。
+
+#### 9.9.6 字段数对账小结
+
+| 子类型 | §9.3–9.5 业务字段 | Room 业务列 | Room 系统列 | Room 总列 |
+|---|---|---|---|---|
+| `account` | 9 | 9 | 5 | 14 |
+| `card` | 14 | 14 | 5 | 19 |
+| `tx` | 13 | 13 | 5 | 18 |
+| `reminder_log` | — | 4（含自增主键） | — | 4 |
+
+> 说明：§9.3 / §9.4 / §9.5 中标注的 "11 字段 / 17 字段 / 13 字段"
+> 为**业务字段计数**（不含 Room 系统列，且 card 17 = 业务 14 + 系统 5
+> ≈ 19 列中部分由 BIN 推断字段补充的更早期口径，已随 Room v6 实际
+> schema 修订为本节口径）；后续一切字段调整以本节 Room schema 为
+> 准并同步更新 §9.3–9.5。
+
+#### 9.9.7 跨端契约铁律
+
+- **明文 JSON 字段表**：以 §9.3–9.5 为唯一准绳；任何字段变更须三端同改 +
+  同步更新本文档 + 更新 `docs/schemas/finance.schema.json`。
+- **Room 列 ↔ 明文字段映射**：以本节 §9.9.2–9.9.5 为唯一准绳；Room 列
+  新增 / 删除 / 重命名必须同步更新本节与对应 Entity（`FinanceAccountEntity.kt`
+  / `FinanceCardEntity.kt` / `FinanceTxEntity.kt`）、
+  FinanceRepository（`FinanceRepository.kt`）的 `toJson` / `fromJsonObj`
+  双向映射。
+- **系统字段 5 列**：三表统一追加，`module` / `type` 默认值按表分别
+  `'finance'` / `'account' | 'card' | 'tx'`；不暴露 UI，不可编辑。
+- **Room 缓存字段**（`brand` / `expiry_month` / `expiry_year` / `holder`
+  四列）：仅 Room 持有、**不入明文 JSON**；录入时由前端从完整卡号解析，
+  上行 records 时不带这四列；下载解密后回写 Room。
+
+---
+
+## 10. Android 本期 UI 支持矩阵
 
 Android 端本期交付笔记 UI 与采集器（采集写入 + 采集状态页）；其余类型的记录
 **完整同步并加密入库**（未知 module/type 也原样保存），但不解密、不展示、不可编辑。

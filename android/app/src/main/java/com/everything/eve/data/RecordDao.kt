@@ -41,6 +41,18 @@ interface RecordDao {
     @Query("SELECT COALESCE(MAX(updatedAt), 0) FROM records")
     suspend fun maxUpdatedAt(): Long
 
+    /**
+     * 取 updatedAt 大于 sinceMs 的所有 records 行（含已删除墓碑；包含 dirty=true 本地新写）。
+     *
+     * 用途：阶段 5 / TR-11.2 CollectorWorker 拉取 finance 模块时，用此方法取
+     * 待解密 records 子集，无需修改既有 sync() 流程；过滤 module 在调用方进行。
+     *
+     * @param sinceMs 毫秒游标；sinceMs=0 即全量。
+     * @return 命中行按 updatedAt 升序（便于稳定分页；同步小数据集一般不超 500 行）。
+     */
+    @Query("SELECT * FROM records WHERE updatedAt > :sinceMs ORDER BY updatedAt ASC")
+    suspend fun getUpdatedAfter(sinceMs: Long): List<RecordEntity>
+
     // FU-1：清 dirty 的同时把 updatedAt 覆盖为服务端权威时间，
     // 防止本地时钟偏差（尤其偏未来）通过 maxUpdatedAt 污染增量拉取游标。
     @Query("UPDATE records SET dirty = 0, updatedAt = :serverTime WHERE id IN (:ids)")

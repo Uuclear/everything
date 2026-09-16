@@ -70,12 +70,19 @@ const menuOptions = computed<MenuOption[]>(() => [
   // 阶段 4b — 日程/日历：与轨迹同级侧栏入口，对应 /vault/calendar 路由。
   { label: '日历', key: 'calendar' },
   { type: 'divider', key: 'd2' },
+  // 阶段 5 — 财务：与日历/轨迹同级侧栏入口, 对应 /finance 路由。
+  { label: '财务', key: 'finance' },
   { label: '设备管理', key: 'devices' },
   { label: '安全设置', key: 'security' },
 ])
 
 const activeKey = computed(() => (route.name as string) ?? 'logins')
 function onMenu(key: string) {
+  // 阶段 5 — 财务路由独立挂载在 /finance, 其它既有项均位于 /vault。
+  if (key === 'finance') {
+    router.push({ name: 'finance' })
+    return
+  }
   router.push({ name: key })
 }
 

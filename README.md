@@ -16,7 +16,9 @@
 > **阶段 4a 位置轨迹已落地**（Android 前台定位采集封块加密 + 服务端零知识月表存储 +
 > 网页轨迹页地图/回放/地点命名），
 > **阶段 4b 日程/日历已落地**（双端事件 + 重复规则 + 本地闹钟；沿用 records 加密通道，
-> 服务端零改动；详见下文"日历（阶段 4b）"小节）。
+> 服务端零改动；详见下文"日历（阶段 4b）"小节），
+> **阶段 5 财务 v1 已落地**（账户/银行卡/记账 + 月报预算 + 资产看板 + 账单/还款提醒；
+> 沿用 records 加密通道 + 单闹钟链式调度复用；详见下文"财务（阶段 5）"小节）。
 > 完整路线与模块全景见 [.trae/documents/everything_plan.md](.trae/documents/everything_plan.md)。
 
 ## 快速开始
@@ -110,7 +112,57 @@ Android 开启方式见 [docs/android.md](docs/android.md) "日程/日历（阶�
   通知文案仅渲染抽象描述（"即将开始" / "N 分钟后开始"），不渲染 start_ts
   原文。
 
-## 功能矩阵（阶段 4b 关键能力）
+## 财务（阶段 5）
+
+阶段 5 在 Web 与 Android 双端落地零知识个人财务管理——账户 / 银行卡 / 日常记账
+三类条目，月报预算阈值与资产看板聚合，账单日 / 还款日本地提醒。
+条目作为 `module="finance"` 记录走既有 records 加密信道（**服务端零改动**，
+无新表、无新接口、无 AAD 前缀），复用 `sealRecord` ↔ `openRecord`；
+聚合与月报阈值**全部在端侧纯函数计算**，**不上行服务端**。
+字段定义见 [docs/finance.md](docs/finance.md)；Room 落地详见
+[docs/android.md](docs/android.md) "财务模块（阶段 5）"章。
+
+- **账户**：现金 / 存款 / 股票 / 钱包 / 其他 5 类；余额 decimal-as-string 非负；
+  归档后不计入资产看板。资产 / 负债分别聚合：
+  `totalAssets = totalAssetValue - totalLiability`
+  （信用卡 `used_limit` 自动按负债纳入）。
+- **银行卡**：借记卡 / 信用卡 2 类；录入完整 16–19 位卡号 → Luhn 校验 →
+  **仅保留后四位**（`last4`）入密文 + Room；BIN 推断 `brand`
+  （visa / master / unionpay / amex / jcb / discover / unknown）+ 解析
+  `expiry_month` / `expiry_year` / `holder` 仅入 Room 辅助缓存、**不入**密文。
+  信用卡必填 `credit_limit` / `used_limit`。
+- **日常记账**：`income` / `expense` / `transfer` 三类；金额正数，`kind`
+  决定方向；转账生成两条对向流水（出账方 `account_id` + 入账方
+  `transfer_to_account_id`），不引用对方反向 ID。
+- **月报预算**：分类预算阈值 + 当月实际支出 → `BudgetStatus` 三档
+  （`OK` / `WARNING` / `EXCEEDED`）；月报同时输出 `monthlyReport`
+  （收入 / 支出 / 净额 / 分类饼图 / 预算阈值）。
+- **资产看板**：净资产（`netWorth`）、账户余额（`accountBalance`）、
+  信用卡已用额度（`cardUsedLimit`）；总资产 = 总资产价值 − 总负债。
+- **本地提醒（仅 Android）**：`ReminderScheduler.rebuildChain` 单闹钟
+  requestCode `0x45564556`（"EVEEV"）链式调度，按 module 路由：
+  `MODULE_EVENT="event"` / `MODULE_FINANCE="finance"`。
+  账单日 T+0 09:00 / 还款日 T-1 09:00 当月+下月双候取最小
+  （`NextCardFiring.kt` 纯函数镜像）；`LOOKAHEAD_MS = 14` 天，
+  `MAX_MONTH_LOOKAHEAD = 24` 月。`ReminderReceiver` 按 `EXTRA_MODULE`
+  分支：finance 通知文案**绝不渲染金额 / 卡号后四位 / 具体日期数字**，
+  通知 id 用 `cardId.hashCode()` 保证同一卡片覆盖、不同卡片并行。
+- **Web 入口**：路由 `/finance`（[web/src/finance/](web/src/finance/)），
+  Pinia store 在 [web/src/stores/finance.ts](web/src/stores/finance.ts)。
+- **跨设备同步**：财务条目作为 `module="finance"` 记录走既有 `since`
+  增量拉取 + `pushRecords` 上行链路；冲突解决采用 **LWW（last-write-wins）**——
+  按 `version` 严格递增覆盖。
+- **Room 落地（仅 Android）**：`EveDatabase.kt` `version = 6` +
+  `MIGRATION_5_6` 显式迁移四张表（`finance_account` / `finance_card` /
+  `finance_tx` / `finance_reminder_log`）；`FinanceRepository` 双写
+  （明文表 + records 密文表）+ 墓碑语义（`deleted=true` + `dirty=true`
+  保留行供对账）。
+- **零知识纪律**：财务金额 / 卡号后四位 / 账户名 / 流水分类 / 备注
+  **仅驻**浏览器内存与 Android Room；通知文案仅渲染抽象描述
+  （"💳 信用卡账单已生成" / "💳 信用卡还款临近"），**绝不渲染**金额、
+  卡号后四位、具体日期数字；服务端不解密、不聚合、不缓存。
+
+## 功能矩阵（阶段 4b / 阶段 5 关键能力）
 
 | 能力 | Android | Web | Go（服务端） |
 |---|---|---|---|
@@ -118,6 +170,9 @@ Android 开启方式见 [docs/android.md](docs/android.md) "日程/日历（阶�
 | 重复规则展开 | ✅（JVM `Recurrence.kt`） | ✅（`expand.ts` 纯函数） | N/A |
 | 本地精确闹钟 | ✅（AlarmManager + 权限降级） | N/A（浏览器通知走 Notification API，由后续阶段补齐） | N/A |
 | RRULE B 档子集 | ✅（DAILY/WEEKLY/MONTHLY/YEARLY + interval + 7 工作日 + 结束三选一） | ✅ | N/A |
+| 财务（账户 / 银行卡 / 记账 + 月报预算 + 资产看板） | ✅（`FinanceScreen` + Account/Card/Tx Editor + Room v6 + FinanceRepository 双写） | ✅（`/finance` + Pinia store `stores/finance.ts` + 编辑器） | N/A（服务端零改动，复用 records 通道透传密文；聚合 / 月报阈值全部端侧纯函数计算） |
+| Luhn 卡号校验 + 仅后四位入库 | ✅（`Luhn.kt` + Room `finance_card.last4`） | ✅（`luhn.ts` + Web 内存 `last4`） | N/A（完整卡号不入密文、不入 Room、不入日志） |
+| 账单日 / 还款日本地提醒 | ✅（`NextCardFiring.kt` + `ReminderScheduler.rebuildChain` 单闹钟链式 + `ReminderReceiver` module 路由） | N/A（仅 Android 端本地提醒） | N/A |
 
 ## 已知问题
 
@@ -136,12 +191,40 @@ Android 开启方式见 [docs/android.md](docs/android.md) "日程/日历（阶�
   拒绝路径、`POST_NOTIFICATIONS` 拒绝路径等已并入 FU-7 关闭条件清单
   （无设备/CI 环境暂不强制；详见 `.trae/specs/stage4b-calendar/tasks.md`）。
 
+### 阶段 5 财务 v1 限制
+
+- **服务端零聚合**：净资产 / 资产 / 负债 / 月报预算阈值 / 分类饼图 / 趋势点
+  全部在端侧纯函数计算（`FinanceAggregator.kt` / `aggregator.ts`），
+  **不上行服务端**；多设备聚合仅依赖 records 通道最终一致；用户切换设备
+  后需等下行 records 收敛（增量拉取秒级内可达）。
+- **完整卡号不入任何持久层**：录入完整卡号 → Luhn 校验 → **仅**`last4`
+  入密文 + Room；完整卡号不入 schema / Room / localStorage / IndexedDB /
+  服务端 / 通知文案 / 日志 / 崩溃消息；`last4` 之外如需识别同卡，仅依赖
+  `issuer` + `last4` 联合指纹（v1 容忍同 issuer+last4 的多张卡视为可区分
+  副本，v2 可扩展 BIN 全串缓存）。
+- **Web 端无本地提醒**：财务模块本地闹钟仅在 Android 实现（AlarmManager
+  + `ReminderScheduler.rebuildChain`）；Web 端如需提醒依赖浏览器
+  Notification API + 后台 Service Worker（阶段 6+ 视需求补齐）。
+- **预算阈值仅端侧**：分类预算阈值不入 records（视为端侧偏好）；
+  多设备可能短暂存在预算阈值不同步；可在 v2 升级为明文字段随 records 同步。
+- **transfer 流水的反向引用**：转账生成两条对向流水（出账 / 入账），
+  **不**通过反向 ID 互引；UI 层通过 `(transfer_to_account_id, amount,
+  occurred_at)` 启发式对账；删除转账等价于删两条 + 重录（不提供单条覆盖）。
+- **`include_in_net_assets` 不入 Room**：v1 净资产看板过滤口径仅依赖
+  `archived` 字段；如需"不计入净资产"但仍可见的细粒度控制，需 v2
+  扩展明文 `include_in_net_assets` 字段（当前以 `archived` 兜底）。
+- **instrumented 真机冒烟**：阶段 5 Room v5→v6 迁移、四表 CRUD +
+  FinanceRepository 双写、`ReminderReceiver` module 路由等已并
+  FU-7 关闭条件清单（无设备/CI 环境暂不强制；详见
+  `.trae/specs/stage5-finance/tasks.md`）。
+
 ## 文档
 
 - [架构总览](docs/architecture.md)
 - [零知识加密信封规范（三端互通）](docs/crypto.md)
 - [HTTP API](docs/api.md)
-- [模块数据 Schema（密码库/证件）](docs/module-schemas.md)
+- [模块数据 Schema（密码库/证件/事件/财务）](docs/module-schemas.md)
+- [财务模块（阶段 5 v1）](docs/finance.md)
 - [开发约定与发布](docs/development.md)
 - [安卓构建说明](docs/android.md)
 

@@ -226,6 +226,195 @@ rrule_json / exdates_json / dirty / updated_ts`）+ 双索引
 
 `POST_NOTIFICATIONS` 在阶段 4a 已声明，4b 沿用不再重复登记。
 
+## 财务模块（阶段 5）
+
+阶段 5 财务 v1 在 Android 端落地"账户 / 银行卡 / 日常记账 + 账单日 / 还款日
+提醒"全链路。沿用 records 加密信封（同款 `sealRecord` / `openRecord`，
+`module="finance"`），服务端零改动；新增 Room v5→v6 显式迁移 + 单闹钟链式
+调度复用 + FinanceRepository 主链路。本节为阶段 5 实施落地说明，独立模块
+文档（聚合规则 / 月报 / 资产看板 / Luhn / 提醒触发 / v2 钩子）见
+[`finance.md`](finance.md)。
+
+### 屏幕 / 页面清单
+
+- **FinanceScreen**（`ui/screens/FinanceScreen.kt`）：财务总览容器，顶栏 4 个
+  Tab（仪表盘 / 账户 / 银行卡 / 流水）；账户 / 卡 / 流水列表均按 `updated_at`
+  升序 / `occurred_at` 降序展示；点击空位调 `vm.openNewAccount/Card/Tx()`
+  打开 `AccountEditorDialog` / `CardEditorDialog` / `TxEditorDialog`；
+  点击条目打开 `Routes.FINANCE` 编辑器（含删除 AlertDialog）。
+- **AccountEditorDialog**：11 字段编辑器（name / kind 五选一 / currency / 
+  balance / note / icon / color / archived / created_at / updated_at），
+  与 Web `AccountEditorDialog.vue` 逐字段一致；校验（name 空 → btn_save 
+  disabled；balance 非 decimal-as-string 弹错）。
+- **CardEditorDialog**：21 字段编辑器（含 credit_limit / used_limit /
+  billing_day / due_day / brand / expiry_month / expiry_year / holder /
+  last4 等），UI 录入完整卡号 → Luhn 校验 → 仅保留后四位（详见下方
+  "Luhn 校验 + 仅后四位入库纪律"小节）。
+- **TxEditorDialog**：18 字段编辑器（含 account_id / card_id / transfer_to_ 
+  account_id 三组关联字段）；`kind` 三选一（income / expense / transfer）；
+  transfer 时强制 `transfer_to_account_id != account_id`；amount 一律正数。
+
+### FinanceRepository 接入
+
+[`FinanceRepository`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/FinanceRepository.kt)
+作为财务模块的领域仓库，**双写**本地明文 + records 密文（与 4a `createNote`
++ 4b `upsertEventRule` 同款模式）：
+
+- **入口**：
+  - UI / ViewModel：`upsertAccount/Card/Tx` + `deleteAccount/Card/Tx`（墓碑删除）+ 
+    `observeAccounts/Cards/Txs()`；
+  - CollectorWorker / SyncWorker：`pullAndDecrypt(moduleRecords)` 下行解密
+    入库 + dirty 翻 false；
+  - ReminderScheduler.rebuildChain：`observeCards().first()` 拉全局最小
+    nextTrigger（详见 [`ReminderScheduler.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/reminder/ReminderScheduler.kt)
+    `rebuildChain` 阶段 5 扩展段）。
+- **明文 + 密文双写**：`upsertAccount` 等方法**同步执行两步**：
+  1) 写本地明文 `finance_account` / `finance_card` / `finance_tx` 表；
+  2) 调 `recordsRepository.upsertFinanceAccount/Card/Tx(id, plaintextJson)`
+     把同一 id 的密文落 `records` 表，模块=finance，类型=account/card/tx，
+     dirty=true。
+- **墓碑语义**：删除走 tombstone 软删（`deleted=true` + dirty=true）；
+  关联账户 / 卡被删除后历史流水的 `account_id` / `card_id` **保留**原引用
+  （删除与保留红线）。
+- **Luhn 校验 + 仅后四位入库纪律**：完整卡号**不入** Room / ciphertext
+  载荷；入参 entity 仅含 `last4`（编辑器契约）。详见 [`Luhn.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/Luhn.kt)
+  与 [`finance.md`](finance.md) §5。
+
+### Room v5→v6 迁移
+
+[`EveDatabase.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/EveDatabase.kt)
+`version = 6`，companion object 内嵌 `MIGRATION_5_6` 显式迁移，与 4a v3→v4 /
+4b v4→v5 同模式：仅 `CREATE TABLE IF NOT EXISTS` + 索引，**不 ALTER / DROP**
+既有七表（records / sync_state / collector_state / location_points /
+location_outbox / event / event_reminder_log），保证既有数据零影响。
+
+四表 schema 与索引：
+
+#### finance_account（14 列）
+
+- `id TEXT NOT NULL PRIMARY KEY`（UUID）；
+- `name TEXT NOT NULL` / `kind TEXT NOT NULL`（5 枚举：cash / deposit / 
+  stock / wallet / other）/ `currency TEXT NOT NULL`；
+- `balance TEXT NOT NULL`（decimal-as-string）/ `note TEXT` / `icon TEXT` / 
+  `color TEXT`；
+- `archived INTEGER NOT NULL DEFAULT 0` / `created_at INTEGER NOT NULL` / 
+  `updated_at INTEGER NOT NULL`；
+- `schema_version INTEGER NOT NULL DEFAULT 1` / `module TEXT NOT NULL 
+  DEFAULT 'finance'` / `type TEXT NOT NULL DEFAULT 'account'` / 
+  `dirty INTEGER NOT NULL DEFAULT 1` / `deleted INTEGER NOT NULL DEFAULT 0`。
+- 索引：(updated_at) 服务增量同步游标；(dirty) 服务同步推送对账。
+
+#### finance_card（21 列）
+
+- 主键：`id TEXT NOT NULL PRIMARY KEY`；
+- 业务字段：`name` / `kind`（debit / credit 2 枚举）/ `issuer` / `last4` 
+  （仅后四位数字串，**完整 PAN 不入库**）/ `currency` / `credit_limit` 
+  / `used_limit` / `billing_day` / `due_day` / `brand`（BIN 段推断：visa 
+  / master / unionpay / amex / jcb / discover / unknown）/ `expiry_month` 
+  / `expiry_year` / `holder` / `note` / `icon` / `color`；
+- 状态：`archived INTEGER NOT NULL DEFAULT 0`；
+- 时间戳：`created_at INTEGER NOT NULL` / `updated_at INTEGER NOT NULL`；
+- 系统字段：`schema_version INTEGER NOT NULL DEFAULT 1` / `module TEXT NOT 
+  NULL DEFAULT 'finance'` / `type TEXT NOT NULL DEFAULT 'card'` / 
+  `dirty INTEGER NOT NULL DEFAULT 1` / `deleted INTEGER NOT NULL DEFAULT 0`。
+- 索引：(updated_at) 服务增量同步游标；(dirty) 服务同步推送对账。
+
+#### finance_tx（18 列）
+
+- 主键：`id TEXT NOT NULL PRIMARY KEY`；
+- 业务字段：`account_id TEXT NOT NULL`（外键到 account.id；账户删除后保留
+  引用，UI 标注"账户已删除"）/ `card_id TEXT`（可选）/ `kind TEXT NOT NULL` 
+  （income / expense / transfer 三枚举）/ `amount TEXT NOT NULL`（decimal-as-
+  string，正数）/ `currency TEXT NOT NULL` / `category TEXT NOT NULL` / 
+  `occurred_at INTEGER NOT NULL` / `note TEXT` / `icon TEXT` / `color TEXT` / 
+  `transfer_to_account_id TEXT`（transfer 时必填，不能等于 account_id）；
+- 时间戳：`created_at INTEGER NOT NULL` / `updated_at INTEGER NOT NULL`；
+- 系统字段：`schema_version INTEGER NOT NULL DEFAULT 1` / `module TEXT NOT 
+  NULL DEFAULT 'finance'` / `type TEXT NOT NULL DEFAULT 'tx'` / 
+  `dirty INTEGER NOT NULL DEFAULT 1` / `deleted INTEGER NOT NULL DEFAULT 0`。
+- 索引：(updated_at) 服务增量同步游标；(occurred_at) 服务按时间排序与
+  月报聚合；(account_id) 服务按账户过滤；(dirty) 服务同步推送对账。
+
+#### finance_reminder_log（4 列 + 自增主键）
+
+- `id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL`（自增主键）；
+- `ref_id TEXT NOT NULL`（finance 条目 id，v1 即 card.id）；
+- `ref_kind TEXT NOT NULL`（`card_statement_due` / `card_payment_due` 
+  v1 启用；v2 占位后三类：`subscription_renewal` / `policy_expiry` / 
+  `loan_due`）；
+- `fire_at INTEGER NOT NULL`（触发时刻 Unix 毫秒）；
+- `delivered INTEGER NOT NULL DEFAULT 0`（0/1；通知是否成功投递；
+  POST_NOTIFICATIONS 拒绝时 = 0）。
+- 索引：(fire_at) 服务按时间排序；(ref_id, ref_kind) 服务按引用查询。
+- **零知识纪律**：严禁写 title / amount / last4 等明文（NFR-1 红线）。
+
+### Scheduler 复用与 module 路由
+
+财务提醒**完全复用**阶段 4b `ReminderScheduler`，**不新建**第二个 Scheduler。
+实现位于 [`ReminderScheduler.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/reminder/ReminderScheduler.kt)，
+关键扩展点：
+
+- **单闹钟 requestCode** `0x45564556` = "EVEEV" hex，event + finance 共用
+  （spec NFR-4 约束）；
+- `rebuildChain(ctx)` 阶段 5 扩展：合并事件 + 财务两类触发，取全局最小
+  `nextTrigger` 写**单闹钟**；**严禁**新建第二条调度链路；
+- Intent extras 新增 `EXTRA_MODULE` / `EXTRA_REF_KIND` / `REF_ID` 三字段：
+  - `MODULE_EVENT = "event"` / `MODULE_FINANCE = "finance"`；
+  - `REF_KIND_CARD_STATEMENT_DUE = "card_statement_due"` / 
+    `REF_KIND_CARD_PAYMENT_DUE = "card_payment_due"`；
+- `LOOKAHEAD_MS = 14 天` / `MAX_MONTH_LOOKAHEAD = 24 个月`（与 4b 同款）；
+- `REMINDER_CHANNEL_ID = "events"`（与事件共用，不新建 channel）。
+
+`ReminderReceiver.onReceive` 按 `module` 字段路由：
+
+| module | DAO | 通知文案 |
+|---|---|---|
+| `"event"`（或缺失，4b 兼容） | `EventDao` | title + "即将开始 / N 分钟后开始" 抽象文案 |
+| `"finance"` | `FinanceCardDao` | 抽象文案（账单 / 还款），**不渲染金额 / 卡号后四位 / 具体日期数字** |
+
+**零知识红线**：通知文案**绝不**渲染金额 / 卡号后四位 / 具体日期数字。
+通知 id 用 `cardId.hashCode()`（同一卡片覆盖，不同卡片并行）。
+channelId = `"events"`（与事件共用，不新建 channel）。
+
+通知文案模板（v1 启用）：
+
+| `ref_kind` | 文案模板 |
+|---|---|
+| `card_statement_due` | "💳 信用卡账单已生成" |
+| `card_payment_due` | "💳 信用卡还款临近" |
+
+跳转路由携带 `record_id` + `record_kind`，路由至 `Routes.FINANCE` 编辑器。
+
+### Worker / 后台任务清单
+
+- **CollectorWorker**（4a 既有，4b 扩展，5 沿用）：`doWork()` 末尾追加
+  `financeRepo.pullAndDecrypt(moduleRecords)`（与 eventsRepo.pullAndDecrypt 
+  同款骨架，但仅处理 module="finance" 的 records）；4a 既有"采集 + 
+  recordsRepo.sync() + locationPackager + locationUploader"五段流程一行未删，
+  本批仅末尾追加。
+- **ReminderReceiver**（4b 新增，5 扩展）：收到全局 PendingIntent 后按
+  `module` 字段分支：
+  - `module="event"` → 4b 既有路径（拉 EventDao → 渲染 title + 抽象文案
+    → 重算 nextTrigger → 续接下一实例）；
+  - `module="finance"` → 拉 FinanceCardDao → 按 `ref_kind` 渲染抽象通知
+    → 重算 nextCardFiring → 续接下一实例。
+  通知文案**绝不**渲染金额 / 卡号后四位 / 具体日期数字（NFR-1 红线）。
+- **BootReceiver**（4a 既有，4b 扩展，5 无新增改动）：开机广播后除原有轨迹
+  / 同步分支外，在轨迹分支前追加 `try { ReminderScheduler.rebuildChain(ctx) }
+  catch (t: Throwable) { Log.w(...) }` 路径——`rebuildChain` 内部已合并
+  event + finance 两类触发，**5 阶段无额外改动**。4a 既有"BackgroundServiceStart
+  NotAllowedException / IllegalStateException 两路异常只吞不抛"约定与 4b
+  既有 try-catch 降级一并沿用。
+
+### 权限（阶段 5 沿用既有）
+
+| 权限 | 用途 | 申请时机 |
+|---|---|---|
+| `POST_NOTIFICATIONS` | Android 13+（API 33+）通知可见性（已声明，4a 沿用） | 运行时申请；被拒时仅写 `finance_reminder_log.delivered = 0`，不弹横幅 |
+
+阶段 5 **不新申请**任何运行时权限；账单 / 还款日通知文案仅含抽象描述，
+不暴露金额 / 卡号后四位 / 具体日期数字。
+
 ## 测试
 
 ```bash

@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://everything.eve/schemas/finance.schema.json",
+  "title": "finance module plaintext JSON Schema",
+  "description": "阶段 5 finance 模块明文 JSON Schema（v1）。三条子类型：account / card / tx；v2 占位：policy / subscription / loan / contract（仅在 FinanceType 枚举里登记，本 schema 不下发字段）。\n\n==\n\n设计要点：\n- module 固定 \"finance\"；type 子类型由 record-level type 字段区分，本文件按 type 分别给出 schema。\n- 完全复用阶段 1 records 信封（XChaCha20-Poly1305 + AAD `eve:v1:record:{id}:{module}:{BE(uint64 version)}`，module=\"finance\"）；不新造 envelope 参数。\n- 服务端零知识：只校验 id / module 非空与密文非空，不校验 type、不解密、不接触任何明文财务字段。\n- decimal-as-string：所有金额字段以字符串承载，避免 JavaScript Number 浮点精度丢失。\n- 时间戳字段一律 Unix 毫秒 int64。\n- 卡号后四位纪律：card.last4 仅入 schema 后四位（4 位数字字符串），完整卡号不入任何持久化层。\n\n==\n\n跨端契约：Web `web/src/finance/types.ts`、Android `FinanceAccountEntity.kt` / `FinanceCardEntity.kt` / `FinanceTxEntity.kt` 与本 schema 字段逐字段一致。任何字段变更须三端同改 + 同步更新 `docs/module-schemas.md` 第 9 章 + 更新跨端 fixture（保持 SHA-256 一致仍由 fixture 派生）。",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/FinanceAccount" },
+    { "$ref": "#/$defs/FinanceCard" },
+    { "$ref": "#/$defs/FinanceTx" }
+  ],
+  "$defs": {
+    "FinanceType": {
+      "type": "string",
+      "enum": [
+        "account",
+        "card",
+        "tx",
+        "policy",
+        "subscription",
+        "loan",
+        "contract"
+      ],
+      "$comment": "v1 仅下发前三类（account / card / tx）；policy / subscription / loan / contract 在 v2 启用，本期仅占位常量。"
+    },
+    "SchemaVersion": {
+      "type": "integer",
+      "const": 1,
+      "$comment": "schema_version=1 固定，v2 启用时按 version 路由扩展字段。"
+    },
+    "ColorPalette": {
+      "type": "string",
+      "enum": [
+        "blue",
+        "green",
+        "red",
+        "amber",
+        "violet",
+        "pink",
+        "cyan",
+        "slate",
+        "emerald",
+        "rose",
+        "sky",
+        "lime",
+        "orange"
+      ],
+      "$comment": "本 palette 仅新增 5 个 key（emerald / rose / sky / lime / orange）；amber / violet / slate 沿用 4a/4b 既有；不修改既有调色板。"
+    },
+    "UuidString": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "$comment": "UUID v4 字符串。"
+    },
+    "DecimalString": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$",
+      "$comment": "decimal-as-string，避免 JavaScript Number 浮点精度丢失。CNY = 元为最小显示单位。"
+    },
+    "PositiveDecimalString": {
+      "type": "string",
+      "pattern": "^\\d+(\\.\\d+)?$",
+      "$comment": "正 decimal-as-string；tx.amount / credit_limit / used_limit 用此口径。"
+    },
+    "Iso4217Currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$",
+      "default": "CNY",
+      "$comment": "ISO 4217 三字母货币代码；本期 v1 默认 CNY，不做汇率换算。"
+    },
+    "AccountKind": {
+      "type": "string",
+      "enum": ["cash", "deposit", "stock", "wallet", "other"],
+      "$comment": "账户类型枚举（5 项，v1 固定）。"
+    },
+    "CardKind": {
+      "type": "string",
+      "enum": ["debit", "credit"],
+      "$comment": "卡类型枚举（v1 固定 2 项；预留 prepaid 扩展位由 v2 启用）。"
+    },
+    "TxKind": {
+      "type": "string",
+      "enum": ["income", "expense", "transfer"],
+      "$comment": "流水类型枚举（3 项）。"
+    },
+    "FinanceAccount": {
+      "type": "object",
+      "title": "FinanceAccount (type=account)",
+      "description": "账户条目明文 payload（11 字段）。",
+      "required": [
+        "id",
+        "schema_version",
+        "name",
+        "kind",
+        "currency",
+        "balance",
+        "archived",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/UuidString" },
+        "schema_version": { "$ref": "#/$defs/SchemaVersion" },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "$comment": "账户名称；UTF-8；1-40 字符。"
+        },
+        "kind": { "$ref": "#/$defs/AccountKind" },
+        "currency": { "$ref": "#/$defs/Iso4217Currency" },
+        "balance": { "$ref": "#/$defs/DecimalString" },
+        "note": {
+          "type": ["string", "null"],
+          "maxLength": 200,
+          "$comment": "纯文本备注；0-200 字符。"
+        },
+        "icon": {
+          "type": ["string", "null"],
+          "$comment": "lucide-icon 名称（如 wallet / landmark）。"
+        },
+        "color": { "$ref": "#/$defs/ColorPalette" },
+        "archived": {
+          "type": "boolean",
+          "default": false,
+          "$comment": "归档标志（软删除）；默认 false；归档后不计入资产看板、不参与聚合。"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "$comment": "创建时刻，Unix 毫秒。"
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "$comment": "最后更新时刻，Unix 毫秒。"
+        }
+      }
+    },
+    "FinanceCard": {
+      "type": "object",
+      "title": "FinanceCard (type=card)",
+      "description": "银行卡 / 信用卡条目明文 payload（17 字段）。完整卡号不入 schema；仅 card.last4 入库。",
+      "required": [
+        "id",
+        "schema_version",
+        "name",
+        "kind",
+        "issuer",
+        "last4",
+        "currency",
+        "credit_limit",
+        "include_in_net_assets",
+        "archived",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/UuidString" },
+        "schema_version": { "$ref": "#/$defs/SchemaVersion" },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "$comment": "卡名（如招行信用卡）；UTF-8；1-40 字符。"
+        },
+        "kind": { "$ref": "#/$defs/CardKind" },
+        "issuer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "$comment": "银行 / 发卡机构名；1-40 字符。"
+        },
+        "last4": {
+          "type": "string",
+          "pattern": "^[0-9]{4}$",
+          "$comment": "卡号后四位数字字符串（仅后四位入 schema，完整卡号不入）。前端录入完整卡号（16-19 位）→ Luhn 校验后仅保留后四位。"
+        },
+        "currency": { "$ref": "#/$defs/Iso4217Currency" },
+        "credit_limit": {
+          "$ref": "#/$defs/PositiveDecimalString",
+          "$comment": "信用额度；信用卡必填（值非 null），借记卡选填（null 或 0）。"
+        },
+        "used_limit": {
+          "type": ["string", "null"],
+          "pattern": "^\\d+(\\.\\d+)?$",
+          "$comment": "已用额度；非负；null 或 0 时按未用标注。"
+        },
+        "billing_day": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 31,
+          "$comment": "账单日（每月 day_of_month），1-31；超出当月最大日按月底处理（如 31 在 2 月按 28/29）。"
+        },
+        "due_day": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 31,
+          "$comment": "还款日距账单日天数 offset，1-31（offset 模式：statement_day + due_day_offset 跨月滚动）；null 表示无还款日配置。"
+        },
+        "note": {
+          "type": ["string", "null"],
+          "maxLength": 200
+        },
+        "icon": {
+          "type": ["string", "null"]
+        },
+        "color": { "$ref": "#/$defs/ColorPalette" },
+        "archived": {
+          "type": "boolean",
+          "default": false
+        },
+        "include_in_net_assets": {
+          "type": "boolean",
+          "default": true,
+          "$comment": "是否计入净资产看板；默认 true；归档自动视为 false。"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "FinanceTx": {
+      "type": "object",
+      "title": "FinanceTx (type=tx)",
+      "description": "日常记账条目明文 payload（13 字段）。amount 一律正数；kind 决定方向。",
+      "required": [
+        "id",
+        "schema_version",
+        "account_id",
+        "kind",
+        "amount",
+        "category",
+        "occurred_at",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/UuidString" },
+        "schema_version": { "$ref": "#/$defs/SchemaVersion" },
+        "account_id": {
+          "type": ["string", "null"],
+          "format": "uuid",
+          "$comment": "出账方账户 id；外键到 Account.id；kind ∈ {expense, income} 必填，kind=transfer 必填。"
+        },
+        "card_id": {
+          "type": ["string", "null"],
+          "format": "uuid",
+          "$comment": "出账方卡 id；外键到 Card.id；信用卡交易时填（与 account_id 二选一，本期 v1 优先 account_id）。"
+        },
+        "kind": { "$ref": "#/$defs/TxKind" },
+        "amount": {
+          "$ref": "#/$defs/PositiveDecimalString",
+          "$comment": "金额，一律正数；kind 决定方向（expense 减余额、income 增余额、transfer 双向调整）。"
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "$comment": "分类 ID 或自由文本（如餐饮）；1-20 字符；详见 docs/finance.md §2 分类体系。"
+        },
+        "occurred_at": {
+          "type": "integer",
+          "minimum": 0,
+          "$comment": "流水发生时刻，Unix 毫秒；用户可改回历史日期补录。"
+        },
+        "note": {
+          "type": ["string", "null"],
+          "maxLength": 200
+        },
+        "transfer_to_account_id": {
+          "type": ["string", "null"],
+          "format": "uuid",
+          "$comment": "转账入账方账户 id；外键到 Account.id；kind=transfer 时必填，且不能等于 account_id。"
+        },
+        "icon": {
+          "type": ["string", "null"]
+        },
+        "color": { "$ref": "#/$defs/ColorPalette" },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

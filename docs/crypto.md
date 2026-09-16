@@ -250,6 +250,49 @@ blockId = deviceId ‖ ":" ‖ startTs ‖ ":" ‖ endTs    # 时间均为 UTC �
   `expand(rule, window)` 是跨端共享纯函数（见 Web `web/src/events/expand.ts` 与
   Android `Recurrence.kt`），不依赖服务端计算；服务端零改动（阶段 4b 显式声明）。
 
+## 6.6 财务模块加密链路（阶段 5 v1）
+
+阶段 5 财务 v1（账户 / 银行卡 / 日常记账三类条目）**完全复用** §5 记录 AAD 与
+第 1 节 XChaCha20-Poly1305 信封，**不新造 envelope 参数、不新造 AAD 前缀**，
+沿用 4a place / 4b event 同一套 records 通道。具体约定：
+
+- **挂载点**：财务三类条目作为 `module="finance"` / `type ∈ {"account", "card",
+  "tx"}` 的记录条目写入既有 `records` 表（v1 仅下发这三类；`policy` /
+  `subscription` / `loan` / `contract` 四类仅占位常量与 `schema_version=1`
+  钩子，下发时机由 v2 决定）。
+- **AAD**：沿用通用 AAD `eve:v1:record:{id}:finance:{BE_UINT64(version)}`
+  （即第 5 节通用 AAD，`module` 段文本取 `"finance"`），与 4a place /
+  4b event 字段位置完全相同，**module 文本不同即可**；不引入新前缀，
+  不破坏第 7 节互通向量。
+- **字段归属**：财务明文 JSON 三类字段定义见
+  [module-schemas.md](module-schemas.md) 第 9 章（含 9.1 挂载点、9.2 类型枚举、
+  9.3–9.5 account / card / tx 字段表、9.6 调色板、9.7 隐私字段纪律、9.8
+  跨端一致性要求）；独立模块文档（分类体系 / 月报 / 资产看板 / Luhn /
+  提醒触发 / v2 钩子）见 [finance.md](finance.md)。
+- **加密原语 / 密钥**：与第 1 节一致——XChaCha20-Poly1305 IETF、随机 24B
+  nonce 前置、32B MK、`nonce(24) ‖ ciphertext ‖ tag(16)` 布局；服务端不接触
+  明文，AAD 校验由端侧 `openRecord` 完成，材料长度或前缀不符直接拒绝。
+- **decimal-as-string 金额约定**：balance / credit_limit / used_limit / amount
+  四类金额字段一律以**字符串**承载（避免 JavaScript Number 与 Kotlin Double
+  浮点精度丢失），CNY = 元为最小显示单位；端侧由 cents 整数算术聚合（cents =
+  最小单位），输出统一两位小数；服务端不解密故无二次校验。
+- **仅后四位入库纪律（卡号）**：完整卡号**不入** schema、不入 Room /
+  localStorage / IndexedDB / 服务端；UI 录入完整卡号（13–19 位数字）经
+  Luhn 校验通过后仅保留后四位数字字符串入 `card.last4` 字段；
+  详见 [finance.md](finance.md) §5 与 [module-schemas.md](module-schemas.md)
+  §9.7。校验失败弹错并清空输入框，**不持久化任何位**。
+- **跨端锚点**：Web `web/src/crypto/envelope.ts` `sealRecord` 与 Android
+  `CryptoEnvelope.kt` `sealRecord` 沿用阶段 1/2/4a/4b 同一条封/开路径；
+  FinanceRepository / financeStore 不重写 envelope，仅在 records 表上加挂
+  `module="finance"` 维度。
+- **范围外**：聚合算法（净资产 / 总资产 / 总负债 / 月报收支 / 预算阈值）
+  全部在客户端纯函数（Web `web/src/finance/aggregator.ts` + Android
+  [`FinanceAggregator.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt)）
+  完成，**不上行**服务端；触发计算（账单日 / 还款日双触发）走客户端
+  纯函数（Web `web/src/finance/nextCardFiring.ts` + Android
+  [`NextCardFiring.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/NextCardFiring.kt)），
+  不上传展开点；服务端零改动（阶段 5 显式声明）。
+
 ## 7. 固定测试向量
 
 ### 7.1 主密码信封
@@ -322,6 +365,17 @@ ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmIWDn9l9j4ZLuseuCaVv4fttrfeQEX6yIjtKfYJ+tAQAXXyOj
 - **日程/日历加密链路**：事件作为 `module="event"` 记录沿用 §5 AAD 与第 1 节
   信封原语，**不新造 envelope 参数 / 不新造 AAD 前缀**；服务端零改动，跨端锚点
   `sealRecord` ↔ `openRecord` 与既有密码库/地点记录共用同一条链路（见第 6.5 节）。
+
+**已落地**（阶段 5 扩展）：
+
+- **财务模块加密链路**：账户 / 银行卡 / 流水三类条目作为 `module="finance"`
+  记录沿用 §5 AAD 与第 1 节信封原语，**不新造 envelope 参数 / 不新造 AAD 前缀**；
+  服务端零改动（无新表 / 无新列 / 无新接口），跨端锚点 `sealRecord` ↔
+  `openRecord` 与 1/2/4a/4b 既有链路共用同一条；聚合与触发全部在客户端纯函数
+  镜像（Web `web/src/finance/aggregator.ts` + `web/src/finance/nextCardFiring.ts`
+  ↔ Android [`FinanceAggregator.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt)
+  + [`NextCardFiring.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/NextCardFiring.kt)），
+  见第 6.6 节。
 
 **尚未实现**：
 

@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.everything.eve.ui.finance.FinanceScreen
 import com.everything.eve.ui.screens.CalendarScreen
 import com.everything.eve.ui.screens.CollectorScreen
 import com.everything.eve.ui.screens.DevicesScreen
@@ -18,6 +19,11 @@ object Routes {
     // 阶段 4b Task 9 / TR-9.1：日历入口（沿用 4a 既有模式——TopAppBar actions TextButton，
     // 调用 nav.navigate(Routes.CALENDAR) 进入 CalendarScreen；与 COLLECTOR 同款镜像）。
     const val CALENDAR = "calendar"
+    // 阶段 5 Task 10 / TR-10.1：财务入口（沿用 4b CALENDAR 同款镜像——TopAppBar actions
+    // TextButton → onOpenFinance 回调 → nav.navigate(Routes.FINANCE) → FinanceScreen。
+    // 字面量与 FinanceRoutes.ROOT 同源（均为 "finance"），保证主导航与模块内二级路由
+    // 共享同一 namespace，避免出现两条不互通的 finance 路径）。
+    const val FINANCE = "finance"
 }
 
 @Composable
@@ -43,6 +49,9 @@ fun AppNav() {
                 onOpenCollector = { nav.navigate(Routes.COLLECTOR) },
                 // 阶段 4b Task 9 / TR-9.1：日历入口回调（沿用 4a 既有 onOpenCollector 模式镜像新增）。
                 onOpenCalendar = { nav.navigate(Routes.CALENDAR) },
+                // 阶段 5 Task 10 / TR-10.1：财务入口回调（沿用 4b CALENDAR 同款镜像新增；
+                // 顶部"财务"TextButton → onOpenFinance → nav.navigate(Routes.FINANCE)）。
+                onOpenFinance = { nav.navigate(Routes.FINANCE) },
             )
         }
         composable(Routes.DEVICES) {
@@ -56,6 +65,13 @@ fun AppNav() {
         // CalendarScreen 内部自行管理状态与 TopAppBar 返回，不需外部 onBack 参数（4b TR-6.3 已落盘签名）。
         composable(Routes.CALENDAR) {
             CalendarScreen()
+        }
+        // 阶段 5 Task 10 / TR-10.1：财务页（与 4b CALENDAR 同款镜像——登录后可达、共享
+        // "finance" namespace；具体 Tab / 编辑器子路由由 FinanceScreen 内部维护，
+        // 主导航仅需把 ROOT 入口接通即可。FinanceScreen 内部自行管理 TopAppBar 返回，
+        // 无需外部 onBack 参数，与 4b CALENDAR 保持一致）。
+        composable(Routes.FINANCE) {
+            FinanceScreen()
         }
     }
 }

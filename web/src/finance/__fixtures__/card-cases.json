@@ -1,0 +1,10 @@
+{
+  "_comment_": "占位 fixture —— 阶段 5 finance / type=card 跨端共享用例。",
+  "_status_": "placeholder",
+  "_owner_task_": "T1 (TR-1.3 占位)",
+  "_filled_by_task_": "T4 (Android Room + Repository) / T8 (Web Aggregator + Store)",
+  "_schema_ref_": "docs/schemas/finance.schema.json#/$defs/FinanceCard",
+  "_cross_ref_": "docs/module-schemas.md#9.4",
+  "_notes_": "本文件为占位骨架，不含实际用例。Task 4 / Task 8 实施时按 docs/finance.md §5 Luhn 校验 + §8 跨端 fixture 命名规范回填；card.last4 仅后四位（4 位数字）入 schema；完整卡号不入用例 input。Web 与 Android 镜像文件 SHA-256 必须一致。",
+  "cases": []
+}

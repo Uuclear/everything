@@ -259,6 +259,173 @@ class RecordsRepository(
         )
     }
 
+    // =============================================================================
+    // 阶段 5：财务模块（spec FR-7 / FR-8 / FR-9；TR-4.6 补做挂载点）。
+    // =============================================================================
+    // finance 作为一条 records 记录写入：module="finance"、type="account"/"card"/"tx"，
+    // AAD 沿用 "eve:v1:record:{id}:finance:"（由 CryptoEnvelope.recordAAD 内置 + BE(uint64 version)），
+    // 与既有 pass/event 链路**逐字节一致**；明文载荷为对应财务实体的 JSON。
+    //
+    // 设计纪律：
+    //  1) **不新造 envelope 路径**：完全复用 CryptoEnvelope.sealRecord / openRecord；
+    //  2) **dirty 标记**：本方法写完后 records 行 dirty=true，等待 RecordsRepository.sync()
+    //     周期推送；推送成功后由 markClean 翻 false（与 4a NotesRepository 4b EventsRepository
+    //     既有规则一致）；
+    //  3) **零知识纪律**：name / last4 / amount / note / holder 等明文载荷**不**打印日志、
+    //     **不**写 SharedPreferences；写 Records 行 ciphertext 加密字段、由 SyncWorker 上行。
+    //  4) **type 子类型**：account / card / tx 用同一个 records module=finance 通道，
+    //     type 字段区分类型；AAD 与 version 通道口径完全一致，下行解密按 type 反序列化即可。
+    //  5) **decryptFinanceRecord 抛异常**：解密失败（密文被改 / AAD 不匹配 / 类型非 finance）
+    //     直接抛 javax.crypto.AEADBadTagException，由调用方（FinanceRepository.pullAndDecrypt）
+    //     自行决定是否降级；不复用 4a NotesRepository 的静默吞掉（与 4b EventsRepository 一致）。
+
+    /** finance 模块常量：与 Web types.ts FINANCE_MODULE = 'finance' 严格一致。 */
+    private val moduleFinance = "finance"
+
+    /** finance 子类型：账户。 */
+    private val typeFinanceAccount = "account"
+
+    /** finance 子类型：银行卡。 */
+    private val typeFinanceCard = "card"
+
+    /** finance 子类型：流水（transaction）。 */
+    private val typeFinanceTx = "tx"
+
+    /**
+     * 把一条 FinanceAccount 明文密封为 records 条目（module=finance/type=account），
+     * 并标 dirty。
+     *
+     * 与 4b [upsertEventRule] 同款链路：sealRecord → dao.upsertAll → dirty=true。
+     * 同 id 已存在则按 records REPLACE 覆盖；updatedAt 取本地时钟（推送后由
+     * RecordsRepository.sync() 标记 clean 时用服务端权威时间覆盖）。
+     *
+     * @param accountId 账户 UUID（即 entity.id，与 FinanceAccountEntity.id 对齐）。
+     * @param plaintextJson 账户明文载荷 JSON（与 finance/types.ts 对齐的 snake_case 字段）。
+     * @return 写入的 record id（即 accountId）。
+     * @throws IllegalStateException MK 未解锁。
+     */
+    suspend fun upsertFinanceAccount(accountId: String, plaintextJson: String): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val now = System.currentTimeMillis()
+        val plain = plaintextJson.toByteArray(Charsets.UTF_8)
+        val sealed = CryptoEnvelope.sealRecord(mk, plain, accountId, moduleFinance, 1)
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = accountId,
+                    module = moduleFinance,
+                    type = typeFinanceAccount,
+                    ciphertext = CryptoEnvelope.b64(sealed),
+                    version = 1,
+                    createdAt = now,
+                    updatedAt = now,
+                    deleted = false,
+                    dirty = true,
+                ),
+            ),
+        )
+        return accountId
+    }
+
+    /**
+     * 把一条 FinanceCard 明文密封为 records 条目（module=finance/type=card），
+     * 并标 dirty。
+     *
+     * **零知识纪律（spec NFR-1 / Luhn 校验）**：plaintextJson **必须只含 last4**，
+     * 完整 PAN 由编辑器在调用前丢弃，不进 Room / 不进 ciphertext 载荷；
+     * 本方法**不**额外拦截完整卡号（编辑器契约）。
+     *
+     * @param cardId 卡片 UUID。
+     * @param plaintextJson 卡片明文载荷 JSON（仅 last4；不含完整 PAN）。
+     * @return 写入的 record id（即 cardId）。
+     * @throws IllegalStateException MK 未解锁。
+     */
+    suspend fun upsertFinanceCard(cardId: String, plaintextJson: String): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val now = System.currentTimeMillis()
+        val plain = plaintextJson.toByteArray(Charsets.UTF_8)
+        val sealed = CryptoEnvelope.sealRecord(mk, plain, cardId, moduleFinance, 1)
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = cardId,
+                    module = moduleFinance,
+                    type = typeFinanceCard,
+                    ciphertext = CryptoEnvelope.b64(sealed),
+                    version = 1,
+                    createdAt = now,
+                    updatedAt = now,
+                    deleted = false,
+                    dirty = true,
+                ),
+            ),
+        )
+        return cardId
+    }
+
+    /**
+     * 把一条 FinanceTx 明文密封为 records 条目（module=finance/type=tx），
+     * 并标 dirty。
+     *
+     * 关联账户/卡删除后历史流水保留 account_id / card_id 引用；本方法**不**做
+     * 关联校验（编辑器契约）。
+     *
+     * @param txId 流水 UUID。
+     * @param plaintextJson 流水明文载荷 JSON（含 amount / occurred_at / currency / note 等）。
+     * @return 写入的 record id（即 txId）。
+     * @throws IllegalStateException MK 未解锁。
+     */
+    suspend fun upsertFinanceTx(txId: String, plaintextJson: String): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val now = System.currentTimeMillis()
+        val plain = plaintextJson.toByteArray(Charsets.UTF_8)
+        val sealed = CryptoEnvelope.sealRecord(mk, plain, txId, moduleFinance, 1)
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = txId,
+                    module = moduleFinance,
+                    type = typeFinanceTx,
+                    ciphertext = CryptoEnvelope.b64(sealed),
+                    version = 1,
+                    createdAt = now,
+                    updatedAt = now,
+                    deleted = false,
+                    dirty = true,
+                ),
+            ),
+        )
+        return txId
+    }
+
+    /**
+     * 解密一条 finance 记录密文回明文 JSON（FinanceRepository.pullAndDecrypt 入库用）。
+     *
+     * 与 4b [decryptEventRule] 同款口径：解密失败（AAD 不匹配 / 模块非 finance /
+     * 密文被改）抛 javax.crypto.AEADBadTagException，由 FinanceRepository 决定
+     * 是否降级。**不**静默吞掉，避免脏数据入库（与 4b 纪律一致）。
+     *
+     * @param entity 已落 records 表的 entity（ciphertext / module / version 来自下行）。
+     * @return 明文 JSON 字符串（与 upsertFinance* 的 plaintextJson 同格式）。
+     * @throws IllegalStateException MK 未解锁。
+     * @throws javax.crypto.AEADBadTagException 密文/AAD 不匹配。
+     */
+    fun decryptFinanceRecord(entity: RecordEntity): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val plain = CryptoEnvelope.openRecord(
+            mk,
+            CryptoEnvelope.unb64(entity.ciphertext),
+            entity.id,
+            entity.module,
+            entity.version,
+        )
+        return String(plain, Charsets.UTF_8)
+    }
+
     companion object {
         const val MODULE_PASS = "pass"
         const val TYPE_NOTE = "note"
@@ -267,5 +434,23 @@ class RecordsRepository(
         // event 模块沿用既有 records 通道，module/type 双键约定与 place/pass 一致；
         // AAD 沿用 "eve:v1:record:{id}"，**不新造** envelope 参数；
         // 详见 [com.everything.eve.data.event.EventsRepository] 加密链路说明。
+
+        // ---- 阶段 5：财务模块挂载点（TR-4.6 / TR-11.2） ----
+        // finance 模块 module=finance/type=account|card|tx；AAD 沿用既有 records
+        // 通道（详情见 [com.everything.eve.data.finance.FinanceRepository]）。
+    }
+
+    /**
+     * 取本地 records 表 updatedAt 大于 sinceMs 的所有行（含 dirty 本地新写 + 远端下行）。
+     *
+     * 阶段 5 / TR-11.2 CollectorWorker 专用：先调此方法取出 records 列表，
+     * 然后按 module 过滤后交给各模块 Repository 做解密与入库（finance / event 同款模式）。
+     *
+     * @param sinceMs 毫秒游标；sinceMs<=0 即全量。
+     * @return 命中行列表（按 updatedAt 升序）。
+     */
+    suspend fun listRecordsAfter(sinceMs: Long): List<RecordEntity> {
+        val cursor = if (sinceMs <= 0) 0L else sinceMs
+        return dao.getUpdatedAfter(cursor)
     }
 }

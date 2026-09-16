@@ -76,6 +76,27 @@ class CollectorWorker(appContext: Context, params: WorkerParameters) :
                 // 链式约束对单次失败容忍度极高，留队下轮再试）。
                 Log.w("SyncWorker", "events sync failed", t)
             }
+            // ---- 阶段 5 / TR-11.2 挂载点：财务模块拉取 + 闹钟链重建 ----
+            // 严格 try-catch 包裹：不破坏 4a/4b 既有同步链路；财务模块解密
+            // 失败 / Room 异常 / ReminderScheduler 异常均不抛出此 Worker。
+            // 顺序：先拉取 finance 模块远端 records → 解密 → upsert 到
+            // account/card/tx 表 → 再 rebuildChain 让账单日/还款日闹钟对齐。
+            // 复用 records 表 maxUpdatedAt 作 since 增量游标（同一 records
+            // 表记录所有模块，避免新增同步游标字段）。
+            try {
+                if (ServiceLocator.auth.masterKey != null) {
+                    val sinceMs = ServiceLocator.db.recordDao().maxUpdatedAt()
+                    // 拉 records → 过滤 module="finance" → 走带参 pullAndDecrypt
+                    val financeRecords = ServiceLocator.repo.listRecordsAfter(sinceMs)
+                    ServiceLocator.financeRepo.pullAndDecrypt(
+                        financeRecords.filter { it.module == com.everything.eve.data.finance.FinanceModule.MODULE }
+                    )
+                    ReminderScheduler.rebuildChain(ctx)
+                }
+            } catch (t: Throwable) {
+                // 财务模块同步失败 / 闹钟重建失败不影响 Worker 整体成功
+                Log.w("SyncWorker", "finance sync failed", t)
+            }
             Result.success()
         } catch (e: Exception) {
             Result.retry()

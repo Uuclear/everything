@@ -7,6 +7,9 @@
     <!-- ============================================================ -->
     <!-- 阶段 4b Task 9 / TR-9.1：日历入口文案（VaultScreen TopAppBar actions TextButton 渲染）。 -->
     <string name="nav_calendar">日历</string>
+    <!-- 阶段 5 Task 10 / TR-10.1：财务入口文案（VaultScreen TopAppBar actions TextButton 渲染，
+         沿用 4b nav_calendar 同款镜像模式 → 与 "采集 / 设备" / "日历" 并列显示）。 -->
+    <string name="nav_finance">财务</string>
 
     <!-- 阶段 4b Task 5 / TR-5.3：日程提醒通知文案（spec FR-5 零知识红线） -->
     <!-- 通知 channel "events" 名称 + 描述；API 26+ 创建。 -->
@@ -21,6 +24,22 @@
     <!-- 阶段 4b Task 6 / TR-6.1~6.3：CalendarScreen + Editor 文案    -->
     <!-- 命名规范：以 event_ 前缀，避免与 4a 既有 key 冲突            -->
     <!-- ============================================================ -->
+
+    <!-- ============================================================ -->
+    <!-- 阶段 5 Task 6 / TR-6.1 + TR-6.2 + TR-6.3：财务提醒通知文案     -->
+    <!-- 命名规范：以 finance_reminder_ 前缀，集中维护抽象文案         -->
+    <!-- 零知识红线（spec NFR-1 / 阶段 5 FR-4）：                      -->
+    <!--   - 不渲染金额数字；                                         -->
+    <!--   - 不渲染卡号后四位；                                       -->
+    <!--   - 不渲染具体日期数字（账单日/还款日几号）；                -->
+    <!--   - 仅 title + 抽象提示文案 + 点击跳转入口。                  -->
+    <!-- ============================================================ -->
+    <!-- 阶段 5 TR-6.2：财务通知标题（与日程通知共用 channel "events"） -->
+    <string name="finance_reminder_title">财务提醒</string>
+    <!-- 阶段 5 TR-6.2 / TR-6.3：账单日提醒文案（T-3 抽象） -->
+    <string name="finance_reminder_statement_due_text">信用卡账单已生成，点击查看</string>
+    <!-- 阶段 5 TR-6.2 / TR-6.3：还款日提醒文案（T-1 抽象） -->
+    <string name="finance_reminder_payment_due_text">信用卡还款日临近，点击查看</string>
 
     <!-- ============== CalendarScreen 容器 ============== -->
     <string name="event_calendar_title">日历</string>
@@ -120,4 +139,124 @@
 
     <!-- 周视图时轴 -->
     <string name="event_week_axis_hour_format">%1$02d:00</string>
+
+    <!-- ============================================================ -->
+    <!-- 阶段 5 Task 7 / TR-7.1~7.5：财务模块 Compose UI 文案        -->
+    <!-- 命名规范：以 finance_ 前缀；与 4b event_ 文案并列            -->
+    <!-- 零知识红线（spec NFR-1）：                                  -->
+    <!--   - 不渲染金额数字（除非用户主动查看）；                    -->
+    <!--   - 不渲染卡号后四位（编辑器失焦后即丢弃）；                -->
+    <!--   - 不渲染具体日期数字（账单日/还款日几号）；                -->
+    <!-- ============================================================ -->
+
+    <!-- 顶部导航 -->
+    <string name="finance_nav_title">财务</string>
+    <string name="finance_tab_dashboard">看板</string>
+    <string name="finance_tab_accounts">账户</string>
+    <string name="finance_tab_cards">卡片</string>
+    <string name="finance_tab_txs">流水</string>
+
+    <!-- 看板 -->
+    <string name="finance_dashboard_net_worth_label">净资产</string>
+    <string name="finance_dashboard_total_assets_label">总资产</string>
+    <string name="finance_dashboard_total_liability_label">总负债</string>
+    <string name="finance_dashboard_count_format">账户 %1$d · 卡片 %2$d · 流水 %3$d</string>
+    <string name="finance_dashboard_currency_cny">CNY</string>
+    <string name="finance_dashboard_amount_mask">****</string>
+    <string name="finance_dashboard_empty">暂无数据，新建账户/卡片后自动汇总</string>
+
+    <!-- 列表通用 -->
+    <string name="finance_list_search_hint">按名称/备注/分类搜索</string>
+    <string name="finance_list_sort_balance_asc">余额 ↑</string>
+    <string name="finance_list_sort_balance_desc">余额 ↓</string>
+    <string name="finance_list_sort_updated_desc">最近更新</string>
+    <string name="finance_list_sort_updated_asc">最早更新</string>
+    <string name="finance_list_filter_all">全部</string>
+    <string name="finance_list_archived_chip">已归档</string>
+    <string name="finance_list_empty">尚无条目，点击右下角按钮新建</string>
+
+    <!-- 账户列表/编辑器 -->
+    <string name="finance_account_kind_cash">现金</string>
+    <string name="finance_account_kind_deposit">储蓄卡</string>
+    <string name="finance_account_kind_stock">投资</string>
+    <string name="finance_account_kind_wallet">钱包</string>
+    <string name="finance_account_kind_other">其他</string>
+    <string name="finance_account_editor_title_new">新建账户</string>
+    <string name="finance_account_editor_title_edit">编辑账户</string>
+    <string name="finance_account_field_name">账户名称</string>
+    <string name="finance_account_field_kind">类型</string>
+    <string name="finance_account_field_currency">币种</string>
+    <string name="finance_account_field_balance">余额</string>
+    <string name="finance_account_field_note">备注</string>
+    <string name="finance_account_field_color">颜色</string>
+    <string name="finance_account_field_archived">归档</string>
+    <string name="finance_account_error_name_empty">账户名称不能为空</string>
+    <string name="finance_account_error_balance_invalid">余额格式不正确</string>
+
+    <!-- 卡片列表/编辑器 -->
+    <string name="finance_card_kind_credit">信用卡</string>
+    <string name="finance_card_kind_debit">借记卡</string>
+    <string name="finance_card_brand_visa">Visa</string>
+    <string name="finance_card_brand_mastercard">Mastercard</string>
+    <string name="finance_card_brand_unionpay">银联</string>
+    <string name="finance_card_brand_amex">Amex</string>
+    <string name="finance_card_brand_jcb">JCB</string>
+    <string name="finance_card_brand_discover">Discover</string>
+    <string name="finance_card_brand_other">其他</string>
+    <string name="finance_card_editor_title_new">新建卡片</string>
+    <string name="finance_card_editor_title_edit">编辑卡片</string>
+    <string name="finance_card_field_name">卡片名称</string>
+    <string name="finance_card_field_kind">类型</string>
+    <string name="finance_card_field_issuer">发卡行</string>
+    <string name="finance_card_field_pan">卡号</string>
+    <string name="finance_card_field_pan_hint">完整卡号仅在校验时短暂驻留内存</string>
+    <string name="finance_card_field_credit_limit">信用额度</string>
+    <string name="finance_card_field_used_limit">已用额度</string>
+    <string name="finance_card_field_billing_day">账单日</string>
+    <string name="finance_card_field_due_day">还款日 offset</string>
+    <string name="finance_card_field_brand">卡组织</string>
+    <string name="finance_card_field_expiry">有效期（MM/YY）</string>
+    <string name="finance_card_field_holder">持卡人</string>
+    <string name="finance_card_field_note">备注</string>
+    <string name="finance_card_field_color">颜色</string>
+    <string name="finance_card_field_archived">归档</string>
+    <string name="finance_card_pan_luhn_failed">卡号未通过 Luhn 校验，请核对</string>
+    <string name="finance_card_last4_stored_format">已存末四位：%1$s</string>
+    <string name="finance_card_error_name_empty">卡片名称不能为空</string>
+    <string name="finance_card_error_issuer_empty">发卡行不能为空</string>
+    <string name="finance_card_error_luhn_failed">Luhn 校验未通过</string>
+    <string name="finance_card_error_billing_day_range">账单日需在 1-31 范围</string>
+    <string name="finance_card_error_due_day_range">还款日 offset 需在 0-60 范围</string>
+    <string name="finance_card_error_credit_only_field">该字段仅信用卡填写</string>
+
+    <!-- 流水列表/编辑器 -->
+    <string name="finance_tx_kind_income">收入</string>
+    <string name="finance_tx_kind_expense">支出</string>
+    <string name="finance_tx_kind_transfer">转账</string>
+    <string name="finance_tx_editor_title_new">新建流水</string>
+    <string name="finance_tx_editor_title_edit">编辑流水</string>
+    <string name="finance_tx_field_account">账户</string>
+    <string name="finance_tx_field_card">卡片（可选）</string>
+    <string name="finance_tx_field_kind">类型</string>
+    <string name="finance_tx_field_amount">金额</string>
+    <string name="finance_tx_field_category">分类</string>
+    <string name="finance_tx_field_occurred_at">发生日期</string>
+    <string name="finance_tx_field_note">备注</string>
+    <string name="finance_tx_field_transfer_to">转入账户</string>
+    <string name="finance_tx_error_amount_invalid">金额格式不正确</string>
+    <string name="finance_tx_error_account_required">账户必填</string>
+    <string name="finance_tx_error_transfer_same">转账双方不能相同</string>
+    <string name="finance_tx_error_transfer_missing">转账时必须选择转入账户</string>
+
+    <!-- 编辑器通用 -->
+    <string name="finance_editor_save_btn">保存</string>
+    <string name="finance_editor_cancel_btn">取消</string>
+    <string name="finance_editor_delete_btn">删除</string>
+    <string name="finance_editor_delete_confirm_title">确认删除</string>
+    <string name="finance_editor_delete_confirm_message">删除后无法恢复（同步链路会推送 tombstone）。</string>
+
+    <!-- 列表 chip -->
+    <string name="finance_tx_chip_kind_income">收入</string>
+    <string name="finance_tx_chip_kind_expense">支出</string>
+    <string name="finance_tx_chip_kind_transfer">转账</string>
 </resources>

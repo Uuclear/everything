@@ -1,0 +1,10 @@
+{
+  "_comment_": "占位 fixture —— 阶段 5 finance / type=tx 跨端共享用例。",
+  "_status_": "placeholder",
+  "_owner_task_": "T1 (TR-1.3 占位)",
+  "_filled_by_task_": "T4 (Android Room + Repository) / T8 (Web Aggregator + Store)",
+  "_schema_ref_": "docs/schemas/finance.schema.json#/$defs/FinanceTx",
+  "_cross_ref_": "docs/module-schemas.md#9.5",
+  "_notes_": "本文件为占位骨架，不含实际用例。Task 4 / Task 8 实施时按 docs/finance.md §3 月报聚合规则 + §8 跨端 fixture 命名规范回填；tx.amount 一律正数（decimal-as-string），kind 决定方向；transfer 用例须覆盖 transfer_to_account_id != account_id 校验。Web 与 Android 镜像文件 SHA-256 必须一致。",
+  "cases": []
+}

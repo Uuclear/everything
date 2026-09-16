@@ -1,0 +1,11 @@
+{
+  "_comment_": "占位 fixture —— 阶段 5 finance / type=account 跨端共享用例（Android 镜像）。",
+  "_status_": "placeholder",
+  "_owner_task_": "T1 (TR-1.3 占位)",
+  "_filled_by_task_": "T4 (Android Room + Repository)",
+  "_schema_ref_": "docs/schemas/finance.schema.json#/$defs/FinanceAccount",
+  "_cross_ref_": "docs/module-schemas.md#9.3",
+  "_mirror_of_": "web/src/finance/__fixtures__/account-cases.json",
+  "_notes_": "本文件为占位骨架，字节级镜像 web/src/finance/__fixtures__/account-cases.json。Task 4 实施时回填实际用例，Android 端 SHA-256 必须与 Web 端一致。JUnit 加载路径：src/test/resources/finance/__fixtures__/account-cases.json（如本目录与 resources 目录并存，JVM 优先 resources；本目录保留作为 Android 工程内 cross-ref 占位）。",
+  "cases": []
+}

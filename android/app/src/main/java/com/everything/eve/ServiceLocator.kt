@@ -6,6 +6,7 @@ import com.everything.eve.auth.AuthManager
 import com.everything.eve.data.EveDatabase
 import com.everything.eve.data.RecordsRepository
 import com.everything.eve.data.event.EventsRepository
+import com.everything.eve.data.finance.FinanceRepository
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.runBlocking
@@ -31,6 +32,9 @@ object ServiceLocator {
     lateinit var repo: RecordsRepository
         private set
     lateinit var eventsRepo: EventsRepository
+        private set
+    // 阶段 5 Task 4：财务模块仓库（明文 4 表 + records 通道复用，仅搭骨架）
+    lateinit var financeRepo: FinanceRepository
         private set
     lateinit var db: EveDatabase
         private set
@@ -63,6 +67,15 @@ object ServiceLocator {
         repo = RecordsRepository(db.recordDao(), auth)
         // 阶段 4b Task 4：日程/日历模块仓库（明文 event 表 + records 密文通道复用）
         eventsRepo = EventsRepository(db.eventDao(), repo)
+        // 阶段 5 Task 4：财务模块仓库骨架（明文 4 表 + records 密文通道复用，
+        // T6/T11 才真正编排上行；不同步上行逻辑）。
+        financeRepo = FinanceRepository(
+            accountDao = db.financeAccountDao(),
+            cardDao = db.financeCardDao(),
+            txDao = db.financeTxDao(),
+            reminderLogDao = db.financeReminderLogDao(),
+            recordsRepository = repo,
+        )
         collector = com.everything.eve.collector.CollectorEngine(
             appContext = ctx,
             auth = auth,
