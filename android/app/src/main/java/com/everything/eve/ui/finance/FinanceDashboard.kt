@@ -1,9 +1,9 @@
 /*
  * ============================================================================
- * FinanceDashboard —— 财务看板（stage5-finance / Task 7 / TR-7.2）
+ * FinanceDashboard —— 财务看板（stage5-finance / Task 7 / TR-7.2 + stage5-finance-v2 / TR-2.5）
  * ============================================================================
  *
- * 设计要点（spec FR-2 / AC-2 / TR-7.2）：
+ * 设计要点（spec FR-2 / AC-2 / TR-7.2 / TR-2.5）：
  *   1. **三数字卡 + 计数 + 月报**：净资产 / 总资产 / 总负债 + 账户/卡片/
  *      流水计数 + 当月 income / expense / net；
  *   2. **数字调用 FinanceAggregator.netWorth / monthlyReport**：实时
@@ -12,9 +12,14 @@
  *      金额到 UI 截屏；颜色按净资产正负配色（红色 = 资不抵债）。
  *   4. **预算状态**：根据当月支出/收入派生 BudgetStatus（OK / WARNING /
  *      EXCEEDED），仅做颜色标记，不渲染具体阈值数字。
+ *   5. **v2 卡片扩展（TR-2.5）**：在 v1 Dashboard 末尾追加 4 张 v2 子类型
+ *      提示卡（即将续费订阅 / 即将到期保单 / 待还借款 / 即将结束合同）。
+ *      每张卡显示 count + 相对天数（"最近 X 天内"），不渲染具体金额或日期
+ *      数字；与 v1 看板共用 zero-knowledge 占位（finance_dashboard_amount_mask）。
  *
  * 关联：
  *   - finance/FinanceAggregator.kt 净资产 + 月报聚合
+ *   - finance/FinanceRecords.kt v2 子类型字段定义
  *   - 4b CalendarScreen.kt 同款 stateIn + collectAsState 模式
  * ============================================================================
  */
@@ -46,7 +51,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.unit.dp
 import com.everything.eve.R
+import com.everything.eve.finance.ContractRecord
 import com.everything.eve.finance.FinanceAggregator
+import com.everything.eve.finance.LoanRecord
+import com.everything.eve.finance.PolicyRecord
+import com.everything.eve.finance.SubscriptionRecord
+
+/** 1 天的毫秒数（用于 v2 卡片 30 / 90 天过滤）。 */
+private const val DAY_MS = 86_400_000L
 
 /**
  * 财务看板 Composable。
@@ -152,6 +164,63 @@ fun FinanceDashboard(vm: FinanceViewModel) {
             }
         }
 
+        // =============================================================================
+        // v2 子类型 Dashboard 卡片（stage5-finance-v2 / TR-2.5）
+        // =============================================================================
+        // 4 张 v2 提示卡：订阅续费 / 保单到期 / 待还借款 / 合同结束。
+        // 零知识：仅展示 count + 相对天数（"最近 X 天内"），金额用 **** 占位。
+        // =============================================================================
+
+        val nowMs = System.currentTimeMillis()
+
+        // v2 卡片 1：即将续费订阅（30 天内）—— 过滤 nextRenewalTs 在 [now, now+30d] 的订阅。
+        V2DashboardCard(
+            title = stringResource(R.string.finance_v2_dashboard_renewal_30d),
+            tag = "dashboard_v2_subscription",
+            count = state.subscriptions.count { sub ->
+                sub.nextRenewalTs in nowMs..(nowMs + 30L * DAY_MS)
+            },
+            earliestMs = state.subscriptions
+                .filter { it.nextRenewalTs in nowMs..(nowMs + 30L * DAY_MS) }
+                .minOfOrNull { it.nextRenewalTs },
+        )
+
+        // v2 卡片 2：即将到期保单（90 天内）—— 过滤 expiryTs 在 [now, now+90d] 的保单。
+        V2DashboardCard(
+            title = stringResource(R.string.finance_v2_dashboard_expiry_90d),
+            tag = "dashboard_v2_policy",
+            count = state.policies.count { pol ->
+                pol.expiryTs in nowMs..(nowMs + 90L * DAY_MS)
+            },
+            earliestMs = state.policies
+                .filter { it.expiryTs in nowMs..(nowMs + 90L * DAY_MS) }
+                .minOfOrNull { it.expiryTs },
+        )
+
+        // v2 卡片 3：待还借款（未结清）—— 过滤 status ∈ {active, partially_paid, overdue}。
+        V2DashboardCard(
+            title = stringResource(R.string.finance_v2_dashboard_loan_pending),
+            tag = "dashboard_v2_loan",
+            count = state.loans.count { loan ->
+                loan.status in setOf("active", "partially_paid", "overdue")
+            },
+            earliestMs = state.loans
+                .filter { it.status in setOf("active", "partially_paid", "overdue") }
+                .minOfOrNull { it.dueTs },
+        )
+
+        // v2 卡片 4：即将结束合同（90 天内）—— 过滤 endTs 在 [now, now+90d] 的合同。
+        V2DashboardCard(
+            title = stringResource(R.string.finance_v2_dashboard_contract_end_90d),
+            tag = "dashboard_v2_contract",
+            count = state.contracts.count { contract ->
+                contract.endTs in nowMs..(nowMs + 90L * DAY_MS)
+            },
+            earliestMs = state.contracts
+                .filter { it.endTs in nowMs..(nowMs + 90L * DAY_MS) }
+                .minOfOrNull { it.endTs },
+        )
+
         // 空态
         if (dashboard.accountCount == 0 && dashboard.cardCount == 0 && dashboard.txCount == 0) {
             Text(
@@ -205,5 +274,65 @@ private fun MonthlyRow(label: String, tag: String) {
                 .padding(horizontal = 6.dp, vertical = 2.dp)
                 .semantics { testTag = tag },
         )
+    }
+}
+
+// =============================================================================
+// v2 子类型 Dashboard 卡片 Composable（stage5-finance-v2 / TR-2.5）
+// =============================================================================
+// 通用 v2 提示卡：标题 + count + 相对天数 hint。
+// 零知识：金额统一用 **** 占位（finance_dashboard_amount_mask），不渲染
+// 具体日期数字，仅渲染"最近 X 天内"（基于 earliestMs 与 nowMs 计算）。
+// =============================================================================
+
+/**
+ * v2 Dashboard 卡片 Composable。
+ *
+ * 渲染：标题（stringResource） + count（**）+ 相对天数 hint（**）。
+ *
+ * @param title 卡片标题（已 stringResource 化的文本）。
+ * @param tag testTag 后缀（"dashboard_v2_<type>"）。
+ * @param count 命中过滤条件的条目数。
+ * @param earliestMs 命中条目中最早的触发时刻（ms）；null 表示无命中。
+ */
+@Composable
+private fun V2DashboardCard(
+    title: String,
+    tag: String,
+    count: Int,
+    earliestMs: Long?,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { testTag = tag },
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                text = "$count",
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.semantics { testTag = "${tag}_count" },
+            )
+            // 相对天数 hint：earliestMs 非空时显示"最近 X 天内"，否则显示"已结束 / 暂无"。
+            val hintText = if (earliestMs != null) {
+                val days = ((earliestMs - System.currentTimeMillis()) / DAY_MS).toInt().coerceAtLeast(0)
+                "$days 天内"
+            } else {
+                stringResource(R.string.finance_v2_hint_ended)
+            }
+            Text(
+                text = hintText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.semantics { testTag = "${tag}_hint" },
+            )
+        }
     }
 }

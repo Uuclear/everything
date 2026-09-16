@@ -40,7 +40,13 @@ import com.everything.eve.ServiceLocator
 import com.everything.eve.data.finance.entity.FinanceAccountEntity
 import com.everything.eve.data.finance.entity.FinanceCardEntity
 import com.everything.eve.data.finance.entity.FinanceTxEntity
+import com.everything.eve.finance.ContractRecord
 import com.everything.eve.finance.FinanceAggregator
+import com.everything.eve.finance.FinanceRecords
+import com.everything.eve.finance.LoanRecord
+import com.everything.eve.finance.PolicyRecord
+import com.everything.eve.finance.SubscriptionRecord
+import com.everything.eve.finance.ValidationResult
 import com.everything.eve.finance.NextCardFiring
 import com.everything.eve.reminder.ReminderScheduler
 import kotlinx.coroutines.Dispatchers
@@ -121,6 +127,93 @@ data class FinanceEditorBuffer(
     val issuer: String = "",
 )
 
+// =============================================================================
+// v2 子类型编辑器 buffer（stage5-finance-v2 / Task 3 / TR-2.6）
+// ============================================================================
+// 4 个 v2 sub-type EditorBuffer —— 用于将来 EditorScreen 复用。
+// 设计意图：仅承载用户在编辑器中可编辑的最小字段集（与 v1 FinanceEditorBuffer 同款
+// 模式）；保存时由 EditorScreen 调 FinanceViewModel.upsertSubscription / upsertPolicy /
+// upsertLoan / upsertContract，最终入 FinanceRecords.validate* 校验后写入内存。
+// 现暂留 buffer 类型，便于后续 EditorScreen 直接复用；本任务范围内不强求 UI。
+// ============================================================================
+
+/**
+ * v2 subscription 编辑器 buffer —— 承载订阅条目可编辑字段最小集。
+ */
+data class SubscriptionEditorBuffer(
+    val id: String,
+    val name: String = "",
+    val provider: String = "",
+    val amountMinor: String = "",
+    val currency: String = "CNY",
+    val billingCycle: String = "monthly", // monthly | quarterly | yearly | custom_days
+    val customDays: Long? = null,
+    val startTs: Long = System.currentTimeMillis(),
+    val nextRenewalTs: Long = System.currentTimeMillis(),
+    val reminders: List<Long> = emptyList(),
+    val active: Boolean = true,
+    val category: String = "other",
+)
+
+/**
+ * v2 policy 编辑器 buffer —— 承载保单条目可编辑字段最小集。
+ */
+data class PolicyEditorBuffer(
+    val id: String,
+    val name: String = "",
+    val policyNumber: String = "",
+    val policyNumberEncrypted: Boolean = false,
+    val provider: String = "",
+    val premiumMinor: String = "",
+    val currency: String = "CNY",
+    val billingCycle: String = "yearly", // monthly | quarterly | yearly | single
+    val startTs: Long = System.currentTimeMillis(),
+    val expiryTs: Long = System.currentTimeMillis(),
+    val reminders: List<Long> = emptyList(),
+    val coverageMinor: String = "",
+    val active: Boolean = true,
+    val linkedAccountId: String? = null,
+)
+
+/**
+ * v2 loan 编辑器 buffer —— 承载应收借款条目可编辑字段最小集。
+ */
+data class LoanEditorBuffer(
+    val id: String,
+    val counterparty: String = "",
+    val principalMinor: String = "",
+    val currency: String = "CNY",
+    val direction: String = "lent", // lent | borrowed
+    val issueTs: Long = System.currentTimeMillis(),
+    val dueTs: Long = System.currentTimeMillis(),
+    val interestRateApyBps: Long = 0L,
+    val status: String = "active", // active | partially_paid | paid | overdue
+    val paidMinor: String = "0.00",
+    val reminders: List<Long> = emptyList(),
+    val linkedAccountId: String? = null,
+    val includeInNetAssets: Boolean = true,
+)
+
+/**
+ * v2 contract 编辑器 buffer —— 承载合同/发票条目可编辑字段最小集。
+ */
+data class ContractEditorBuffer(
+    val id: String,
+    val title: String = "",
+    val counterparty: String = "",
+    val kind: String = "other", // rental | service | purchase | loan | other
+    val amountMinor: String = "",
+    val currency: String = "CNY",
+    val signedTs: Long = System.currentTimeMillis(),
+    val startTs: Long = System.currentTimeMillis(),
+    val endTs: Long = System.currentTimeMillis(),
+    val autoRenew: Boolean = false,
+    val noticePeriodDays: Long = 0L,
+    val noticeDeadlineTs: Long = System.currentTimeMillis(),
+    val status: String = "active", // active | expired | terminated | renewed
+    val linkedAccountId: String? = null,
+)
+
 /**
  * FinanceViewModel 整体 UI 状态。
  *
@@ -139,6 +232,17 @@ data class FinanceUiState(
     val accounts: List<FinanceAccountEntity> = emptyList(),
     val cards: List<FinanceCardEntity> = emptyList(),
     val txs: List<FinanceTxEntity> = emptyList(),
+    // =============================================================================
+    // v2 子类型 —— stage5-finance-v2 / TR-2.6 扩展（默认 emptyList；Room v2 表待 B3 接入）
+    // =============================================================================
+    /** 订阅（v2 sub-type） */
+    val subscriptions: List<SubscriptionRecord> = emptyList(),
+    /** 保单（v2 sub-type） */
+    val policies: List<PolicyRecord> = emptyList(),
+    /** 应收借款（v2 sub-type） */
+    val loans: List<LoanRecord> = emptyList(),
+    /** 合同/发票（v2 sub-type） */
+    val contracts: List<ContractRecord> = emptyList(),
     val dashboard: FinanceAggregator.DashboardSnapshot =
         FinanceAggregator.DashboardSnapshot("0.00", "0.00", "0.00", 0, 0, 0, "CNY"),
     val monthly: FinanceAggregator.MonthlyReport =
@@ -198,6 +302,27 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
     private val errorFlow = MutableStateFlow<String?>(null)
 
     // =============================================================================
+    // v2 子类型内存数据源（stage5-finance-v2 / Task 3 / TR-2.6）
+    // ============================================================================
+    // 4 个 v2 子类型尚未建 Room 表（B3 接入），此处用 MutableStateFlow 暂存
+    // 内存数据；ViewModel 单例生命周期内有效。
+    // TODO(B3): 替换为 FinanceSubscriptionDao.observeAll() / FinancePolicyDao.observeAll()
+    //                 / FinanceLoanDao.observeAll() / FinanceContractDao.observeAll()
+    // ============================================================================
+
+    /** v2 subscription 内存列表。 */
+    private val subscriptionsFlow = MutableStateFlow<List<SubscriptionRecord>>(emptyList())
+
+    /** v2 policy 内存列表。 */
+    private val policiesFlow = MutableStateFlow<List<PolicyRecord>>(emptyList())
+
+    /** v2 loan 内存列表。 */
+    private val loansFlow = MutableStateFlow<List<LoanRecord>>(emptyList())
+
+    /** v2 contract 内存列表。 */
+    private val contractsFlow = MutableStateFlow<List<ContractRecord>>(emptyList())
+
+    // =============================================================================
     // 一次性事件 Channel（spec NFR-3 一次性契约，避免旋转屏重放）
     // =============================================================================
 
@@ -212,6 +337,17 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
      * 主 UI state —— combine 三表 Flow + FinanceAggregator 派生 + 搜索/排序/筛选。
      *
      * 空集合时返回默认 FinanceUiState（所有 0 / CNY / 空列表），不抛错。
+     *
+     * v2 扩展（TR-2.6）：combine 入参由 7 个增至 11 个；由于 kotlinx.coroutines.flow.combine
+     * 至多支持 5 个类型化 Flow 直接传入，超出后必须改用 vararg 重载：
+     *   combine(vararg flows: Flow<T>, transform: suspend (Array<T>) -> R)
+     * 在此统一存为 Array<Flow<Any?>>（运行时类型擦除），按索引解包。
+     *
+     * 顺序约定（仅文档约束，**严禁改变顺序** —— v1 调用方按索引取值）：
+     *   [0] accounts    [4] sort        [8] subscriptions
+     *   [1] cards       [5] filter      [9] policies
+     *   [2] txs         [6] error       [10] loans
+     *   [3] search                        [11] contracts
      */
     val state: kotlinx.coroutines.flow.StateFlow<FinanceUiState> = combine(
         financeRepo.observeAccounts(),
@@ -221,7 +357,12 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         sortFlow,
         filterFlow,
         errorFlow,
-    ) { values ->
+        subscriptionsFlow as Flow<Any?>,
+        policiesFlow as Flow<Any?>,
+        loansFlow as Flow<Any?>,
+        contractsFlow as Flow<Any?>,
+    ) { values: Array<Any?> ->
+        // 类型按索引解包（顺序与上文约定一致）。
         @Suppress("UNCHECKED_CAST")
         val accounts = values[0] as List<FinanceAccountEntity>
         @Suppress("UNCHECKED_CAST")
@@ -232,6 +373,14 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         val sort = values[4] as FinanceSortKey
         val filter = values[5] as String
         val error = values[6] as String?
+        @Suppress("UNCHECKED_CAST")
+        val subscriptions = values[7] as List<SubscriptionRecord>
+        @Suppress("UNCHECKED_CAST")
+        val policies = values[8] as List<PolicyRecord>
+        @Suppress("UNCHECKED_CAST")
+        val loans = values[9] as List<LoanRecord>
+        @Suppress("UNCHECKED_CAST")
+        val contracts = values[10] as List<ContractRecord>
 
         val dashboard = FinanceAggregator.netWorth(
             accounts.map { acc ->
@@ -279,6 +428,10 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
             accounts = accounts,
             cards = cards,
             txs = txs,
+            subscriptions = subscriptions,
+            policies = policies,
+            loans = loans,
+            contracts = contracts,
             dashboard = dashboard,
             monthly = monthly,
             budget = budget,
@@ -530,6 +683,117 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
     /** 清空错误态（UI 已展示 Snack 后调）。 */
     fun clearError() {
         errorFlow.value = null
+    }
+
+    // =============================================================================
+    // v2 子类型 CRUD（stage5-finance-v2 / Task 3 / TR-2.6）
+    // ============================================================================
+    // 4 个 v2 子类型（SubscriptionRecord / PolicyRecord / LoanRecord / ContractRecord）
+    // 尚未建 Room 表（B3 接入），此处 upsert 仅更新内存 MutableStateFlow，
+    // stateIn 自动推送新 state；delete 同理仅移除条目。
+    // 校验：所有 upsert 前必须通过 FinanceRecords.validate*；失败返回 Result.failure。
+    // 不持久化到 FinanceRepository —— 避免 v1 协议通道被 v2 数据污染。
+    // ============================================================================
+
+    /**
+     * v2 subscription upsert（内存）。
+     *
+     * @param r 完整 SubscriptionRecord（id 必填；schema_version=2 必填）
+     * @return Ok / Invalid(reason)
+     */
+    fun upsertSubscription(r: SubscriptionRecord): Result<Unit> {
+        val validation = FinanceRecords.validateSubscription(r)
+        if (validation is ValidationResult.Invalid) {
+            _eventChannel.trySend(FinanceUiEvent.Error("subscription_invalid"))
+            return Result.failure(IllegalArgumentException(validation.reason))
+        }
+        val current = subscriptionsFlow.value
+        val replaced = current.filterNot { it.id == r.id }.toMutableList().apply { add(r) }
+        subscriptionsFlow.value = replaced
+        _eventChannel.trySend(FinanceUiEvent.SaveSucceeded(r.id))
+        // TODO(B3): 持久化到 FinanceSubscriptionDao.upsert(...)，并触发 records 通道
+        return Result.success(Unit)
+    }
+
+    /** v2 subscription delete（内存）。id 不存在视为成功（幂等）。 */
+    fun deleteSubscription(id: String): Result<Unit> {
+        val current = subscriptionsFlow.value
+        subscriptionsFlow.value = current.filterNot { it.id == id }
+        _eventChannel.trySend(FinanceUiEvent.DeleteSucceeded(id))
+        // TODO(B3): DAO.markDeleted(id) + records 通道 tombstone 上行
+        return Result.success(Unit)
+    }
+
+    /** v2 policy upsert（内存）。 */
+    fun upsertPolicy(r: PolicyRecord): Result<Unit> {
+        val validation = FinanceRecords.validatePolicy(r)
+        if (validation is ValidationResult.Invalid) {
+            _eventChannel.trySend(FinanceUiEvent.Error("policy_invalid"))
+            return Result.failure(IllegalArgumentException(validation.reason))
+        }
+        val current = policiesFlow.value
+        val replaced = current.filterNot { it.id == r.id }.toMutableList().apply { add(r) }
+        policiesFlow.value = replaced
+        _eventChannel.trySend(FinanceUiEvent.SaveSucceeded(r.id))
+        // TODO(B3): 持久化到 FinancePolicyDao.upsert(...)
+        return Result.success(Unit)
+    }
+
+    /** v2 policy delete（内存）。 */
+    fun deletePolicy(id: String): Result<Unit> {
+        val current = policiesFlow.value
+        policiesFlow.value = current.filterNot { it.id == id }
+        _eventChannel.trySend(FinanceUiEvent.DeleteSucceeded(id))
+        // TODO(B3): DAO.markDeleted(id)
+        return Result.success(Unit)
+    }
+
+    /** v2 loan upsert（内存）。 */
+    fun upsertLoan(r: LoanRecord): Result<Unit> {
+        val validation = FinanceRecords.validateLoan(r)
+        if (validation is ValidationResult.Invalid) {
+            _eventChannel.trySend(FinanceUiEvent.Error("loan_invalid"))
+            return Result.failure(IllegalArgumentException(validation.reason))
+        }
+        val current = loansFlow.value
+        val replaced = current.filterNot { it.id == r.id }.toMutableList().apply { add(r) }
+        loansFlow.value = replaced
+        _eventChannel.trySend(FinanceUiEvent.SaveSucceeded(r.id))
+        // TODO(B3): 持久化到 FinanceLoanDao.upsert(...)
+        return Result.success(Unit)
+    }
+
+    /** v2 loan delete（内存）。 */
+    fun deleteLoan(id: String): Result<Unit> {
+        val current = loansFlow.value
+        loansFlow.value = current.filterNot { it.id == id }
+        _eventChannel.trySend(FinanceUiEvent.DeleteSucceeded(id))
+        // TODO(B3): DAO.markDeleted(id)
+        return Result.success(Unit)
+    }
+
+    /** v2 contract upsert（内存）。 */
+    fun upsertContract(r: ContractRecord): Result<Unit> {
+        val validation = FinanceRecords.validateContract(r)
+        if (validation is ValidationResult.Invalid) {
+            _eventChannel.trySend(FinanceUiEvent.Error("contract_invalid"))
+            return Result.failure(IllegalArgumentException(validation.reason))
+        }
+        val current = contractsFlow.value
+        val replaced = current.filterNot { it.id == r.id }.toMutableList().apply { add(r) }
+        contractsFlow.value = replaced
+        _eventChannel.trySend(FinanceUiEvent.SaveSucceeded(r.id))
+        // TODO(B3): 持久化到 FinanceContractDao.upsert(...)
+        return Result.success(Unit)
+    }
+
+    /** v2 contract delete（内存）。 */
+    fun deleteContract(id: String): Result<Unit> {
+        val current = contractsFlow.value
+        contractsFlow.value = current.filterNot { it.id == id }
+        _eventChannel.trySend(FinanceUiEvent.DeleteSucceeded(id))
+        // TODO(B3): DAO.markDeleted(id)
+        return Result.success(Unit)
     }
 
     // =============================================================================

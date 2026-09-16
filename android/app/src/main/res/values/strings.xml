@@ -259,4 +259,92 @@
     <string name="finance_tx_chip_kind_income">收入</string>
     <string name="finance_tx_chip_kind_expense">支出</string>
     <string name="finance_tx_chip_kind_transfer">转账</string>
+
+    <!-- ============================================================ -->
+    <!-- 阶段 5 增量 Task 11 / TR-2.7b：财务 v2 子类型文案              -->
+    <!-- 命名规范：以 finance_v2_<subtype>_ 前缀；零知识红线          -->
+    <!--   ===== 零知识红线（spec NFR-1 / 阶段 5 FR-4）：====           -->
+    <!--   * 不渲染金额数字（金额统一用 **** / 占位符）；              -->
+    <!--   * 不渲染具体日期数字（账单日/到期日几号）；                -->
+    <!--   * 仅渲染相对天数（"X 天内"）等抽象文案。                   -->
+    <!--   * Dashboard 卡片用 finance_v2_dashboard_* 命名；           -->
+    <!--   * 通用相对天数提示用 finance_v2_hint_within_days。        -->
+    <!-- ============================================================ -->
+
+    <!-- ============== v2 订阅 sub 文案 ============== -->
+    <string name="finance_v2_sub_card_title">订阅</string>
+    <string name="finance_v2_sub_card_empty">暂无订阅，点击右下角按钮新建</string>
+    <string name="finance_v2_sub_renew_30d">即将续费</string>
+    <string name="finance_v2_sub_cycle_monthly">按月续费</string>
+    <string name="finance_v2_sub_cycle_quarterly">按季度续费</string>
+    <string name="finance_v2_sub_cycle_yearly">按年续费</string>
+    <string name="finance_v2_sub_cycle_custom">自定义周期续费</string>
+    <string name="finance_v2_sub_category_entertainment">娱乐</string>
+    <string name="finance_v2_sub_category_productivity">生产力</string>
+    <string name="finance_v2_sub_category_utility">生活服务</string>
+    <string name="finance_v2_sub_category_other">其他</string>
+    <string name="finance_v2_sub_active_chip">已启用</string>
+    <string name="finance_v2_sub_inactive_chip">已停用</string>
+    <string name="finance_v2_sub_field_name">订阅名称</string>
+    <string name="finance_v2_sub_field_provider">服务商</string>
+
+    <!-- ============== v2 保单 policy 文案 ============== -->
+    <string name="finance_v2_policy_card_title">保单</string>
+    <string name="finance_v2_policy_card_empty">暂无保单，点击右下角按钮新建</string>
+    <string name="finance_v2_policy_expiry_90d">即将到期</string>
+    <string name="finance_v2_policy_cycle_monthly">按月缴费</string>
+    <string name="finance_v2_policy_cycle_quarterly">按季度缴费</string>
+    <string name="finance_v2_policy_cycle_yearly">按年缴费</string>
+    <string name="finance_v2_policy_cycle_single">趸交</string>
+    <string name="finance_v2_policy_active_chip">生效中</string>
+    <string name="finance_v2_policy_inactive_chip">已停保</string>
+    <string name="finance_v2_policy_number_locked">保单号已加密</string>
+    <string name="finance_v2_policy_field_name">保单名称</string>
+    <string name="finance_v2_policy_field_provider">保险公司</string>
+    <string name="finance_v2_policy_field_policy_number">保单号</string>
+
+    <!-- ============== v2 应收借款 loan 文案 ============== -->
+    <string name="finance_v2_loan_card_title">应收借款</string>
+    <string name="finance_v2_loan_card_empty">暂无借款记录，点击右下角按钮新建</string>
+    <string name="finance_v2_loan_pending">待还借款</string>
+    <string name="finance_v2_loan_status_active">未结清</string>
+    <string name="finance_v2_loan_status_partially_paid">部分已还</string>
+    <string name="finance_v2_loan_status_overdue">已逾期</string>
+    <string name="finance_v2_loan_status_paid">已结清</string>
+    <string name="finance_v2_loan_direction_lent">借出</string>
+    <string name="finance_v2_loan_direction_borrowed">借入</string>
+    <string name="finance_v2_loan_field_counterparty">交易对手</string>
+    <string name="finance_v2_loan_field_principal">本金</string>
+    <string name="finance_v2_loan_field_paid">已还本金</string>
+    <string name="finance_v2_loan_field_interest_rate">年化利率（基点）</string>
+
+    <!-- ============== v2 合同 contract 文案 ============== -->
+    <string name="finance_v2_contract_card_title">合同 / 发票</string>
+    <string name="finance_v2_contract_card_empty">暂无合同，点击右下角按钮新建</string>
+    <string name="finance_v2_contract_end_90d">即将结束</string>
+    <string name="finance_v2_contract_status_active">执行中</string>
+    <string name="finance_v2_contract_status_expired">已到期</string>
+    <string name="finance_v2_contract_status_terminated">已终止</string>
+    <string name="finance_v2_contract_status_renewed">已续签</string>
+    <string name="finance_v2_contract_kind_rental">租赁</string>
+    <string name="finance_v2_contract_kind_service">服务</string>
+    <string name="finance_v2_contract_kind_purchase">采购</string>
+    <string name="finance_v2_contract_kind_loan">借贷</string>
+    <string name="finance_v2_contract_kind_other">其他</string>
+    <string name="finance_v2_contract_auto_renew_chip">自动续签</string>
+    <string name="finance_v2_contract_field_title">合同标题</string>
+    <string name="finance_v2_contract_field_counterparty">对方主体</string>
+    <string name="finance_v2_contract_field_notice_period">提前通知期（天）</string>
+
+    <!-- ============== v2 Dashboard 卡片标题（4 条） ============== -->
+    <string name="finance_v2_dashboard_renewal_30d">即将续费订阅（30 天内）</string>
+    <string name="finance_v2_dashboard_expiry_90d">即将到期保单（90 天内）</string>
+    <string name="finance_v2_dashboard_loan_pending">待还借款（未结清）</string>
+    <string name="finance_v2_dashboard_contract_end_90d">即将结束合同（90 天内）</string>
+
+    <!-- ============== v2 通用相对天数提示（4 条） ============== -->
+    <string name="finance_v2_hint_within_days">最近 %1$d 天内</string>
+    <string name="finance_v2_hint_within_30_days">30 天内</string>
+    <string name="finance_v2_hint_within_90_days">90 天内</string>
+    <string name="finance_v2_hint_ended">已结束</string>
 </resources>

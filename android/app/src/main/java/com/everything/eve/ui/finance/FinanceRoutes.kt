@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- * FinanceRoutes —— 财务模块路由常量（stage5-finance / Task 7 / TR-7.4）
+ * FinanceRoutes —— 财务模块路由常量（stage5-finance / Task 7 / TR-7.4 + stage5-finance-v2 / TR-2.5）
  * ============================================================================
  *
  * 设计要点：
@@ -10,9 +10,12 @@
  *      + path 参数 `kind` + 可选 `entityId`；导航时仅传 kind 与可选 id。
  *   3. **二级路由**：列表入口 `finance/{tab}` 用 tab=accounts / cards /
  *      txs 切换；编辑器入口 `finance/{tab}/editor?id={entityId}`。
+ *   4. **v2 扩展（TR-2.5）**：新增 4 个订阅/保单/借款/合同子类型列表 tab
+ *      + 4 个编辑器 kind 常量；命名风格与 v1 同款镜像（lowercase）。
  *
  * 关联：
  *   - tasks.md TR-7.4（FinanceScreen + 主导航入口）
+ *   - tasks.md TR-2.5（v2 子类型路由常量扩展）
  *   - 4b AppNav.kt Routes 同款命名风格
  * ============================================================================
  */
@@ -45,6 +48,45 @@ object FinanceRoutes {
     const val EDITOR_ACCOUNT = "account"
     const val EDITOR_CARD = "card"
     const val EDITOR_TX = "tx"
+
+    // ============================================================================
+    // v2 子类型列表 tab 常量（stage5-finance-v2 / Task 3 / TR-2.5）
+    // ============================================================================
+    // 4 个 v2 子类型列表入口：与 FinanceRoutes.TAB 同款 path-pattern 镜像，
+    // 导航时通过 FinanceRoutes.tabRoute("subscriptions") 拼接完整路由。
+    // 命名风格：lowercase + tab_<type>，与 v1 既有 tab key 一致。
+    // ============================================================================
+
+    /** v2 订阅列表 tab key。 */
+    const val TAB_SUBSCRIPTIONS = "subscriptions"
+
+    /** v2 保单列表 tab key。 */
+    const val TAB_POLICIES = "policies"
+
+    /** v2 应收借款列表 tab key。 */
+    const val TAB_LOANS = "loans"
+
+    /** v2 合同/发票列表 tab key。 */
+    const val TAB_CONTRACTS = "contracts"
+
+    // ============================================================================
+    // v2 子类型编辑器 kind 常量（stage5-finance-v2 / Task 3 / TR-2.5）
+    // ============================================================================
+    // 4 个 v2 子类型编辑器入口：与 FinanceRoutes.EDITOR_ACCOUNT 同款命名。
+    // 编辑器加载时按 kind 字段路由到对应 EditorScreen。
+    // ============================================================================
+
+    /** v2 订阅编辑器 kind。 */
+    const val EDITOR_SUBSCRIPTION = "subscription"
+
+    /** v2 保单编辑器 kind。 */
+    const val EDITOR_POLICY = "policy"
+
+    /** v2 应收借款编辑器 kind。 */
+    const val EDITOR_LOAN = "loan"
+
+    /** v2 合同/发票编辑器 kind。 */
+    const val EDITOR_CONTRACT = "contract"
 
     /**
      * 构造带 tab 参数的列表路由。
