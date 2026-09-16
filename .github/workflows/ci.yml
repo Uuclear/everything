@@ -6,20 +6,40 @@ on:
   pull_request:
 
 jobs:
-  server:
-    name: Server test & cross-compile
+  server-test:
+    name: Server test (race + coverage)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
-      - name: Test
+      - name: Test (race)
         working-directory: server
-        run: CGO_ENABLED=0 go test ./...
+        run: CGO_ENABLED=0 go test -race -count=1 ./...
       - name: Vet
         working-directory: server
         run: go vet ./...
+      - name: Coverage
+        working-directory: server
+        run: |
+          CGO_ENABLED=0 go test -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-coverage
+          path: server/coverage.out
+          if-no-files-found: ignore
+
+  server-cross:
+    name: Server cross-compile (4 targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
       - name: Cross compile
         working-directory: server
         run: |
@@ -28,7 +48,7 @@ jobs:
           done
 
   web:
-    name: Web build (embed)
+    name: Web vitest + vue-tsc + build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +59,12 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci --no-audit --no-fund
         working-directory: web
+      - name: Vitest (run all unit tests)
+        working-directory: web
+        run: npx vitest run
+      - name: TS strict gate (vue-tsc)
+        working-directory: web
+        run: npx vue-tsc --noEmit -p tsconfig.json
       - name: Build
         working-directory: web
         run: npm run build
@@ -47,7 +73,7 @@ jobs:
         run: CGO_ENABLED=0 go build -o /tmp/eve ./cmd/eve
 
   android:
-    name: Android assembleDebug
+    name: Android unit test + assembleDebug
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +82,9 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+      - name: Unit tests (JUnit / Robolectric)
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --stacktrace --no-daemon
       - name: Build debug APK
         working-directory: android
         run: ./gradlew :app:assembleDebug --stacktrace --no-daemon
@@ -64,6 +93,11 @@ jobs:
           name: everything-debug-apk
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-unit-test-results
+          path: android/app/build/reports/tests/testDebugUnitTest
+          if-no-files-found: ignore
 
   docker:
     name: Docker multi-arch build
