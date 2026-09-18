@@ -30,6 +30,7 @@ import type {
   DashboardSnapshot,
   FinanceAccount,
   FinanceCard,
+  FinanceLoan,
   FinanceTx,
   MonthlyReport,
 } from './types'
@@ -74,6 +75,30 @@ export interface TxLike {
   transferToAccountId: string | null
 }
 
+/**
+ * v2 借款入参形态（stage5-finance-v2 / TR-4.2）—— 与 Android
+ * FinanceAggregator.LoanLike 对齐，字段命名取 camelCase DTO。
+ *
+ * 注意：本接口与 nextCardFiring.ts 导出的同名 LoanLike 字段集不同 —— 本接口
+ * 服务净资产聚合（金额 / 方向 / 是否计入），后者服务到期提醒（status / dueTs）。
+ *
+ * @property direction lent（我借出，应收）| borrowed（我借入，应付）；其它值防御性忽略
+ * @property principalMinor 本金（decimal-as-string）
+ * @property paidMinor 已还本金（decimal-as-string；允许 "0.00"）
+ * @property includeInNetAssets 是否计入净资产看板；false 时资产 / 负债两端均忽略
+ * @property currency ISO 4217 三字母代码（本期仅 CNY 参与，Task5 扩展多币种折算）
+ * @property status active | partially_paid | paid | overdue（聚合口径不按其过滤，仅供 UI）
+ */
+export interface LoanLike {
+  id: string
+  direction: string
+  principalMinor: string
+  paidMinor: string
+  includeInNetAssets: boolean
+  currency: string
+  status: string
+}
+
 // -----------------------------------------------------------------------------
 // 常量区 —— 货币与精度边界
 // -----------------------------------------------------------------------------
@@ -111,20 +136,32 @@ const TZ_OFFSET_MIN: number = (() => {
  *   4. accountCount / cardCount / txCount 为列表计数（含归档条目）；
  *   5. currency 优先取第一条账户 currency；全空时 = DEFAULT_CURRENCY = "CNY"。
  *
+ * v2 借款（TR-4.2，loans 默认空列表，不传时行为与 v1 完全一致）：
+ *   - includeInNetAssets=false 的借款两端均不计；
+ *   - 剩余本金 remain = parseDecimalAsCents(principalMinor) -
+ *     parseDecimalAsCents(paidMinor)，钳位 >= 0n（已还超额不出负）；
+ *   - direction="lent" → 计入总资产（应收借款）；"borrowed" → 计入总负债（应付）；
+ *     其余 direction 值防御性忽略；
+ *   - 不新增 loanCount，DashboardSnapshot 结构保持 v1 七字段不变；
+ *   - netCents 仍 = assetCents - liabilityCents，自然实现
+ *     "net_assets += lent - borrowed" 口径。
+ *
  * 边界：
- *   - accounts / cards / txs 任一为空 → 返回全零 DashboardSnapshot，不抛错；
+ *   - accounts / cards / txs / loans 任一为空 → 该部分按 0 处理，不抛错；
  *   - usedLimit 为 null / 非数字 → 视为 "0.00"，跳过该项；
  *   - balance 为 null / 非数字 → 视为 "0.00"，跳过该项。
  *
  * @param accounts 账户列表（明文 FinanceAccount 形态，仅取必要字段）
  * @param cards 卡列表（明文 FinanceCard 形态，仅取必要字段）
- * @param txs 流水列表（本聚合函数暂未消费；保留参数与 Web 签名一致）
+ * @param txs 流水列表（本聚合函数暂未消费；保留参数与签名一致）
+ * @param loans v2 借款列表（默认空；lent 余额计资产，borrowed 余额计负债）
  * @return DashboardSnapshot 净资产快照（始终非 null）
  */
 export function netWorth(
   accounts: AccountLike[],
   cards: CardLike[],
   txs: TxLike[] = [],
+  loans: LoanLike[] = [],
 ): DashboardSnapshot {
   // ========== 1. 总资产 = 仅非归档账户 balance 之和 ==========
   let assetCents = 0n
@@ -141,8 +178,29 @@ export function netWorth(
     liabilityCents = liabilityCents + parseDecimalAsCents(card.usedLimit ?? '0')
   }
 
+  // ========== 2.5 v2 借款：剩余本金按方向计入资产 / 负债（TR-4.2） ==========
+  for (const loan of loans) {
+    // 用户显式排除的借款，资产端与负债端均不统计。
+    if (!loan.includeInNetAssets) continue
+    const principalCents = parseDecimalAsCents(loan.principalMinor)
+    const paidCents = parseDecimalAsCents(loan.paidMinor)
+    // 剩余本金 = 本金 - 已还；异常数据（已还超额）钳位到 0，不出现负余量。
+    const remainCents = principalCents - paidCents > 0n
+      ? principalCents - paidCents
+      : 0n
+    if (loan.direction === 'lent') {
+      // 我借出去的钱（应收）是我的债权资产。
+      assetCents = assetCents + remainCents
+    } else if (loan.direction === 'borrowed') {
+      // 我借进来的钱（应付）是我的待还负债。
+      liabilityCents = liabilityCents + remainCents
+    }
+    // 其他 direction 值（数据异常）防御性忽略，不加不减。
+  }
+
   // ========== 3. 净资产 = 总资产 - 总负债 ==========
   // BigInt 整数运算天然避免浮点精度丢失；负数表示"资不抵债"。
+  // v2 后自然得到 spec 口径：net_assets += lent_remain - borrowed_remain。
   const netCents: bigint = assetCents - liabilityCents
 
   // ========== 4. 货币与计数 ==========
@@ -257,18 +315,29 @@ export function cardUsedLimit(card: CardLike, txs: TxLike[]): string {
  *   - tx.occurredAt 跨年跨月时不参与聚合；
  *   - tx.amount / tx.category 为 null → 跳过该项。
  *
+ * v2 借款（TR-4.2，loans 默认空列表）：借款本金的发放 / 收回是资产与负债之间
+ * 的形态转换，不属于 income / expense，故本函数不把任何 loan 金额累加进
+ * income / expense / categoryBreakdown；该参数为 Task5 多币种折算预留。
+ *
  * @param yearMonth 年月键 "YYYY-MM"（如 "2026-01"）
  * @param txs 流水列表（全集，函数内部按 occurredAt 本地月过滤）
- * @param accounts 账户列表（本函数暂未消费；保留参数与 Web 签名一致）
+ * @param _accounts 账户列表（本函数暂未消费；保留参数与签名一致）
+ * @param loans v2 借款列表（本期不消费金额；Task5 多币种折算预留）
  * @return MonthlyReport 月度收支汇总（始终非 null）
  */
 export function monthlyReport(
   yearMonth: string,
   txs: TxLike[],
-  // 保留参数与 Web / Android 签名一致；当前实现按 yearMonth + txs 过滤聚合。
+  // 保留参数与 Android 签名一致；当前实现按 yearMonth + txs 过滤聚合。
   // 下划线前缀示意有意保留 —— tsconfig noUnusedParameters 下不会告警。
   _accounts: AccountLike[] = [],
+  loans: LoanLike[] = [],
 ): MonthlyReport {
+  // v2 预留参数的防御性消费：数组 length 恒 >= 0，本引用不改变任何输出，
+  // 仅用于显式消费 loans（对齐 Android check(loans.size >= 0) 的预留风格，
+  // 同时通过 noUnusedParameters 检查）。
+  void loans
+
   let incomeCents = 0n
   let expenseCents = 0n
   let txCount = 0
@@ -479,5 +548,23 @@ export function toTxLike(tx: FinanceTx): TxLike {
     category: tx.category,
     occurredAt: tx.occurred_at,
     transferToAccountId: tx.transfer_to_account_id ?? null,
+  }
+}
+
+/**
+ * FinanceLoan → 净资产聚合 LoanLike（snake_case → camelCase DTO）。
+ *
+ * 仅承载金额 / 方向 / 是否计入 / 货币 / status；到期提醒场景请改用
+ * nextCardFiring.ts 的同名 toLoanLike（字段集为 status / dueTs / reminders）。
+ */
+export function toLoanLike(p: FinanceLoan): LoanLike {
+  return {
+    id: p.id,
+    direction: p.direction,
+    principalMinor: p.principal_minor,
+    paidMinor: p.paid_minor,
+    includeInNetAssets: p.include_in_net_assets,
+    currency: p.currency,
+    status: p.status,
   }
 }

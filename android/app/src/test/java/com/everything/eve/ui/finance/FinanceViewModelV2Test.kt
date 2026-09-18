@@ -49,10 +49,14 @@ import com.everything.eve.finance.LoanRecord
 import com.everything.eve.finance.PolicyRecord
 import com.everything.eve.finance.SubscriptionRecord
 import com.everything.eve.finance.ValidationResult
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -284,6 +288,14 @@ class FinanceViewModelV2Test {
 
     @Before
     fun setUp() {
+        // B4 起 VM 的 init { hydrateV2() } 与四个 v2 upsert/delete 都会
+        // viewModelScope.launch 走 records 通道 best-effort 持久化；JVM 单测无
+        // Android main looper，需把 Dispatchers.Main 换成 UnconfinedTestDispatcher
+        // （与 FinanceViewModelAttachmentTest 同款基建）——launch 块在调用线程
+        // 立即执行；桩环境下 ServiceLocator.repo/db 未初始化，异常被 VM 的
+        // best-effort catch 吞掉，不影响内存态断言。
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+
         // 备份原始 ServiceLocator.financeRepo（如已初始化则保存，未初始化则标记 hadOriginalValue=false）
         val field: Field = ServiceLocator::class.java.getDeclaredField("financeRepo")
         field.isAccessible = true
@@ -326,6 +338,8 @@ class FinanceViewModelV2Test {
                 // ignore —— 已还原或不需还原
             }
         }
+        // 还原 Dispatchers.Main，避免污染同 JVM 内其他测试类
+        Dispatchers.resetMain()
     }
 
     // ============================================================================

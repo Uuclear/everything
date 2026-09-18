@@ -24,11 +24,21 @@
  *     (9) computeStatementTrigger 独立：账单日跨月滚动；
  *     (10) computePaymentTrigger 独立：还款日跨月滚动。
  *     ——共 10 用例，满足任务要求的 ≥6。
+ *
+ *   B4 追加（stage5-finance-v2 / TR：selectBestV2Trigger 纯函数）7 用例：
+ *     (11) 单条订阅未来触发 → 返订阅候选（id/kind/ts）；
+ *     (12) 活跃保单未来 + 已过期且周期非法的订阅 → 保单胜出；
+ *     (13) paid 借款跳过，另一条未结清借款胜出；
+ *     (14) 三类混合 → 取全局最小（借款 1 天后）且 kind 正确；
+ *     (15) 订阅/保单均 active=false → null；
+ *     (16) 三类全空列表 → null；
+ *     (17) 三类同毫秒 tie-break → subscription(2) 胜（sub>policy>loan 稳定序）。
  */
 
 package com.everything.eve.reminder
 
 import com.everything.eve.data.finance.entity.FinanceCardEntity
+import com.everything.eve.finance.NextCardFiring
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -283,5 +293,231 @@ class ReminderSchedulerFinanceTest {
         assertNotNull(result)
         val expected = localMidnightMs(2026, 7, 28) - PAYMENT_OFFSET_MS
         assertEquals(expected, result)
+    }
+
+    // =========================================================================
+    // B4：selectBestV2Trigger 纯函数测试（subscription / policy / loan）
+    // =========================================================================
+
+    /** 一分钟毫秒；reminders 单位换算（与 NextCardFiring.MINUTE_MS 一致）。 */
+    private val MINUTE_MS: Long = 60_000L
+
+    /**
+     * 构造订阅 Like DTO（默认活跃 + monthly + 未来 7 天续费 + 提前 60 分钟提醒）。
+     */
+    private fun subLike(
+        id: String = "sub-test-1",
+        active: Boolean = true,
+        nextRenewalTs: Long = NOW + 7L * DAY_MS,
+        billingCycle: String = "monthly",
+        customDays: Long? = null,
+        reminders: List<Long> = listOf(60L),
+    ): NextCardFiring.SubscriptionLike = NextCardFiring.SubscriptionLike(
+        id = id,
+        active = active,
+        nextRenewalTs = nextRenewalTs,
+        billingCycle = billingCycle,
+        customDays = customDays,
+        reminders = reminders,
+    )
+
+    /**
+     * 构造保单 Like DTO（默认活跃 + 未来 7 天到期 + 提前 60 分钟提醒）。
+     */
+    private fun policyLike(
+        id: String = "policy-test-1",
+        active: Boolean = true,
+        expiryTs: Long = NOW + 7L * DAY_MS,
+        reminders: List<Long> = listOf(60L),
+    ): NextCardFiring.PolicyLike = NextCardFiring.PolicyLike(
+        id = id,
+        active = active,
+        expiryTs = expiryTs,
+        reminders = reminders,
+    )
+
+    /**
+     * 构造借款 Like DTO（默认 active + 未来 7 天到期 + 到期当日提醒）。
+     */
+    private fun loanLike(
+        id: String = "loan-test-1",
+        status: String = "active",
+        dueTs: Long = NOW + 7L * DAY_MS,
+        reminders: List<Long> = listOf(0L),
+    ): NextCardFiring.LoanLike = NextCardFiring.LoanLike(
+        id = id,
+        status = status,
+        dueTs = dueTs,
+        reminders = reminders,
+    )
+
+    /**
+     * 用例 11：单条活跃订阅，续费在未来 2 天、提前 60 分钟提醒 →
+     * 候选 = renewal - 60min，kind=subscription_renewal，id 透传。
+     */
+    @Test
+    fun selectBestV2Trigger_singleFutureSubscription_returnsSubscriptionCandidate() {
+        val renewal = NOW + 2L * DAY_MS
+        val sub = subLike(id = "sub-11", nextRenewalTs = renewal, reminders = listOf(60L))
+
+        val result = ReminderScheduler.selectBestV2Trigger(
+            subs = listOf(sub),
+            policies = emptyList(),
+            loans = emptyList(),
+            nowMs = NOW,
+        )
+
+        assertNotNull(result)
+        assertEquals("sub-11", result!!.refId)
+        assertEquals(REF_KIND_SUBSCRIPTION_RENEWAL, result.refKind)
+        assertEquals(renewal - 60L * MINUTE_MS, result.triggerTs)
+    }
+
+    /**
+     * 用例 12：活跃保单未来 5 天到期 + 订阅已过期且 billingCycle 非法
+     * （nextRenewalTs=0 远古 + cycle="bad" → rollRenewal=null → 无候选）→
+     * 保单胜出；保单 reminders=[0,60] → 最近候选 = expiry - 60min。
+     */
+    @Test
+    fun selectBestV2Trigger_staleSubscriptionPolicyWins_returnsPolicyCandidate() {
+        val staleSub = subLike(
+            id = "sub-12-stale",
+            // 1970 远古时刻；while 循环第一次滚动即遇非法 cycle 返回 null。
+            nextRenewalTs = 0L,
+            billingCycle = "bad",
+            reminders = listOf(60L),
+        )
+        val expiry = NOW + 5L * DAY_MS
+        val policy = policyLike(
+            id = "policy-12",
+            expiryTs = expiry,
+            reminders = listOf(0L, 60L),
+        )
+
+        val result = ReminderScheduler.selectBestV2Trigger(
+            subs = listOf(staleSub),
+            policies = listOf(policy),
+            loans = emptyList(),
+            nowMs = NOW,
+        )
+
+        assertNotNull(result)
+        assertEquals("policy-12", result!!.refId)
+        assertEquals(REF_KIND_POLICY_EXPIRY, result.refKind)
+        assertEquals(expiry - 60L * MINUTE_MS, result.triggerTs)
+    }
+
+    /**
+     * 用例 13：paid 借款跳过（即便到期更近）；另一条 active 借款未来 3 天 →
+     * 选 active 那条。
+     */
+    @Test
+    fun selectBestV2Trigger_paidLoanSkipped_returnsActiveLoan() {
+        val paidLoan = loanLike(
+            id = "loan-13-paid",
+            status = "paid",
+            // 仅 1 天后到期；若未正确跳过，它会以更小 ts 胜出。
+            dueTs = NOW + 1L * DAY_MS,
+            reminders = listOf(0L),
+        )
+        val activeLoan = loanLike(
+            id = "loan-13-active",
+            status = "active",
+            dueTs = NOW + 3L * DAY_MS,
+            reminders = listOf(0L),
+        )
+
+        val result = ReminderScheduler.selectBestV2Trigger(
+            subs = emptyList(),
+            policies = emptyList(),
+            loans = listOf(paidLoan, activeLoan),
+            nowMs = NOW,
+        )
+
+        assertNotNull(result)
+        assertEquals("loan-13-active", result!!.refId)
+        assertEquals(REF_KIND_LOAN_DUE, result.refKind)
+        assertEquals(NOW + 3L * DAY_MS, result.triggerTs)
+    }
+
+    /**
+     * 用例 14：三类混合 —— 订阅 10 天后、保单 3 天后、借款 1 天后；
+     * 全部 reminders=[0] → 全局最小为借款（NOW+1d），kind=loan_due。
+     */
+    @Test
+    fun selectBestV2Trigger_allThreeKinds_returnsGlobalMinimum() {
+        val sub = subLike(id = "sub-14", nextRenewalTs = NOW + 10L * DAY_MS, reminders = listOf(0L))
+        val policy = policyLike(id = "policy-14", expiryTs = NOW + 3L * DAY_MS, reminders = listOf(0L))
+        val loan = loanLike(id = "loan-14", status = "active", dueTs = NOW + 1L * DAY_MS, reminders = listOf(0L))
+
+        val result = ReminderScheduler.selectBestV2Trigger(
+            subs = listOf(sub),
+            policies = listOf(policy),
+            loans = listOf(loan),
+            nowMs = NOW,
+        )
+
+        assertNotNull(result)
+        assertEquals("loan-14", result!!.refId)
+        assertEquals(REF_KIND_LOAN_DUE, result.refKind)
+        assertEquals(NOW + 1L * DAY_MS, result.triggerTs)
+    }
+
+    /**
+     * 用例 15：订阅 active=false、保单 active=false（借款列表为空）→ null。
+     */
+    @Test
+    fun selectBestV2Trigger_allInactive_returnsNull() {
+        val sub = subLike(id = "sub-15", active = false)
+        val policy = policyLike(id = "policy-15", active = false)
+
+        val result = ReminderScheduler.selectBestV2Trigger(
+            subs = listOf(sub),
+            policies = listOf(policy),
+            loans = emptyList(),
+            nowMs = NOW,
+        )
+
+        assertNull(result)
+    }
+
+    /**
+     * 用例 16：三类全空列表 → null（无任何候选；rebuildChain 走 cancel/其他来源分支）。
+     */
+    @Test
+    fun selectBestV2Trigger_allEmptyLists_returnsNull() {
+        val result = ReminderScheduler.selectBestV2Trigger(
+            subs = emptyList(),
+            policies = emptyList(),
+            loans = emptyList(),
+            nowMs = NOW,
+        )
+
+        assertNull(result)
+    }
+
+    /**
+     * 用例 17：三类候选同毫秒（基准均为 NOW+2d、reminders=[0]）→ 按稳定
+     * tie-break 序 subscription(2) 胜出（全局 rank 表 event<card<sub<policy<loan），
+     * 避免 DAO 返回顺序漂移导致闹钟种类跳变。
+     */
+    @Test
+    fun selectBestV2Trigger_sameTimestampTieBreak_subscriptionWins() {
+        val sameTs = NOW + 2L * DAY_MS
+        val sub = subLike(id = "sub-17", nextRenewalTs = sameTs, reminders = listOf(0L))
+        val policy = policyLike(id = "policy-17", expiryTs = sameTs, reminders = listOf(0L))
+        val loan = loanLike(id = "loan-17", status = "active", dueTs = sameTs, reminders = listOf(0L))
+
+        val result = ReminderScheduler.selectBestV2Trigger(
+            subs = listOf(sub),
+            policies = listOf(policy),
+            loans = listOf(loan),
+            nowMs = NOW,
+        )
+
+        assertNotNull(result)
+        assertEquals("sub-17", result!!.refId)
+        assertEquals(REF_KIND_SUBSCRIPTION_RENEWAL, result.refKind)
+        assertEquals(sameTs, result.triggerTs)
     }
 }

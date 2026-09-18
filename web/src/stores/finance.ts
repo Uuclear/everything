@@ -78,6 +78,14 @@ import {
   type AttachmentChannel,
   type AttachmentRecord,
 } from '../finance/attachment'
+import {
+  nextLoanDue,
+  nextPolicyExpiry,
+  nextSubscriptionRenewal,
+  toLoanLike as toFiringLoanLike,
+  toPolicyLike,
+  toSubscriptionLike,
+} from '../finance/nextCardFiring'
 
 // -----------------------------------------------------------------------------
 // 持久化契约 —— StorageChannel（注入点：默认 localStorage；测试可 mock）
@@ -193,6 +201,24 @@ function defaultCryptoChannel(): CryptoChannel {
       return api.listRecords(since, 500)
     },
   }
+}
+
+// ============================================================================
+// v2 提醒纯计算出口类型（stage5-finance-v2 / Task 4 / TR-4.3）
+// ============================================================================
+
+/**
+ * v2 未来提醒条目（upcomingV2Reminders 的数组元素）。
+ *
+ * - kind=subscription_renewal：订阅续费提醒（nextSubscriptionRenewal）；
+ * - kind=policy_expiry：保单到期提醒（nextPolicyExpiry）；
+ * - kind=loan_due：借款到期提醒（nextLoanDue）。
+ */
+export interface UpcomingV2Reminder {
+  kind: 'subscription_renewal' | 'policy_expiry' | 'loan_due'
+  id: string
+  /** 触发时刻（Unix 毫秒，严格晚于传入的 nowMs）。 */
+  triggerMs: number
 }
 
 // -----------------------------------------------------------------------------
@@ -369,6 +395,70 @@ export const useFinanceStore = defineStore('finance', () => {
       })
       .map((r) => r.data as unknown as FinanceContract),
   )
+
+  // ========== v2 提醒纯计算出口（TR-4.3） ==========
+
+  /**
+   * 同 triggerMs 时的 kind 固定先后：subscription_renewal > policy_expiry >
+   * loan_due（rank 越小越靠前）。
+   */
+  const REMINDER_KIND_RANK: Record<UpcomingV2Reminder['kind'], number> = {
+    subscription_renewal: 0,
+    policy_expiry: 1,
+    loan_due: 2,
+  }
+
+  /**
+   * v2 三类条目的"下一提醒"纯计算出口。
+   *
+   * 这是 Android 端 v1 单闹钟链式调度（AlarmManager + ReminderScheduler）在
+   * Web 端的等价纯计算：Web 没有 AlarmManager / 后台 scheduler，store 本身也
+   * 不持有调度器，因此这里只产出数据（供 Dashboard 倒计时卡片与未来 Web 通知
+   * 通道复用）；本函数不做浏览器 Notification（通知权限 / 弹出属于 G-7 范围）。
+   *
+   * 行为契约：
+   *   1. 消费已缓存的 subscriptions / policies / loans（store 内明文
+   *      snake_case 形态），经 toSubscriptionLike / toPolicyLike /
+   *      toFiringLoanLike 适配器后交给 nextCardFiring 三个纯函数；
+   *   2. null 结果（停用 / 已结清 / 无 reminders / 全部候选过期等）一律过滤；
+   *   3. 返回数组按 triggerMs 升序；同一 triggerMs 时按 kind 固定顺序
+   *      subscription_renewal → policy_expiry → loan_due 排列；同 kind 的
+   *      并列保持列表顺序（Array.prototype.sort 稳定排序）；
+   *   4. 纯函数语义：不修改 store 状态、不写存储、不发起网络请求。
+   *
+   * @param nowMs 当前时刻 Unix 毫秒；缺省 Date.now()，测试可显式锚定
+   * @returns 升序的未来提醒条目数组；无任何未来提醒时返回空数组
+   */
+  function upcomingV2Reminders(nowMs: number = Date.now()): UpcomingV2Reminder[] {
+    const items: UpcomingV2Reminder[] = []
+
+    for (const sub of listSubscriptions.value) {
+      const triggerMs = nextSubscriptionRenewal(toSubscriptionLike(sub), nowMs)
+      if (triggerMs !== null) {
+        items.push({ kind: 'subscription_renewal', id: sub.id, triggerMs })
+      }
+    }
+    for (const policy of listPolicies.value) {
+      const triggerMs = nextPolicyExpiry(toPolicyLike(policy), nowMs)
+      if (triggerMs !== null) {
+        items.push({ kind: 'policy_expiry', id: policy.id, triggerMs })
+      }
+    }
+    for (const loan of listLoans.value) {
+      const triggerMs = nextLoanDue(toFiringLoanLike(loan), nowMs)
+      if (triggerMs !== null) {
+        items.push({ kind: 'loan_due', id: loan.id, triggerMs })
+      }
+    }
+
+    // triggerMs 升序；同 ts 按 kind 固定顺序（subscription → policy → loan）。
+    items.sort(
+      (a, b) =>
+        a.triggerMs - b.triggerMs
+        || REMINDER_KIND_RANK[a.kind] - REMINDER_KIND_RANK[b.kind],
+    )
+    return items
+  }
 
   // ========== 附件 getters ==========
 
@@ -1307,6 +1397,8 @@ export const useFinanceStore = defineStore('finance', () => {
     listPolicies,
     listLoans,
     listContracts,
+    // v2 提醒纯计算出口（TR-4.3；Web 端无 AlarmManager，仅产出数据）
+    upcomingV2Reminders,
     // 查询
     byId,
     // 启动 / 持久化

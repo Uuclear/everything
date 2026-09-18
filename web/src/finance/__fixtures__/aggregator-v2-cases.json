@@ -1,0 +1,194 @@
+{
+  "version": 2,
+  "tz": "Asia/Shanghai",
+  "_comment_": "stage5-finance-v2 / Task 4 / TR-4.2 + TR-4.6 双端共享 fixture：netWorth 接入 v2 loan（lent 余额计资产 / borrowed 余额计负债 / includeInNetAssets=false 两端忽略 / 剩余本金钳位）。金额字段 decimal-as-string。DashboardSnapshot 结构保持 v1 七字段（不新增 loanCount）。Web 与 Android 镜像文件 SHA-256 必须一致。",
+  "cases": [
+    {
+      "name": "loan_lent_outstanding_countsAsAsset",
+      "description": "①lent 本金 1000.00 / 已还 0.00 / include=true → 总资产与净资产各 +1000.00，负债 0.00",
+      "input": {
+        "accounts": [],
+        "cards": [],
+        "loans": [
+          { "id": "L1", "direction": "lent", "principalMinor": "1000.00", "paidMinor": "0.00", "includeInNetAssets": true, "currency": "CNY", "status": "active" }
+        ]
+      },
+      "expected": {
+        "totalAssets": "1000.00",
+        "totalAssetValue": "1000.00",
+        "totalLiability": "0.00",
+        "accountCount": 0,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "loan_borrowed_outstanding_countsAsLiability",
+      "description": "②borrowed 本金 500.00 / include=true → 总负债 +500.00，总资产 0.00，净资产 -500.00",
+      "input": {
+        "accounts": [],
+        "cards": [],
+        "loans": [
+          { "id": "L2", "direction": "borrowed", "principalMinor": "500.00", "paidMinor": "0.00", "includeInNetAssets": true, "currency": "CNY", "status": "active" }
+        ]
+      },
+      "expected": {
+        "totalAssets": "-500.00",
+        "totalAssetValue": "0.00",
+        "totalLiability": "500.00",
+        "accountCount": 0,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "loan_excludedFromNetAssets_ignoredBothSides",
+      "description": "③include=false 的 lent 800 与 borrowed 300 在资产端、负债端均不计 → 三金额全 0.00",
+      "input": {
+        "accounts": [],
+        "cards": [],
+        "loans": [
+          { "id": "L3a", "direction": "lent", "principalMinor": "800.00", "paidMinor": "0.00", "includeInNetAssets": false, "currency": "CNY", "status": "active" },
+          { "id": "L3b", "direction": "borrowed", "principalMinor": "300.00", "paidMinor": "0.00", "includeInNetAssets": false, "currency": "CNY", "status": "active" }
+        ]
+      },
+      "expected": {
+        "totalAssets": "0.00",
+        "totalAssetValue": "0.00",
+        "totalLiability": "0.00",
+        "accountCount": 0,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "loan_lent_partiallyPaid_remainIsSevenHundred",
+      "description": "④lent 本金 1000.00 / 已还 300.00 / status=partially_paid → 剩余 700.00 计入资产",
+      "input": {
+        "accounts": [],
+        "cards": [],
+        "loans": [
+          { "id": "L4", "direction": "lent", "principalMinor": "1000.00", "paidMinor": "300.00", "includeInNetAssets": true, "currency": "CNY", "status": "partially_paid" }
+        ]
+      },
+      "expected": {
+        "totalAssets": "700.00",
+        "totalAssetValue": "700.00",
+        "totalLiability": "0.00",
+        "accountCount": 0,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "loan_fullyPaid_zeroImpact",
+      "description": "⑤status=paid 本金 1000.00 / 已还 1000.00 → 剩余 0，对资产负债均无影响（聚合口径不按 status 过滤，余量自然为 0）",
+      "input": {
+        "accounts": [],
+        "cards": [],
+        "loans": [
+          { "id": "L5", "direction": "lent", "principalMinor": "1000.00", "paidMinor": "1000.00", "includeInNetAssets": true, "currency": "CNY", "status": "paid" }
+        ]
+      },
+      "expected": {
+        "totalAssets": "0.00",
+        "totalAssetValue": "0.00",
+        "totalLiability": "0.00",
+        "accountCount": 0,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "mixed_accountsCardsLoans_netIsAssetsMinusLiabilities",
+      "description": "⑥混合：账户 2000.00 + 信用卡已用 400.00 + lent 1000（计入）+ borrowed 500（计入）+ lent 999（排除）→ 资产 3000 / 负债 900 / 净 2100",
+      "input": {
+        "accounts": [
+          { "id": "a1", "balance": "2000.00", "currency": "CNY", "archived": false }
+        ],
+        "cards": [
+          { "id": "c1", "kind": "credit", "usedLimit": "400.00", "archived": false }
+        ],
+        "loans": [
+          { "id": "L6a", "direction": "lent", "principalMinor": "1000.00", "paidMinor": "0.00", "includeInNetAssets": true, "currency": "CNY", "status": "active" },
+          { "id": "L6b", "direction": "borrowed", "principalMinor": "500.00", "paidMinor": "0.00", "includeInNetAssets": true, "currency": "CNY", "status": "active" },
+          { "id": "L6c", "direction": "lent", "principalMinor": "999.00", "paidMinor": "0.00", "includeInNetAssets": false, "currency": "CNY", "status": "active" }
+        ]
+      },
+      "expected": {
+        "totalAssets": "2100.00",
+        "totalAssetValue": "3000.00",
+        "totalLiability": "900.00",
+        "accountCount": 1,
+        "cardCount": 1,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "loan_overpaid_remainClampedToZero",
+      "description": "⑦异常数据：lent 本金 100.00 / 已还 150.00 → 剩余本金钳位到 0，不出现负资产",
+      "input": {
+        "accounts": [],
+        "cards": [],
+        "loans": [
+          { "id": "L7", "direction": "lent", "principalMinor": "100.00", "paidMinor": "150.00", "includeInNetAssets": true, "currency": "CNY", "status": "partially_paid" }
+        ]
+      },
+      "expected": {
+        "totalAssets": "0.00",
+        "totalAssetValue": "0.00",
+        "totalLiability": "0.00",
+        "accountCount": 0,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "loan_unknownDirection_ignored",
+      "description": "⑧异常数据：direction 既非 lent 也非 borrowed → 防御性忽略，金额不进任何一端",
+      "input": {
+        "accounts": [],
+        "cards": [],
+        "loans": [
+          { "id": "L8", "direction": "weird", "principalMinor": "1000.00", "paidMinor": "0.00", "includeInNetAssets": true, "currency": "CNY", "status": "active" }
+        ]
+      },
+      "expected": {
+        "totalAssets": "0.00",
+        "totalAssetValue": "0.00",
+        "totalLiability": "0.00",
+        "accountCount": 0,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    },
+    {
+      "name": "loan_borrowed_partiallyPaid_liabilityIsSixHundred",
+      "description": "⑨borrowed 本金 800.00 / 已还 200.00 / status=partially_paid → 剩余 600.00 计入负债，净资产 -600.00",
+      "input": {
+        "accounts": [],
+        "cards": [],
+        "loans": [
+          { "id": "L9", "direction": "borrowed", "principalMinor": "800.00", "paidMinor": "200.00", "includeInNetAssets": true, "currency": "CNY", "status": "partially_paid" }
+        ]
+      },
+      "expected": {
+        "totalAssets": "-600.00",
+        "totalAssetValue": "0.00",
+        "totalLiability": "600.00",
+        "accountCount": 0,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY"
+      }
+    }
+  ]
+}

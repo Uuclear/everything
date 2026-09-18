@@ -40,6 +40,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.everything.eve.ServiceLocator
 import com.everything.eve.data.finance.AttachmentRepository
+import com.everything.eve.data.finance.FinanceModule
 import com.everything.eve.data.finance.entity.AttachmentEntity
 import com.everything.eve.data.finance.entity.FinanceAccountEntity
 import com.everything.eve.data.finance.entity.FinanceCardEntity
@@ -53,6 +54,7 @@ import com.everything.eve.finance.PolicyRecord
 import com.everything.eve.finance.SubscriptionRecord
 import com.everything.eve.finance.ValidationResult
 import com.everything.eve.finance.NextCardFiring
+import com.everything.eve.finance.V2PayloadCodec
 import com.everything.eve.reminder.ReminderScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -309,12 +311,14 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
     private val errorFlow = MutableStateFlow<String?>(null)
 
     // =============================================================================
-    // v2 子类型内存数据源（stage5-finance-v2 / Task 3 / TR-2.6）
+    // v2 子类型内存数据源（stage5-finance-v2 / Task 3 / TR-2.6；B4 持久化闭环）
     // ============================================================================
-    // 4 个 v2 子类型尚未建 Room 表（B3 接入），此处用 MutableStateFlow 暂存
-    // 内存数据；ViewModel 单例生命周期内有效。
-    // TODO(B3): 替换为 FinanceSubscriptionDao.observeAll() / FinancePolicyDao.observeAll()
-    //                 / FinanceLoanDao.observeAll() / FinanceContractDao.observeAll()
+    // 4 个 v2 子类型不建独立 Room 表，统一走 records 密文通道
+    // （module=finance，type=subscription/policy/loan/contract）：
+    //   - 启动时 init { hydrateV2() } 从 records 表解密回填（与 v1 账户经 Room
+    //     Flow 在 combine 中自动可用同时机：VM 创建即拉）；
+    //   - upsert / delete 先改内存 StateFlow，再 best-effort 密封落库 + 标 dirty；
+    //   - 远端下行的入库由 RecordsRepository.sync + v2 Collector 路由承接（后续批次）。
     // ============================================================================
 
     /** v2 subscription 内存列表。 */
@@ -328,6 +332,19 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
 
     /** v2 contract 内存列表。 */
     private val contractsFlow = MutableStateFlow<List<ContractRecord>>(emptyList())
+
+    /**
+     * VM 创建即从 records 通道回填 v2 四类记录。
+     *
+     * 时机选择：v1 账户 / 卡 / 流水通过 Room Flow 在 [state] 的 combine 中自动
+     * 可用（VM 创建后首个订阅者即拿到全表）；v2 没有独立 Room 表，故在同一
+     * "VM 创建即 hydrate" 时机做一次性解密回填，语义对齐。MK 未解锁 / DB 未就绪
+     * （如极早启动或 JVM 单测桩环境）时协程整体静默跳过，内存保持空列表，
+     * 不影响 VM 构造与 v1 链路。
+     */
+    init {
+        hydrateV2()
+    }
 
     // =============================================================================
     // 一次性事件 Channel（spec NFR-3 一次性契约，避免旋转屏重放）
@@ -693,17 +710,22 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // =============================================================================
-    // v2 子类型 CRUD（stage5-finance-v2 / Task 3 / TR-2.6）
+    // v2 子类型 CRUD（stage5-finance-v2 / Task 3 / TR-2.6；B4 records 持久化闭环）
     // ============================================================================
     // 4 个 v2 子类型（SubscriptionRecord / PolicyRecord / LoanRecord / ContractRecord）
-    // 尚未建 Room 表（B3 接入），此处 upsert 仅更新内存 MutableStateFlow，
-    // stateIn 自动推送新 state；delete 同理仅移除条目。
-    // 校验：所有 upsert 前必须通过 FinanceRecords.validate*；失败返回 Result.failure。
-    // 不持久化到 FinanceRepository —— 避免 v1 协议通道被 v2 数据污染。
+    // 统一走 records 密文通道（无独立 Room 表）：
+    //   - upsert：校验通过 → 先更新内存 MutableStateFlow（stateIn 自动推送新 state，
+    //     返回值语义保持不变）→ viewModelScope.launch best-effort 调
+    //     RecordsRepository.upsertFinanceV2（V2PayloadCodec 编码 + sealRecord + dirty=1）；
+    //   - delete：内存移除 → launch best-effort 推墓碑 upsertFinanceV2Tombstone；
+    //   - 持久化失败（MK 未解锁 / ServiceLocator 未就绪 / 加密异常）静默吞掉，
+    //     内存结果不回滚（与 v1 upsertAccount 协程模式同款 best-effort 纪律）；
+    //   - 校验仍在内存更新前完成：FinanceRecords.validate* 失败返回 Result.failure，
+    //     不触发任何持久化。
     // ============================================================================
 
     /**
-     * v2 subscription upsert（内存）。
+     * v2 subscription upsert（内存更新 + records 通道 best-effort 持久化）。
      *
      * @param r 完整 SubscriptionRecord（id 必填；schema_version=2 必填）
      * @return Ok / Invalid(reason)
@@ -718,20 +740,20 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         val replaced = current.filterNot { it.id == r.id }.toMutableList().apply { add(r) }
         subscriptionsFlow.value = replaced
         _eventChannel.trySend(FinanceUiEvent.SaveSucceeded(r.id))
-        // TODO(B3): 持久化到 FinanceSubscriptionDao.upsert(...)，并触发 records 通道
+        persistV2(FinanceModule.TYPE_SUBSCRIPTION, r.id, V2PayloadCodec.encodeSubscription(r))
         return Result.success(Unit)
     }
 
-    /** v2 subscription delete（内存）。id 不存在视为成功（幂等）。 */
+    /** v2 subscription delete（内存移除 + 墓碑 best-effort）。id 不存在视为成功（幂等）。 */
     fun deleteSubscription(id: String): Result<Unit> {
         val current = subscriptionsFlow.value
         subscriptionsFlow.value = current.filterNot { it.id == id }
         _eventChannel.trySend(FinanceUiEvent.DeleteSucceeded(id))
-        // TODO(B3): DAO.markDeleted(id) + records 通道 tombstone 上行
+        tombstoneV2(FinanceModule.TYPE_SUBSCRIPTION, id)
         return Result.success(Unit)
     }
 
-    /** v2 policy upsert（内存）。 */
+    /** v2 policy upsert（内存更新 + records 通道 best-effort 持久化）。 */
     fun upsertPolicy(r: PolicyRecord): Result<Unit> {
         val validation = FinanceRecords.validatePolicy(r)
         if (validation is ValidationResult.Invalid) {
@@ -742,20 +764,20 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         val replaced = current.filterNot { it.id == r.id }.toMutableList().apply { add(r) }
         policiesFlow.value = replaced
         _eventChannel.trySend(FinanceUiEvent.SaveSucceeded(r.id))
-        // TODO(B3): 持久化到 FinancePolicyDao.upsert(...)
+        persistV2(FinanceModule.TYPE_POLICY, r.id, V2PayloadCodec.encodePolicy(r))
         return Result.success(Unit)
     }
 
-    /** v2 policy delete（内存）。 */
+    /** v2 policy delete（内存移除 + 墓碑 best-effort）。 */
     fun deletePolicy(id: String): Result<Unit> {
         val current = policiesFlow.value
         policiesFlow.value = current.filterNot { it.id == id }
         _eventChannel.trySend(FinanceUiEvent.DeleteSucceeded(id))
-        // TODO(B3): DAO.markDeleted(id)
+        tombstoneV2(FinanceModule.TYPE_POLICY, id)
         return Result.success(Unit)
     }
 
-    /** v2 loan upsert（内存）。 */
+    /** v2 loan upsert（内存更新 + records 通道 best-effort 持久化）。 */
     fun upsertLoan(r: LoanRecord): Result<Unit> {
         val validation = FinanceRecords.validateLoan(r)
         if (validation is ValidationResult.Invalid) {
@@ -766,20 +788,20 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         val replaced = current.filterNot { it.id == r.id }.toMutableList().apply { add(r) }
         loansFlow.value = replaced
         _eventChannel.trySend(FinanceUiEvent.SaveSucceeded(r.id))
-        // TODO(B3): 持久化到 FinanceLoanDao.upsert(...)
+        persistV2(FinanceModule.TYPE_LOAN, r.id, V2PayloadCodec.encodeLoan(r))
         return Result.success(Unit)
     }
 
-    /** v2 loan delete（内存）。 */
+    /** v2 loan delete（内存移除 + 墓碑 best-effort）。 */
     fun deleteLoan(id: String): Result<Unit> {
         val current = loansFlow.value
         loansFlow.value = current.filterNot { it.id == id }
         _eventChannel.trySend(FinanceUiEvent.DeleteSucceeded(id))
-        // TODO(B3): DAO.markDeleted(id)
+        tombstoneV2(FinanceModule.TYPE_LOAN, id)
         return Result.success(Unit)
     }
 
-    /** v2 contract upsert（内存）。 */
+    /** v2 contract upsert（内存更新 + records 通道 best-effort 持久化）。 */
     fun upsertContract(r: ContractRecord): Result<Unit> {
         val validation = FinanceRecords.validateContract(r)
         if (validation is ValidationResult.Invalid) {
@@ -790,17 +812,116 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         val replaced = current.filterNot { it.id == r.id }.toMutableList().apply { add(r) }
         contractsFlow.value = replaced
         _eventChannel.trySend(FinanceUiEvent.SaveSucceeded(r.id))
-        // TODO(B3): 持久化到 FinanceContractDao.upsert(...)
+        persistV2(FinanceModule.TYPE_CONTRACT, r.id, V2PayloadCodec.encodeContract(r))
         return Result.success(Unit)
     }
 
-    /** v2 contract delete（内存）。 */
+    /** v2 contract delete（内存移除 + 墓碑 best-effort）。 */
     fun deleteContract(id: String): Result<Unit> {
         val current = contractsFlow.value
         contractsFlow.value = current.filterNot { it.id == id }
         _eventChannel.trySend(FinanceUiEvent.DeleteSucceeded(id))
-        // TODO(B3): DAO.markDeleted(id)
+        tombstoneV2(FinanceModule.TYPE_CONTRACT, id)
         return Result.success(Unit)
+    }
+
+    // =============================================================================
+    // v2 records 通道持久化辅助（B4）—— best-effort 协程，全部异常静默
+    // ============================================================================
+
+    /**
+     * 把一条已通过校验、已写入内存的 v2 记录密封落入 records 表。
+     *
+     * 参照 v1 saveBuffer → financeRepo.upsertAccount 的协程模式：viewModelScope
+     * 内执行；MK 未解锁 / ServiceLocator 未就绪（JVM 桩）/ Room 异常一律吞掉，
+     * 不回滚内存、不打扰 UI（下次同步前本地仍可见；待解锁后由后续编辑或
+     * hydrate / 同步链路重新收敛）。
+     */
+    private fun persistV2(type: String, id: String, plaintextJson: String) {
+        viewModelScope.launch {
+            try {
+                ServiceLocator.repo.upsertFinanceV2(type, id, plaintextJson)
+                // v2 三类提醒候选发生变化，重算全局单闹钟链头（与 v1 saveBuffer
+                // 末尾调 rebuildChain 同款时机；best-effort，失败不阻断）。
+                try {
+                    ReminderScheduler.rebuildChain(appCtx)
+                } catch (_: Exception) {
+                    // 调度器重算失败不阻断持久化路径。
+                }
+            } catch (_: Exception) {
+                // 持久化 best-effort：内存更新已成功，失败静默。
+            }
+        }
+    }
+
+    /** 删除一条 v2 记录：推 records 墓碑（deleted=1 / dirty=1），best-effort。 */
+    private fun tombstoneV2(type: String, id: String) {
+        viewModelScope.launch {
+            try {
+                ServiceLocator.repo.upsertFinanceV2Tombstone(type, id)
+                try {
+                    ReminderScheduler.rebuildChain(appCtx)
+                } catch (_: Exception) {
+                    // 调度器重算失败不阻断墓碑路径。
+                }
+            } catch (_: Exception) {
+                // 墓碑 best-effort：内存移除已成功，失败静默。
+            }
+        }
+    }
+
+    /**
+     * 从 records 表一次性解密回填 v2 四类内存列表。
+     *
+     * 流程（每类独立）：RecordDao.getActiveByModuleType（deleted=0 过滤）→
+     * RecordsRepository.decryptFinanceV2 → V2PayloadCodec.decode* → 替换对应
+     * MutableStateFlow。任意**单条**解密 / 解析失败跳过该条不阻塞；整体查询
+     * 失败（DB / MK 未就绪）静默保留当前内存态。幂等：可被外部重复调用
+     * （如解锁后手动刷新），每次以 records 表快照全量替换内存列表。
+     */
+    fun hydrateV2() {
+        viewModelScope.launch {
+            try {
+                val recordsDao = ServiceLocator.db.recordDao()
+                val recordsRepo = ServiceLocator.repo
+
+                val subscriptions = recordsDao
+                    .getActiveByModuleType(FinanceModule.MODULE, FinanceModule.TYPE_SUBSCRIPTION)
+                    .mapNotNull { entity ->
+                        runCatching {
+                            V2PayloadCodec.decodeSubscription(recordsRepo.decryptFinanceV2(entity))
+                        }.getOrNull()
+                    }
+                val policies = recordsDao
+                    .getActiveByModuleType(FinanceModule.MODULE, FinanceModule.TYPE_POLICY)
+                    .mapNotNull { entity ->
+                        runCatching {
+                            V2PayloadCodec.decodePolicy(recordsRepo.decryptFinanceV2(entity))
+                        }.getOrNull()
+                    }
+                val loans = recordsDao
+                    .getActiveByModuleType(FinanceModule.MODULE, FinanceModule.TYPE_LOAN)
+                    .mapNotNull { entity ->
+                        runCatching {
+                            V2PayloadCodec.decodeLoan(recordsRepo.decryptFinanceV2(entity))
+                        }.getOrNull()
+                    }
+                val contracts = recordsDao
+                    .getActiveByModuleType(FinanceModule.MODULE, FinanceModule.TYPE_CONTRACT)
+                    .mapNotNull { entity ->
+                        runCatching {
+                            V2PayloadCodec.decodeContract(recordsRepo.decryptFinanceV2(entity))
+                        }.getOrNull()
+                    }
+
+                subscriptionsFlow.value = subscriptions
+                policiesFlow.value = policies
+                loansFlow.value = loans
+                contractsFlow.value = contracts
+            } catch (_: Exception) {
+                // DB / MK / ServiceLocator 未就绪：保留内存现状，不打扰 UI。
+            }
+        }
     }
 
     // =============================================================================

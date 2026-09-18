@@ -1,0 +1,204 @@
+{
+  "version": 2,
+  "tz": "Asia/Shanghai",
+  "nowMs": 1782619200000,
+  "_comment_": "stage5-finance-v2 / Task 4 / TR-4.1 + TR-4.6 双端共享 fixture：订阅续费 / 保单到期 / 借款到期下一提醒纯函数用例。锚定 nowMs=1782619200000（2026-06-28 12:00:00 CST, UTC+8）。所有期望毫秒均按 CST 口径独立手工精算（.NET DateTimeOffset UTC+8 交叉核验）。reminders 单位为分钟偏移（0=基准当日）。expected=null 表示函数应返回 null。Web 与 Android 镜像文件 SHA-256 必须一致。",
+  "cases": [
+    {
+      "name": "sub_monthly_future_pickMinReminder",
+      "description": "①monthly 当月未来续费 2026-06-30 09:00 CST，reminders=[0,1440]，两个候选都在未来，取最小=2026-06-29 09:00 CST",
+      "kind": "subscription",
+      "input": {
+        "id": "sub-01",
+        "active": true,
+        "nextRenewalTs": 1782781200000,
+        "billingCycle": "monthly",
+        "customDays": null,
+        "reminders": [0, 1440]
+      },
+      "expected": 1782694800000
+    },
+    {
+      "name": "sub_monthly_past_rollsToNextMonth",
+      "description": "②当月续费已过 2026-06-15 08:30 CST，monthly 向前滚一个日历月=2026-07-15 08:30 CST（保留时分秒），r=0",
+      "kind": "subscription",
+      "input": {
+        "id": "sub-02",
+        "active": true,
+        "nextRenewalTs": 1781483400000,
+        "billingCycle": "monthly",
+        "customDays": null,
+        "reminders": [0]
+      },
+      "expected": 1784075400000
+    },
+    {
+      "name": "sub_quarterly_rollsThreeMonths",
+      "description": "③quarterly 基准 2026-05-20 10:00 CST 已过，滚 +3 个日历月=2026-08-20 10:00 CST，r=60 取提前 1 小时=2026-08-20 09:00 CST",
+      "kind": "subscription",
+      "input": {
+        "id": "sub-03",
+        "active": true,
+        "nextRenewalTs": 1779242400000,
+        "billingCycle": "quarterly",
+        "customDays": null,
+        "reminders": [60]
+      },
+      "expected": 1787187600000
+    },
+    {
+      "name": "sub_yearly_rollsOneYear",
+      "description": "④yearly 基准 2025-12-31 23:30 CST 已过，滚 +1 个日历年=2026-12-31 23:30 CST（保留时分秒，跨年），r=0",
+      "kind": "subscription",
+      "input": {
+        "id": "sub-04",
+        "active": true,
+        "nextRenewalTs": 1767195000000,
+        "billingCycle": "yearly",
+        "customDays": null,
+        "reminders": [0]
+      },
+      "expected": 1798731000000
+    },
+    {
+      "name": "sub_customDays_rollsTenDays",
+      "description": "⑤custom_days 基准 2026-06-20 12:00 CST 已过，customDays=10 滚 +10 天=2026-06-30 12:00 CST，r=0",
+      "kind": "subscription",
+      "input": {
+        "id": "sub-05",
+        "active": true,
+        "nextRenewalTs": 1781928000000,
+        "billingCycle": "custom_days",
+        "customDays": 10,
+        "reminders": [0]
+      },
+      "expected": 1782792000000
+    },
+    {
+      "name": "sub_inactive_returnsNull",
+      "description": "⑥active=false 即使续费与提醒都在未来也一律返回 null",
+      "kind": "subscription",
+      "input": {
+        "id": "sub-06",
+        "active": false,
+        "nextRenewalTs": 1782781200000,
+        "billingCycle": "monthly",
+        "customDays": null,
+        "reminders": [0, 1440]
+      },
+      "expected": null
+    },
+    {
+      "name": "sub_emptyReminders_returnsNull",
+      "description": "⑦reminders 为空数组（用户关闭全部提醒）→ 返回 null",
+      "kind": "subscription",
+      "input": {
+        "id": "sub-07",
+        "active": true,
+        "nextRenewalTs": 1782781200000,
+        "billingCycle": "monthly",
+        "customDays": null,
+        "reminders": []
+      },
+      "expected": null
+    },
+    {
+      "name": "sub_customDaysAncient_exceedsLookaheadCap_returnsNull",
+      "description": "⑧防御性上限：基准=1970-01-01 08:00 CST（ts=0），custom_days=1 滚 24 个周期仅到 1970-01-25，仍远早于 now，超过 MAX_CYCLE_LOOKAHEAD=24 → null",
+      "kind": "subscription",
+      "input": {
+        "id": "sub-08",
+        "active": true,
+        "nextRenewalTs": 0,
+        "billingCycle": "custom_days",
+        "customDays": 1,
+        "reminders": [0]
+      },
+      "expected": null
+    },
+    {
+      "name": "pol_future_expiry_pickMinReminder",
+      "description": "⑨保单到期 2026-07-15 00:00 CST（一次性不滚动），reminders=[0,1440,4320]，取最小=提前 3 天 2026-07-12 00:00 CST",
+      "kind": "policy",
+      "input": {
+        "id": "pol-01",
+        "active": true,
+        "expiryTs": 1784044800000,
+        "reminders": [0, 1440, 4320]
+      },
+      "expected": 1783785600000
+    },
+    {
+      "name": "pol_inactive_returnsNull",
+      "description": "⑩active=false 的保单即使到期日在未来也返回 null",
+      "kind": "policy",
+      "input": {
+        "id": "pol-02",
+        "active": false,
+        "expiryTs": 1784044800000,
+        "reminders": [0, 1440]
+      },
+      "expected": null
+    },
+    {
+      "name": "pol_allExpired_returnsNull",
+      "description": "⑪到期日 2026-01-01 00:00 CST 早于锚点，保单不滚动，全部候选（r=0）已过期 → null",
+      "kind": "policy",
+      "input": {
+        "id": "pol-03",
+        "active": true,
+        "expiryTs": 1767196800000,
+        "reminders": [0]
+      },
+      "expected": null
+    },
+    {
+      "name": "pol_emptyReminders_returnsNull",
+      "description": "⑫reminders 为空数组 → 返回 null",
+      "kind": "policy",
+      "input": {
+        "id": "pol-04",
+        "active": true,
+        "expiryTs": 1784044800000,
+        "reminders": []
+      },
+      "expected": null
+    },
+    {
+      "name": "loan_dueFuture_pickMinReminder",
+      "description": "⑬借款到期 2026-07-05 10:00 CST（一次性不滚动），status=active，reminders=[0,1440]，取最小=2026-07-04 10:00 CST",
+      "kind": "loan",
+      "input": {
+        "id": "loan-01",
+        "status": "active",
+        "dueTs": 1783216800000,
+        "reminders": [0, 1440]
+      },
+      "expected": 1783130400000
+    },
+    {
+      "name": "loan_paid_returnsNull",
+      "description": "⑭status=paid（已结清）即使到期日在未来也返回 null",
+      "kind": "loan",
+      "input": {
+        "id": "loan-02",
+        "status": "paid",
+        "dueTs": 1783216800000,
+        "reminders": [0, 1440]
+      },
+      "expected": null
+    },
+    {
+      "name": "loan_overdue_allExpired_returnsNull",
+      "description": "⑮status=overdue 且到期日 2026-05-01 00:00 CST 已过，借款不滚动，reminders=[0,60] 全部候选过期 → null",
+      "kind": "loan",
+      "input": {
+        "id": "loan-03",
+        "status": "overdue",
+        "dueTs": 1777564800000,
+        "reminders": [0, 60]
+      },
+      "expected": null
+    }
+  ]
+}

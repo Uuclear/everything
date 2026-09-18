@@ -50,8 +50,11 @@ import android.content.Intent
 import android.os.Build
 import com.everything.eve.ServiceLocator
 import com.everything.eve.data.event.EventReminderLogEntity
+import com.everything.eve.data.finance.FinanceModule
 import com.everything.eve.data.finance.dao.FinanceCardDao
 import com.everything.eve.data.finance.entity.FinanceCardEntity
+import com.everything.eve.finance.NextCardFiring
+import com.everything.eve.finance.V2PayloadCodec
 import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import java.util.concurrent.TimeUnit
@@ -633,10 +636,37 @@ object ReminderScheduler {
             }
         }
 
-        // 4) 合并事件 + 财务两类，取全局最小
+        // 3.5) 阶段 5 v2 / B4：subscription / policy / loan 三类 v2 记录分支。
+        //      取数 + 解密 + decode 在 loadV2Trigger 内逐条容错；候选选取本身
+        //      是纯函数 selectBestV2Trigger（可 JVM 单测，不依赖 ServiceLocator）。
+        val bestV2: V2TriggerCandidate? = loadV2Trigger(now)
+
+        // 4) 统一候选比较：event / card / v2 三类候选取全局最小。
+        //    同毫秒 tie-break 优先级（稳定，避免结果漂移）：
+        //      event(0) > card(1) > subscription(2) > policy(3) > loan(4)
+        //    与既有双分支行为完全等价 —— 旧逻辑 event 与 card 同 ts 时 event 胜出，
+        //    这里 rank 0 vs 1 同样让 event 胜出；event/card 各自组内的选取循环
+        //    （先遇先得 / 账单优先）保持不动。
         val alarmScheduler = RealAlarmScheduler(appCtx)
+
+        // 候选项：Triple(triggerTs, rank, source)；source=0 event / 1 card / 2 v2。
+        val alarmCandidates = buildList {
+            if (bestEventTrigger != null) {
+                add(Triple(bestEventTrigger, GLOBAL_RANK_EVENT, SOURCE_EVENT))
+            }
+            if (bestFinanceTrigger != null) {
+                add(Triple(bestFinanceTrigger, GLOBAL_RANK_CARD, SOURCE_CARD))
+            }
+            if (bestV2 != null) {
+                add(Triple(bestV2.triggerTs, v2KindGlobalRank(bestV2.refKind), SOURCE_V2))
+            }
+        }
+        val winner = alarmCandidates.minWithOrNull(
+            compareBy({ it.first }, { it.second }),
+        )
+
         when {
-            bestEventTrigger == null && bestFinanceTrigger == null -> {
+            winner == null -> {
                 // 全局无触发 → 取消已有 PendingIntent，避免悬挂
                 val pi = buildPendingIntent(
                     ctx = appCtx,
@@ -646,10 +676,8 @@ object ReminderScheduler {
                     occurrenceTs = 0L,
                 )
                 alarmScheduler.cancel(pi)
-                return
             }
-            bestFinanceTrigger == null ||
-                (bestEventTrigger != null && bestEventTrigger <= bestFinanceTrigger) -> {
+            winner.third == SOURCE_EVENT -> {
                 // 事件分支最小；既有 scheduleNext 沿用
                 scheduleNext(
                     triggerAtMs = bestEventTrigger!!,
@@ -658,13 +686,23 @@ object ReminderScheduler {
                     ctx = appCtx,
                 )
             }
-            else -> {
-                // 财务分支最小；调 scheduleNextFinance 走单闹钟（同 requestCode）
+            winner.third == SOURCE_CARD -> {
+                // 信用卡分支最小；调 scheduleNextFinance 走单闹钟（同 requestCode）
                 scheduleNextFinance(
                     triggerAtMs = bestFinanceTrigger!!,
                     refId = bestFinanceRefId!!,
                     refKind = bestFinanceRefKind!!,
                     fireAt = bestFinanceTrigger!!,
+                    ctx = appCtx,
+                )
+            }
+            else -> {
+                // v2 三类之一胜出；同样走财务单闹钟（requestCode 不变，严禁新建链路）
+                scheduleNextFinance(
+                    triggerAtMs = bestV2!!.triggerTs,
+                    refId = bestV2.refId,
+                    refKind = bestV2.refKind,
+                    fireAt = bestV2.triggerTs,
                     ctx = appCtx,
                 )
             }
@@ -701,6 +739,149 @@ object ReminderScheduler {
             now = now,
             zone = java.time.ZoneId.systemDefault(),
         )
+    }
+
+    // ============================================================================
+    // 阶段 5 v2 / B4：subscription / policy / loan 三类提醒候选选取
+    // =========================================================================
+
+    /**
+     * v2 三类提醒的胜出候选（纯函数 [selectBestV2Trigger] 产物）。
+     *
+     * @param refId 胜出 v2 记录的 id（写 PendingIntent extras + finance_reminder_log）。
+     * @param refKind 提醒种类（[REF_KIND_SUBSCRIPTION_RENEWAL] /
+     *   [REF_KIND_POLICY_EXPIRY] / [REF_KIND_LOAN_DUE]）。
+     * @param triggerTs 最近一次未来触发的 Unix 毫秒。
+     */
+    internal data class V2TriggerCandidate(
+        val refId: String,
+        val refKind: String,
+        val triggerTs: Long,
+    )
+
+    /**
+     * 在 v2 三类记录中选出全局最近的未来提醒（纯函数；不依赖 Android Framework
+     * / Room / ServiceLocator，可直接 JVM 单测）。
+     *
+     * 算法：
+     *  1) 对每条记录调对应纯函数 [NextCardFiring.nextSubscriptionRenewal] /
+     *     [NextCardFiring.nextPolicyExpiry] / [NextCardFiring.nextLoanDue]，
+     *     null（停用 / 已结清 / 无 reminders / 窗口内无未来候选）即跳过；
+     *  2) 全部候选取 (triggerTs, kindRank, id) 字典序最小 ——
+     *     - triggerTs 小者优先；
+     *     - 同毫秒 tie-break 固定为 subscription(2) > policy(3) > loan(4)
+     *       （数字小者优先；与 rebuildChain 全局 rank 表一致）；
+     *     - 同类内再按 id 字典序，保证 DAO 返回顺序变化时结果不漂移；
+     *  3) 无任何候选 → null。
+     *
+     * @param subs 订阅入参 DTO 列表（由调用方从解密后的 SubscriptionRecord 转换）。
+     * @param policies 保单入参 DTO 列表。
+     * @param loans 借款入参 DTO 列表。
+     * @param nowMs 当前 Unix 毫秒。
+     */
+    internal fun selectBestV2Trigger(
+        subs: List<NextCardFiring.SubscriptionLike>,
+        policies: List<NextCardFiring.PolicyLike>,
+        loans: List<NextCardFiring.LoanLike>,
+        nowMs: Long,
+    ): V2TriggerCandidate? {
+        data class Scored(
+            val triggerTs: Long,
+            val kindRank: Int,
+            val refId: String,
+            val refKind: String,
+        )
+
+        val scored = ArrayList<Scored>()
+        for (s in subs) {
+            val ts = NextCardFiring.nextSubscriptionRenewal(s, nowMs) ?: continue
+            scored.add(Scored(ts, V2_KIND_RANK_SUBSCRIPTION, s.id, REF_KIND_SUBSCRIPTION_RENEWAL))
+        }
+        for (p in policies) {
+            val ts = NextCardFiring.nextPolicyExpiry(p, nowMs) ?: continue
+            scored.add(Scored(ts, V2_KIND_RANK_POLICY, p.id, REF_KIND_POLICY_EXPIRY))
+        }
+        for (l in loans) {
+            val ts = NextCardFiring.nextLoanDue(l, nowMs) ?: continue
+            scored.add(Scored(ts, V2_KIND_RANK_LOAN, l.id, REF_KIND_LOAN_DUE))
+        }
+        val best = scored.minWithOrNull(
+            compareBy({ it.triggerTs }, { it.kindRank }, { it.refId }),
+        ) ?: return null
+        return V2TriggerCandidate(
+            refId = best.refId,
+            refKind = best.refKind,
+            triggerTs = best.triggerTs,
+        )
+    }
+
+    /**
+     * 从 records 表取 v2 三类记录 → 解密 → decode → 转 NextCardFiring Like DTO →
+     * 调纯函数 [selectBestV2Trigger]（rebuildChain 的 v2 取数层）。
+     *
+     * 容错：单条记录查询后的解密 / decode / 转换失败逐条 runCatching 跳过；
+     * ServiceLocator / DB / MK 整体不可用时返回 null（v2 缺席，不影响 event /
+     * card 既有链路）。
+     */
+    private suspend fun loadV2Trigger(nowMs: Long): V2TriggerCandidate? {
+        return try {
+            val recordsDao = ServiceLocator.db.recordDao()
+            val recordsRepo = ServiceLocator.repo
+
+            // 局部 suspend 函数：getActiveByModuleType 是 Room suspend 查询，
+            // 必须在协程体内调用（loadV2Trigger 本身为 suspend）。
+            suspend fun activeByType(type: String) =
+                recordsDao.getActiveByModuleType(FinanceModule.MODULE, type)
+
+            val subs = activeByType(FinanceModule.TYPE_SUBSCRIPTION).mapNotNull { entity ->
+                runCatching {
+                    val r = V2PayloadCodec.decodeSubscription(recordsRepo.decryptFinanceV2(entity))
+                    NextCardFiring.SubscriptionLike(
+                        id = r.id,
+                        active = r.active,
+                        nextRenewalTs = r.nextRenewalTs,
+                        billingCycle = r.billingCycle,
+                        customDays = r.customDays,
+                        reminders = r.reminders,
+                    )
+                }.getOrNull()
+            }
+            val policies = activeByType(FinanceModule.TYPE_POLICY).mapNotNull { entity ->
+                runCatching {
+                    val r = V2PayloadCodec.decodePolicy(recordsRepo.decryptFinanceV2(entity))
+                    NextCardFiring.PolicyLike(
+                        id = r.id,
+                        active = r.active,
+                        expiryTs = r.expiryTs,
+                        reminders = r.reminders,
+                    )
+                }.getOrNull()
+            }
+            val loans = activeByType(FinanceModule.TYPE_LOAN).mapNotNull { entity ->
+                runCatching {
+                    val r = V2PayloadCodec.decodeLoan(recordsRepo.decryptFinanceV2(entity))
+                    NextCardFiring.LoanLike(
+                        id = r.id,
+                        status = r.status,
+                        dueTs = r.dueTs,
+                        reminders = r.reminders,
+                    )
+                }.getOrNull()
+            }
+
+            selectBestV2Trigger(subs, policies, loans, nowMs)
+        } catch (e: Exception) {
+            // ServiceLocator 未初始化 / Room 异常 / MK 未解锁 → v2 分支缺席。
+            null
+        }
+    }
+
+    /** v2 kind → 全局合并 rank；未知 kind 排末位（防御性）。 */
+    private fun v2KindGlobalRank(refKind: String): Int = when (refKind) {
+        REF_KIND_SUBSCRIPTION_RENEWAL -> V2_KIND_RANK_SUBSCRIPTION
+        REF_KIND_POLICY_EXPIRY -> V2_KIND_RANK_POLICY
+        REF_KIND_LOAN_DUE -> V2_KIND_RANK_LOAN
+        else -> Int.MAX_VALUE
     }
 
     /**
@@ -854,6 +1035,37 @@ internal const val REF_KIND_CARD_STATEMENT_DUE: String = "card_statement_due"
 
 /** 提醒种类：信用卡还款日（v1 启用）。 */
 internal const val REF_KIND_CARD_PAYMENT_DUE: String = "card_payment_due"
+
+// =============================================================================
+// 阶段 5 v2 / B4：subscription / policy / loan 三类提醒种类常量
+// （与 ReminderReceiver.ENABLED_FINANCE_KINDS、finance_reminder_log.ref_kind 对齐）
+// =============================================================================
+
+/** 提醒种类：订阅续费（v2 启用）。 */
+internal const val REF_KIND_SUBSCRIPTION_RENEWAL: String = "subscription_renewal"
+
+/** 提醒种类：保单到期（v2 启用）。 */
+internal const val REF_KIND_POLICY_EXPIRY: String = "policy_expiry"
+
+/** 提醒种类：借款到期（v2 启用）。 */
+internal const val REF_KIND_LOAN_DUE: String = "loan_due"
+
+/**
+ * v2 三类在全局合并中的优先级 rank（仅用于同毫秒 tie-break）：
+ * event=0 < card=1 < subscription=2 < policy=3 < loan=4。
+ */
+private const val V2_KIND_RANK_SUBSCRIPTION: Int = 2
+private const val V2_KIND_RANK_POLICY: Int = 3
+private const val V2_KIND_RANK_LOAN: Int = 4
+
+/** rebuildChain 统一候选比较中 event / card 两个来源的全局 rank。 */
+private const val GLOBAL_RANK_EVENT: Int = 0
+private const val GLOBAL_RANK_CARD: Int = 1
+
+/** rebuildChain 胜出来源标记：0=event，1=card，2=v2。 */
+private const val SOURCE_EVENT: Int = 0
+private const val SOURCE_CARD: Int = 1
+private const val SOURCE_V2: Int = 2
 
 /** 账单/还款日合法范围（1-31 日）。 */
 internal val BILLING_DAY_RANGE: IntRange = 1..31

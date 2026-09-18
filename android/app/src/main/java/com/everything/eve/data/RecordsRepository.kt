@@ -292,6 +292,15 @@ open class RecordsRepository(
     private val typeFinanceTx = "tx"
 
     /**
+     * finance 模块信封版本（seal/open AAD 的 BE(uint64 version)）。
+     *
+     * v1（account/card/tx/attachment）与 v2（subscription/policy/loan/contract）
+     * 共用同一信封版本 1 —— 业务结构差异由明文载荷内 schema_version（1 或 2）
+     * 表达，与既有全部 finance 记录逐字节一致，避免 AAD 分叉。
+     */
+    private val FINANCE_ENVELOPE_VERSION: Long = 1L
+
+    /**
      * 把一条 FinanceAccount 明文密封为 records 条目（module=finance/type=account），
      * 并标 dirty。
      *
@@ -498,6 +507,123 @@ open class RecordsRepository(
      * @throws javax.crypto.AEADBadTagException 密文/AAD 不匹配。
      */
     open fun decryptFinanceAttachment(entity: RecordEntity): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() } ?: error("资料库未解锁")
+        val plain = CryptoEnvelope.openRecord(
+            mk,
+            CryptoEnvelope.unb64(entity.ciphertext),
+            entity.id,
+            entity.module,
+            entity.version,
+        )
+        return String(plain, Charsets.UTF_8)
+    }
+
+    // =============================================================================
+    // 阶段 5 v2 / B4：subscription / policy / loan / contract 四类 v2 记录的
+    // records 通道密封 / 墓碑 / 打开（与 v1 account/card/tx 逐字节同款 AAD）。
+    // =============================================================================
+    // 设计纪律（与 [upsertFinanceAccount] / [deleteEventRule] 一致）：
+    //  1) **不新造 envelope 路径**：复用 CryptoEnvelope.sealRecord / openRecord；
+    //     AAD = "eve:v1:record:{id}:finance:" + BE(uint64 version)，信封 version
+    //     固定取 1（与 v1 同模式）；业务 schema 版本（schema_version=2）在明文
+    //     载荷内部，不参与 AAD。
+    //  2) **type 由调用方显式传入**：FinanceModule.TYPE_SUBSCRIPTION / TYPE_POLICY
+    //     / TYPE_LOAN / TYPE_CONTRACT；本类不做白名单校验（调用方契约）。
+    //  3) **墓碑**：与 [deleteEventRule] 同模式 —— deleted=true、dirty=true、
+    //     ciphertext 空字符串；保留原 createdAt；getActiveByModuleType 天然排除。
+    //  4) **open 可子类覆盖**：三方法标 open（与 upsertFinanceAttachment /
+    //     decryptFinanceAttachment 一致），便于测试桩继承。
+    // =============================================================================
+
+    /**
+     * 把一条 v2 财务记录明文密封为 records 条目（module=finance / type=调用方给定
+     * 的 subscription / policy / loan / contract），并标 dirty。
+     *
+     * 与 [upsertFinanceAccount] 同款链路：sealRecord → dao.upsertAll → dirty=true；
+     * 同 id 已存在则 REPLACE 覆盖（updatedAt 取本地时钟，推送成功后由服务端权威
+     * 时间覆盖）。
+     *
+     * @param type v2 子类型（建议传 FinanceModule.TYPE_* 常量）。
+     * @param id 记录 UUID。
+     * @param plaintextJson v2 明文载荷 JSON（V2PayloadCodec.encode* 产物；snake_case）。
+     * @return 写入的 record id（即传入 id）。
+     * @throws IllegalStateException MK 未解锁。
+     */
+    open suspend fun upsertFinanceV2(type: String, id: String, plaintextJson: String): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val now = System.currentTimeMillis()
+        val plain = plaintextJson.toByteArray(Charsets.UTF_8)
+        // 信封 version 固定 1（与 v1 account/card/tx/attachment 同模式）；
+        // 业务 schema_version=2 仅存在于明文载荷内。
+        val sealed = CryptoEnvelope.sealRecord(mk, plain, id, moduleFinance, FINANCE_ENVELOPE_VERSION)
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = id,
+                    module = moduleFinance,
+                    type = type,
+                    ciphertext = CryptoEnvelope.b64(sealed),
+                    version = FINANCE_ENVELOPE_VERSION,
+                    createdAt = now,
+                    updatedAt = now,
+                    deleted = false,
+                    dirty = true,
+                ),
+            ),
+        )
+        return id
+    }
+
+    /**
+     * 写入一条 v2 财务记录的墓碑（deleted=true、dirty=true、ciphertext 空串）。
+     *
+     * 与 [deleteEventRule] 同模式：保留原行 createdAt（若存在），避免墓碑丢失
+     * 原始创建时刻；密文留空，服务端按 deleted=true 清扫。
+     *
+     * @param type v2 子类型（建议传 FinanceModule.TYPE_* 常量）。
+     * @param id 记录 UUID。
+     * @throws IllegalStateException MK 未解锁（与既有墓碑方法的解锁校验保持一致）。
+     */
+    open suspend fun upsertFinanceV2Tombstone(type: String, id: String) {
+        // 与 deleteEventRule 同款解锁闸门：MK 未就绪时直接失败，由 ViewModel
+        // best-effort 协程 catch（不写入半截墓碑）。
+        auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val existing = dao.getById(id)
+        val createdAt = existing?.createdAt ?: System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = id,
+                    module = moduleFinance,
+                    type = type,
+                    ciphertext = "", // 墓碑不带密文，服务端按 deleted=true 清扫
+                    version = FINANCE_ENVELOPE_VERSION,
+                    createdAt = createdAt,
+                    updatedAt = now,
+                    deleted = true,
+                    dirty = true,
+                ),
+            ),
+        )
+    }
+
+    /**
+     * 解密一条 v2 finance 记录密文回明文 JSON（hydrateV2 / rebuildChain /
+     * ReminderReceiver 用）。
+     *
+     * 与 [decryptFinanceRecord] / [decryptFinanceAttachment] 同款口径：解密失败
+     * （AAD 不匹配 / 模块非 finance / 密文被改）抛 javax.crypto.AEADBadTagException，
+     * 由调用方逐条 catch 跳过，不阻塞其余记录。
+     *
+     * @param entity 已落 records 表的 v2 行（ciphertext / module / version 来自本地或下行）。
+     * @return 明文 JSON 字符串（V2PayloadCodec.decode* 的输入）。
+     * @throws IllegalStateException MK 未解锁。
+     * @throws javax.crypto.AEADBadTagException 密文 / AAD 不匹配。
+     */
+    open fun decryptFinanceV2(entity: RecordEntity): String {
         val mk = auth.masterKey?.takeIf { it.isNotEmpty() } ?: error("资料库未解锁")
         val plain = CryptoEnvelope.openRecord(
             mk,

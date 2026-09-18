@@ -31,10 +31,21 @@
 //      - `card.billingDay=null` → 返回 null（未配置账单日）；
 //      - `card.dueDay=null` → 仅返回账单日触发, 还款日跳过；
 //
+// v2 扩展（stage5-finance-v2 / Task 4 / TR-4.1）:
+//   在同一 object 内追加三个 v2 提醒纯函数与对应入参 DTO：
+//     - nextSubscriptionRenewal（订阅续费提醒, 支持 monthly/quarterly/yearly/custom_days
+//       日历滚动, 防御性上限 MAX_CYCLE_LOOKAHEAD=24 个周期）；
+//     - nextPolicyExpiry（保单到期一次性提醒, 不滚动）；
+//     - nextLoanDue（借款到期一次性提醒, status=paid 不提醒）。
+//   三函数签名统一为 (like, nowMs) -> Long?, 共享 reminders 分钟偏移候选口径
+//   （候选 = 基准时刻 - r*60000, 严格 > nowMs 才有效, 取最小）。
+//
 // 关联:
 //   - tasks.md TR-5.2（Android NextCardFiring.kt 镜像实现）
 //   - tasks.md TR-5.4（JUnit 测试套件, 加载共享 fixture）
 //   - tasks.md TR-5.4（三端 fixture SHA-256 一致性核验）
+//   - tasks.md TR-4.1（v2 订阅/保单/借款下一提醒纯函数, stage5-finance-v2）
+//   - tasks.md TR-4.6（v2 提醒 fixture 双端 SHA-256 一致性核验）
 //   - web/src/finance/nextCardFiring.ts（Web 镜像版本, 本期 T5 子代理同步创建）
 //   - docs/schemas/finance.schema.json#/$defs/FinanceCard（字段真理源）
 // ============================================================================
@@ -87,6 +98,19 @@ object NextCardFiring {
     private const val DUE_DAY_OFFSET_KEY = "dueDay"
 
     /**
+     * v2 订阅续费向前滚动的防御性周期上限（stage5-finance-v2 / TR-4.1）。
+     *
+     * 业务语义：当 nextRenewalTs 因数据异常停留在远古时刻（如 1970 年）时,
+     * 纯函数不能无限循环滚动；最多向前滚动 24 个计费周期（monthly 约 2 年,
+     * custom_days=1 为 24 天）仍不超过 nowMs 即放弃, 返回 null。
+     * 精神同 v1 常量 MAX_MONTH_LOOKAHEAD（见 ReminderScheduler 链路）。
+     */
+    private const val MAX_CYCLE_LOOKAHEAD = 24
+
+    /** 一分钟对应的毫秒数（reminders 偏移单位换算）。 */
+    private const val MINUTE_MS = 60_000L
+
+    /**
      * 本地时区相对 UTC 的偏移（分钟；如 UTC+8 为 480）。
      *
      * 复用 FinanceAggregator.kt 同口径（各自维护一份以保持模块边界清晰）。
@@ -116,6 +140,57 @@ object NextCardFiring {
         val billingDay: Int?,
         val dueDay: Int?,
         val archived: Boolean,
+    )
+
+    // ============================================================================
+    // v2 入参 DTO（stage5-finance-v2 / TR-4.1）—— 解耦 Room Entity
+    // ============================================================================
+
+    /**
+     * 订阅入参形态（v2）—— 字段命名与 [SubscriptionRecord] camelCase 对齐。
+     *
+     * @param billingCycle monthly | quarterly | yearly | custom_days
+     * @param customDays billingCycle=custom_days 时的周期天数；其余周期为 null
+     * @param reminders 提醒分钟偏移列表（0 = 续费当日; 1440 = 提前一天）
+     */
+    data class SubscriptionLike(
+        val id: String,
+        val active: Boolean,
+        val nextRenewalTs: Long,
+        val billingCycle: String,
+        val customDays: Long?,
+        val reminders: List<Long>,
+    )
+
+    /**
+     * 保单入参形态（v2）—— 字段命名与 [PolicyRecord] camelCase 对齐。
+     *
+     * @param expiryTs 保单到期时刻（一次性基准, 不滚动）
+     * @param reminders 提醒分钟偏移列表（0 = 到期当日）
+     */
+    data class PolicyLike(
+        val id: String,
+        val active: Boolean,
+        val expiryTs: Long,
+        val reminders: List<Long>,
+    )
+
+    /**
+     * 借款入参形态（v2）—— 字段命名与 [LoanRecord] camelCase 对齐。
+     *
+     * 注意：本 DTO 与 [FinanceAggregator.LoanLike] 同名但位于不同 object
+     * （NextCardFiring.LoanLike vs FinanceAggregator.LoanLike）, 各自只承载
+     * 本场景所需最小字段集, 可在同文件以 import 别名消歧。
+     *
+     * @param status active | partially_paid | paid | overdue；仅 paid 不提醒
+     * @param dueTs 借款到期时刻（一次性基准, 不滚动）
+     * @param reminders 提醒分钟偏移列表（0 = 到期当日）
+     */
+    data class LoanLike(
+        val id: String,
+        val status: String,
+        val dueTs: Long,
+        val reminders: List<Long>,
     )
 
     // ============================================================================
@@ -209,8 +284,158 @@ object NextCardFiring {
     }
 
     // ============================================================================
+    // v2 公开 API —— 订阅 / 保单 / 借款下一提醒（stage5-finance-v2 / TR-4.1）
+    // ============================================================================
+
+    /**
+     * 计算订阅条目的下一次续费提醒时刻（取最近未来候选）。
+     *
+     * 算法骨架：
+     *   1. 早退 —— active=false 或 reminders 为空 → 返回 null；
+     *   2. 基准实例 = sub.nextRenewalTs；若已 ≤ nowMs, 按 billingCycle 用 java.time
+     *      系统时区 LocalDateTime 做日历加法向前滚动（保留原 ts 的时分秒）：
+     *        - monthly     → plusMonths(1)；
+     *        - quarterly   → plusMonths(3)；
+     *        - yearly      → plusYears(1)；
+     *        - custom_days → plusDays(customDays)；customDays 为 null 或 ≤0 → null；
+     *      月末日期滚动由 java.time 自然裁剪（如 1/31 + 1 月 = 2/28）；
+     *   3. 防御性上限 —— 连续滚动 [MAX_CYCLE_LOOKAHEAD] 个周期仍 ≤ nowMs → null；
+     *   4. 对最终续费实例计算候选 { renewal - r*60000 | r in reminders, r>=0 },
+     *      仅保留严格 > nowMs 的候选, 返回最小值；无候选返回 null。
+     *
+     * @param sub 订阅入参 DTO
+     * @param nowMs 当前时刻（Unix 毫秒；由调用方提供, 便于测试锚定）
+     * @return 最近一次未来提醒的 Unix 毫秒；无候选时返回 null
+     */
+    fun nextSubscriptionRenewal(sub: SubscriptionLike, nowMs: Long): Long? {
+        // ========== 1. 早退守卫 ==========
+        if (!sub.active) return null
+        if (sub.reminders.isEmpty()) return null
+
+        // ========== 2. 基准实例过期则按周期向前滚动 ==========
+        var renewal = sub.nextRenewalTs
+        var cycles = 0
+        while (renewal <= nowMs) {
+            // 达到防御性上限仍落过去 → 视为异常数据, 放弃提醒。
+            if (cycles >= MAX_CYCLE_LOOKAHEAD) return null
+            renewal = rollRenewal(renewal, sub.billingCycle, sub.customDays) ?: return null
+            cycles++
+        }
+
+        // ========== 3. 在未来提醒候选中取最小值 ==========
+        return earliestFutureReminder(renewal, sub.reminders, nowMs)
+    }
+
+    /**
+     * 计算保单条目的下一次到期提醒时刻（一次性基准, 不滚动）。
+     *
+     * 算法骨架：
+     *   1. 早退 —— active=false 或 reminders 为空 → 返回 null；
+     *   2. 基准实例固定 = policy.expiryTs（保单到期是一次性事件, 不做周期滚动）；
+     *   3. 候选 { expiryTs - r*60000 | r in reminders, r>=0 } 过滤 > nowMs 取最小；
+     *      全部已过期 → null。
+     *
+     * @param policy 保单入参 DTO
+     * @param nowMs 当前时刻（Unix 毫秒）
+     * @return 最近一次未来提醒的 Unix 毫秒；无候选时返回 null
+     */
+    fun nextPolicyExpiry(policy: PolicyLike, nowMs: Long): Long? {
+        if (!policy.active) return null
+        if (policy.reminders.isEmpty()) return null
+        return earliestFutureReminder(policy.expiryTs, policy.reminders, nowMs)
+    }
+
+    /**
+     * 计算借款条目的下一次到期提醒时刻（一次性基准, 不滚动）。
+     *
+     * 算法骨架：
+     *   1. 早退 —— status=="paid"（已结清）或 reminders 为空 → 返回 null；
+     *      active / partially_paid / overdue 三种状态均继续提醒（逾期未还更应提醒）；
+     *   2. 基准实例固定 = loan.dueTs（借款到期是一次性事件）；
+     *   3. 候选 { dueTs - r*60000 | r in reminders, r>=0 } 过滤 > nowMs 取最小；
+     *      全部已过期 → null。
+     *
+     * @param loan 借款入参 DTO
+     * @param nowMs 当前时刻（Unix 毫秒）
+     * @return 最近一次未来提醒的 Unix 毫秒；无候选时返回 null
+     */
+    fun nextLoanDue(loan: LoanLike, nowMs: Long): Long? {
+        // 已结清借款不再提醒；其余状态（含 overdue 逾期）一律继续提醒。
+        if (loan.status == "paid") return null
+        if (loan.reminders.isEmpty()) return null
+        return earliestFutureReminder(loan.dueTs, loan.reminders, nowMs)
+    }
+
+    // ============================================================================
     // 私有工具方法 —— 本地日历推理（与 4b Recurrence.kt 同款算法骨架）
     // ============================================================================
+
+    /**
+     * v2 订阅续费实例按计费周期向前滚动一个周期（TR-4.1）。
+     *
+     * 走 java.time 系统时区 LocalDateTime 日历加法, 保留原 ts 的时分秒；
+     * 与本文件 localPartsOfAsUtc 同一 CST 偏移口径（CST 无夏令时, 两种拆法等价）。
+     *
+     * @return 滚动后的 Unix 毫秒；周期非法或 customDays 缺失/非正时返回 null
+     */
+    private fun rollRenewal(ts: Long, billingCycle: String, customDays: Long?): Long? {
+        val base = toLocalDateTime(ts)
+        val next = when (billingCycle) {
+            "monthly" -> base.plusMonths(1L)
+            "quarterly" -> base.plusMonths(3L)
+            "yearly" -> base.plusYears(1L)
+            "custom_days" -> {
+                // custom_days 必须显式给出正整数天数；否则数据非法, 不提醒。
+                if (customDays == null || customDays <= 0L) return null
+                base.plusDays(customDays)
+            }
+            // 未知周期字符串防御性处理。
+            else -> return null
+        }
+        return fromLocalDateTime(next)
+    }
+
+    /**
+     * 计算基准时刻的未来提醒候选最小值（v2 三函数共享口径）。
+     *
+     * 候选 = baseTs - r*60000（r 为提前分钟数; r=0 即基准时刻本身）；
+     * 负偏移（r<0, 语义为"之后提醒"）按防御性策略忽略；
+     * 仅保留严格 > nowMs 的候选, 返回其中最小值。
+     *
+     * @return 最近一次未来提醒 ms；无未来候选时返回 null
+     */
+    private fun earliestFutureReminder(baseTs: Long, reminders: List<Long>, nowMs: Long): Long? {
+        var best: Long? = null
+        for (r in reminders) {
+            if (r < 0L) continue
+            val candidate = baseTs - r * MINUTE_MS
+            // 严格大于 nowMs —— 与 v1 nextTrigger 的 filter { it > nowMs } 口径一致,
+            // 整点恰好等于 nowMs 视为已过, 不再触发。
+            if (candidate > nowMs && (best == null || candidate < best!!)) {
+                best = candidate
+            }
+        }
+        return best
+    }
+
+    /**
+     * Unix ms（CST 口径）→ 系统时区 LocalDateTime（保留时分秒）。
+     *
+     * 与 [localPartsOfAsUtc] 同一手法：ts 先加时区偏移再当 UTC 读,
+     * 得到的字段即 CST 本地日历分量。
+     */
+    private fun toLocalDateTime(ts: Long): LocalDateTime {
+        return Instant.ofEpochMilli(ts + TZ_OFFSET_MIN * MINUTE_MS)
+            .atOffset(ZoneOffset.UTC)
+            .toLocalDateTime()
+    }
+
+    /**
+     * 系统时区 LocalDateTime → Unix ms（[toLocalDateTime] 的逆运算）。
+     */
+    private fun fromLocalDateTime(ldt: LocalDateTime): Long {
+        return ldt.toInstant(ZoneOffset.UTC).toEpochMilli() - TZ_OFFSET_MIN * MINUTE_MS
+    }
 
     /**
      * "无时区 ts + offset" 拆成本地日历分量（与 4b Recurrence.kt 完全等价）。

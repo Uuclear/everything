@@ -40,6 +40,12 @@
     <string name="finance_reminder_statement_due_text">信用卡账单已生成，点击查看</string>
     <!-- 阶段 5 TR-6.2 / TR-6.3：还款日提醒文案（T-1 抽象） -->
     <string name="finance_reminder_payment_due_text">信用卡还款日临近，点击查看</string>
+    <!-- B4：v2 订阅续费提醒文案（抽象；不渲染服务商 / 金额 / 日期） -->
+    <string name="finance_reminder_subscription_renewal_due_text">订阅续费临近，点击查看</string>
+    <!-- B4：v2 保单到期提醒文案（抽象；不渲染保单号 / 保司 / 日期） -->
+    <string name="finance_reminder_policy_expiry_due_text">保单即将到期，点击查看</string>
+    <!-- B4：v2 借款到期提醒文案（抽象；不渲染对手方 / 金额 / 日期） -->
+    <string name="finance_reminder_loan_due_due_text">借款到期临近，点击查看</string>
 
     <!-- ============== CalendarScreen 容器 ============== -->
     <string name="event_calendar_title">日历</string>

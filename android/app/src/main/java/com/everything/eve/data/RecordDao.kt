@@ -34,6 +34,20 @@ interface RecordDao {
     @Query("SELECT * FROM records WHERE dirty = 1")
     suspend fun dirtyRecords(): List<RecordEntity>
 
+    /**
+     * 按 module + type 双键取全部**未删除**记录（stage5-finance-v2 B4：
+     * FinanceViewModel.hydrateV2 与 ReminderScheduler.rebuildChain 的 v2 三类
+     * 提醒扫描共用）。
+     *
+     * 墓碑行（deleted=1）天然排除；调用方逐条解密 + 容错，单条解析失败跳过。
+     *
+     * @param module records.module（finance 固定传 "finance"）。
+     * @param type records.type（subscription / policy / loan / contract）。
+     * @return 命中行（不保证顺序；v2 单用户量级为小集合）。
+     */
+    @Query("SELECT * FROM records WHERE module = :module AND type = :type AND deleted = 0")
+    suspend fun getActiveByModuleType(module: String, type: String): List<RecordEntity>
+
     /** 按 module 统计本地已采集条数（采集页状态行展示用，deleted 也计入存量）。 */
     @Query("SELECT COUNT(*) FROM records WHERE module = :module")
     fun countByModule(module: String): Flow<Int>
