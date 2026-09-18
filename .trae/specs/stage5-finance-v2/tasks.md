@@ -187,9 +187,24 @@
 
 ## Task 4: 后 3 类提醒 + aggregator loan 启用（P0）
 
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: Task 1 + Task 2
+- **Completion Evidence**:
+  - **Pass Condition**: 3 个 v2 提醒纯函数双端镜像 + aggregator loan 启用（include_in_net_assets）+ Scheduler/Receiver 3 类分支 + 3 条零知识文案 + 三端 fixture SHA-256 一致 + 单测 Android ≥30 / Web ≥12；五门禁全绿（Android 366/366 + compileDebugKotlin；web 513/513 + vue-tsc 0 + vite build）。
+  - **Status**: `completed`（2026-09-18 提交 `67c18ef`，待推送 main）。
+  - **Completion Evidence**:
+    - TR-4.1：`NextCardFiring.kt` 增 `nextSubscriptionRenewal`（renewal≤now 按 monthly+1 月/quarterly+3 月/yearly+1 年/custom_days+N 天系统时区日历滚动，保留时分秒；未知 cycle 基准过期返 null；24 周期防御上限）/ `nextPolicyExpiry`（expiry 一次性不滚动）/ `nextLoanDue`（仅 status=paid 早退，未知 status 照常提醒）+ SubscriptionLike/PolicyLike/LoanLike DTO；候选统一 `base - r*60000`（r≥0、严格 >now 取最小）；web `nextCardFiring.ts` 字节级镜像 + 3 个 toXxxLike 适配器，语义零差异。
+    - TR-4.2：双端 `netWorth(..., loans=[])` 新增末位默认参——`includeInNetAssets=false` 跳过；剩余本金 = principal−paid 钳位 ≥0；direction=lent 计资产、borrowed 计负债，净资产恒等式自然得 "net += lent − borrowed"；DashboardSnapshot 七字段结构不变（不新增 loanCount）；`monthlyReport(..., loans=[])` 加预留入参（本金非 income/expense 不累加，Task 5 多币种折算预留）。
+    - TR-4.3：`ReminderScheduler.rebuildChain` 新增 v2 取数层 `loadV2Trigger`（records 表 getActiveByModuleType 三类 → decryptFinanceV2 → V2PayloadCodec.decode → Like DTO，逐条 runCatching 容错）+ 纯函数 `selectBestV2Trigger`（triggerTs/kindRank/id 字典序）；event/card/v2 三源统一 (ts, rank) 合并，tie-break 固定 event(0)>card(1)>subscription(2)>policy(3)>loan(4)，与旧双分支行为等价；胜出仍走 `scheduleNextFinance` 同一 requestCode 单闹钟，严禁新链路；全空走原 cancel 路径。
+    - TR-4.4：`ReminderReceiver` 启用集合扩为 5 类，新增 `handleV2FinanceModule`——records.getById 取行校验 module=finance/deleted=0 → 解密 decode → 按 kind 二次校验（subscription/policy 须 active=true，loan 须 status≠paid）→ 抽象文案；记录删除/解密失败/状态失效静默忽略且链式 rebuildChain 仍触发。
+    - TR-4.5：strings.xml 三条零知识文案——订阅续费临近/保单即将到期/借款到期临近，"点击查看"收尾；不含金额、续费/到期日期、对手方、保单号、名称任何业务字段。
+    - 配套债务清理（recon 发现 B2 v2 仅内存 CRUD，重启后调度无数据源）：新建 `V2PayloadCodec.kt`（四类 camelCase↔snake_case 明文 JSON，字段与 web types.ts 逐一对齐，缺字段容错不抛）；`RecordsRepository` 增 `upsertFinanceV2`/`upsertFinanceV2Tombstone`/`decryptFinanceV2`（复用 v1 envelope，AAD `eve:v1:record:{id}:finance:BE(version)` 不变）；RecordDao 增 `getActiveByModuleType`；FinanceModule 增 4 个 TYPE 常量；VM 四 upsert/delete 还清 8 处 TODO（内存语义与返回值不变，viewModelScope best-effort 密封上行 + 墓碑，init hydrateV2 下行回填）；FinanceViewModelV2Test 补 Dispatchers.setMain 基建。
+    - TR-4.6：双端共享 fixture 两份经 Get-FileHash 实测字节级一致——`next-v2-firing-cases.json` SHA-256=`c4ea61f7cc17c177ec93fc8cafc4b0cb616d8267ca79eb77bc17440f26edcb76`（15 case：sub 8/policy 4/loan 3，锚点 now=1782619200000 = 2026-06-28 12:00 CST）；`aggregator-v2-cases.json` SHA-256=`9e5fd8761458df070b7cd6b9e362cdd4b9869cdfb4cba6b4fa6ab9a5b291db88`（9 case）；Android 四测试类 companion 硬编码 hash + MessageDigest 断言，web 两 spec 用 node:crypto/Vite ?raw 双路径断言同常量。
+    - TR-4.7：Android 新增 **50** 用例（NextSubscriptionRenewalTest 12 + NextPolicyExpiryTest 10 + NextLoanDueTest 11 + FinanceAggregatorV2Test 10 + ReminderSchedulerFinanceTest 追加 7，要求各 ≥6 全满足），全量 **366/366**（较 B3 的 316 净增 50）；Web 新增 **25** 用例（nextCardFiring-v2.spec 16 + aggregator-v2.spec 9），全量 **513/513 / 34 files**（较 B3 的 488 净增 25）。
+    - 门禁：Android `testDebugUnitTest 366/366`（0 failure）+ `compileDebugKotlin 0 error`；Web `vitest 513/513` + `vue-tsc --noEmit exit 0` + `vite build exit 0`。
+    - Diff：commit `67c18ef` 25 files / +4660 / −62（11 新增：1 codec + 4 Android 测试 + 2 Android fixture + 2 web fixture + 2 web spec；14 修改；临时脚本 `.trae/parse-junit.ps1`、`tmp_calculate_times.ps1` 明确排除）。
+    - 已知边界（v3 候选）：hydrateV2 为 VM init 一次性拉取，存活期内多端同步下行需 VM 重建刷新；Web 端仅纯计算 upcomingV2Reminders 出口，真浏览器通知属 G-7；loan 分期 repayment_installment 按 spec 延后 v3。
 - **Description**:
   - 修改 `android/app/src/main/java/com/everything/eve/reminder/NextCardFiring.kt`：
     增加 `nextSubscriptionRenewal(...)` / `nextPolicyExpiry(...)` / 
