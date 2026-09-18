@@ -40,6 +40,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -64,13 +65,20 @@ private const val DAY_MS = 86_400_000L
  * 财务看板 Composable。
  *
  * @param vm 注入 FinanceViewModel（默认从 viewModel() 取）。
+ * @param onOpenSettings B5 回调：点击"默认币种 / 汇率包导入"入口时全屏打开
+ *   RatesImportScreen（由 FinanceScreen 切 settingsMode）。
  */
 @Composable
-fun FinanceDashboard(vm: FinanceViewModel) {
+fun FinanceDashboard(
+    vm: FinanceViewModel,
+    onOpenSettings: () -> Unit = {},
+) {
     val state by vm.state.collectAsState()
     val dashboard = state.dashboard
     val monthly = state.monthly
     val budget = state.budget
+    // B5 入口按钮标签随默认币种实时刷新。
+    val defaultCurrency by vm.defaultCurrencyState.collectAsState()
 
     Column(
         modifier = Modifier
@@ -79,6 +87,32 @@ fun FinanceDashboard(vm: FinanceViewModel) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        // ========== B5 入口行：默认币种 / 汇率包导入（点击进全屏设置） ==========
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics { testTag = "dashboard_rate_entry_row" },
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            TextButton(
+                onClick = onOpenSettings,
+                modifier = Modifier.semantics { testTag = "dashboard_default_currency_entry" },
+            ) {
+                Text(
+                    stringResource(
+                        R.string.finance_dashboard_default_currency_entry,
+                        defaultCurrency,
+                    ) + " ▾",
+                )
+            }
+            TextButton(
+                onClick = onOpenSettings,
+                modifier = Modifier.semantics { testTag = "dashboard_rate_import_entry" },
+            ) {
+                Text(stringResource(R.string.finance_dashboard_rate_entry))
+            }
+        }
+
         // 净资产大字 + 计数
         Card(
             modifier = Modifier
@@ -100,9 +134,14 @@ fun FinanceDashboard(vm: FinanceViewModel) {
                     style = MaterialTheme.typography.headlineLarge,
                     modifier = Modifier.semantics { testTag = "dashboard_net_worth" },
                 )
+                // B5：数字卡后缀显示折算目标币（dashboard.targetCurrency 随聚合入参更新）。
                 Text(
-                    text = stringResource(R.string.finance_dashboard_currency_cny),
+                    text = stringResource(
+                        R.string.finance_dashboard_target_currency_format,
+                        dashboard.targetCurrency,
+                    ),
                     style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.semantics { testTag = "dashboard_target_currency" },
                 )
             }
         }

@@ -52,6 +52,7 @@ import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.everything.eve.R
+import com.everything.eve.ui.settings.RatesImportScreen
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -76,6 +77,9 @@ fun FinanceScreen(
     // 编辑器路由态（null = 不显示编辑器）
     var editingKind by remember { mutableStateOf<FinanceEditorKind?>(null) }
     var editingId by remember { mutableStateOf<String?>(null) }
+
+    // B5 设置屏路由态（false = 不显示；全屏承载 RatesImportScreen，返回态仿编辑器）
+    var settingsMode by remember { mutableStateOf(false) }
 
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -111,6 +115,15 @@ fun FinanceScreen(
                 editingKind = null
                 editingId = null
             },
+        )
+        return
+    }
+
+    // B5 设置模式：汇率包导入 / 默认币种（全屏承载，交互骨架与编辑器一致）
+    if (settingsMode) {
+        RatesImportScreen(
+            vm = vm,
+            onClose = { settingsMode = false },
         )
         return
     }
@@ -164,7 +177,10 @@ fun FinanceScreen(
                     .padding(horizontal = 0.dp),
             ) {
                 when (tab) {
-                    FinanceRoutes.TAB_DASHBOARD -> FinanceDashboard(vm = vm)
+                    FinanceRoutes.TAB_DASHBOARD -> FinanceDashboard(
+                        vm = vm,
+                        onOpenSettings = { settingsMode = true },
+                    )
                     FinanceRoutes.TAB_ACCOUNTS -> FinanceAccountList(
                         vm = vm,
                         onAdd = {

@@ -16,6 +16,7 @@ package com.everything.eve.data.finance
  *     - "policy"       —— 保单
  *     - "loan"         —— 应收借款
  *     - "contract"     —— 合同 / 发票
+ *     - "rate"         —— 离线汇率包（B5 多币种折算；整包一条 records 行）
  */
 object FinanceModule {
     /** records module 字段值（AAD / 路由都用）。 */
@@ -49,4 +50,17 @@ object FinanceModule {
 
     /** 子类型：合同 / 发票（v2）。 */
     const val TYPE_CONTRACT: String = "contract"
+
+    // ============================================================================
+    // B5 多币种折算（stage5-finance-v2 / FR-V2-C.2）
+    // ============================================================================
+
+    /**
+     * 子类型：离线汇率包（B5）。
+     *
+     * 一个生效时刻整包一条 records 行（id = "rate@${effective_ts}"），
+     * 明文载荷契约见 [com.everything.eve.finance.RateTables.parse]；
+     * 本地 finance_rate 表按货币对拆行冗余缓存，密文以 records 通道为准。
+     */
+    const val TYPE_RATE: String = "rate"
 }

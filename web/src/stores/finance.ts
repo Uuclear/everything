@@ -68,10 +68,12 @@ import type {
   FinanceV2Payload,
 } from '../finance/types'
 import {
+  DEFAULT_CURRENCY,
   FINANCE_MODULE,
   validateV2Payload,
   type ValidationResult,
 } from '../finance/types'
+import { parseRateTable, type RateTable } from '../finance/rateTable'
 import {
   defaultAttachmentChannel,
   uploadFile,
@@ -116,6 +118,28 @@ export interface PersistedFinanceState {
   policies: FinancePolicy[]
   loans: FinanceLoan[]
   contracts: FinanceContract[]
+  /**
+   * B5 离线汇率表（stage5-finance-v2 / FR-V2-C.2、FR-V2-C.3）。
+   *
+   * 可选字段：旧本地数据（schemaVersion=1/2 早期形态）无此字段，hydrate
+   * 时降级为 null（不升 schemaVersion，保持 2）；null 表示未导入汇率包，
+   * aggregator 一律按面值 1:1 口径计入。
+   */
+  rateTable?: RateTable | null
+  /**
+   * B5 默认 / 折算目标币种（ISO 4217 三字母代码；缺省即 DEFAULT_CURRENCY
+   * = "CNY"）。旧本地数据无此字段时 hydrate 降级 "CNY"。
+   */
+  defaultCurrency?: string
+  /**
+   * B5 汇率包 records 通道信封版本表（FR-V2-C.2）。
+   *
+   * key = 汇率包确定性记录 id（`rate@${effective_ts}`，与 Android
+   * RateTableRepository 同键），value = 最近一次成功上行 / 下行的信封 version。
+   * 同一生效时刻重复导入时 version 必须严格递增，否则服务端 LWW 判 skipped。
+   * 可选字段：旧本地数据无此字段时降级空表。
+   */
+  rateRecordVersions?: Record<string, number>
 }
 
 /** localStorage key —— `eve:finance:v1`（spec §持久化 §6 一致）。 */
@@ -162,8 +186,14 @@ function defaultStorageChannel(): StorageChannel {
  * loan / contract）；AAD `type` 标识区分 v2 子类型，records 通道复用。
  */
 export interface CryptoChannel {
-  /** 密封一条明文 payload → 密文 Base64。 */
-  seal(payload: FinancePayloadAll, id: string, version: number): string
+  /**
+   * 密封一条明文 payload → 密文 Base64。
+   *
+   * 入参含业务 payload（FinancePayloadAll）与非业务记录（B5 汇率包
+   * type='rate'：{version,effective_ts,rates} 普通对象）；默认实现只做
+   * JSON.stringify，两类对象同一路径密封，AAD 均为 module='finance'。
+   */
+  seal(payload: FinancePayloadAll | Record<string, unknown>, id: string, version: number): string
   /** 解密一条密文（Base64）→ 明文 payload。失败抛异常。 */
   open(id: string, module: string, ciphertextB64: string, version: number): FinancePayloadAll
   /** 推送到远端 records。 */
@@ -306,6 +336,21 @@ export const useFinanceStore = defineStore('finance', () => {
   const lastSyncAt = ref(0)
   /** 增量游标：最近一次成功推送/拉取的最大 updated_at（毫秒）。 */
   let since = 0
+
+  // ========== B5 多币种汇率状态（stage5-finance-v2 / FR-V2-C.1 ~ C.3） ==========
+  /**
+   * 已导入的离线汇率表（null = 未导入；aggregator 按面值 1:1 口径计入）。
+   * 仅手动 JSON 导入产生（parseRateTable 校验通过后赋值），本批次不接网络。
+   */
+  const rateTable = ref<RateTable | null>(null)
+  /** 默认币种（看板 / 月报折算目标币；ISO 4217 三字母代码，缺省 CNY）。 */
+  const defaultCurrency = ref<string>(DEFAULT_CURRENCY)
+  /**
+   * 已上行 / 下行汇率包的信封版本（key=`rate@${effectiveTs}`）。
+   * 同生效时刻重复导入时 version 在此基础上 +1，避免服务端 LWW 判 skipped；
+   * 随持久化落盘，跨刷新保留。
+   */
+  const rateRecordVersions = ref<Record<string, number>>({})
 
   // ========== 计算属性 ==========
 
@@ -576,6 +621,38 @@ export const useFinanceStore = defineStore('finance', () => {
    * 解密后立即调 validateV2Payload 兜底（保证入栈前数据合规）。
    */
   function ingest(remote: RemoteRecord): void {
+    // ========== B5 汇率包分支（type='rate'；FR-V2-C.2） ==========
+    // 汇率包不是业务 payload（无账户/卡/四子类型缓存 Map），在此提前路由，
+    // 不走下方业务墓碑删除与 v2 校验逻辑。
+    if (remote.type === 'rate') {
+      // 汇率包以"新生效时刻覆盖"为语义，无行级删除；墓碑忽略。
+      if (remote.deleted) return
+      try {
+        // channel.open 运行时就是 JSON.parse；汇率包按普通对象解密后再交给
+        // parseRateTable 严格校验（坏包 / 非预期明文直接丢弃，不污染看板）。
+        const obj = channel.open(
+          remote.id,
+          remote.module,
+          remote.ciphertext,
+          remote.version,
+        ) as unknown as Record<string, unknown>
+        const table = parseRateTable(JSON.stringify(obj))
+        // 记录信封版本（供同生效时刻再次导入时 version 递增）。
+        rateRecordVersions.value = {
+          ...rateRecordVersions.value,
+          [remote.id]: remote.version,
+        }
+        // 多包并存时取 effectiveTs 最大者（与 Android latest() 口径一致）。
+        if (rateTable.value == null || table.effectiveTs >= rateTable.value.effectiveTs) {
+          rateTable.value = table
+        }
+        persist()
+      } catch {
+        // MK 未就绪 / 密文损坏 / 包格式非法 → 跳过该条，不阻塞其他记录 ingest。
+      }
+      return
+    }
+
     // 墓碑：按 type 路由删除本地缓存。
     if (remote.deleted) {
       accounts.delete(remote.id)
@@ -732,6 +809,139 @@ export const useFinanceStore = defineStore('finance', () => {
     return true
   }
 
+  // ========== B5 离线汇率包 / 默认币种（FR-V2-C.1、FR-V2-C.2） ==========
+
+  /**
+   * 导入 spec FR-V2-C.2 离线汇率包明文 JSON。
+   *
+   * 流程：
+   *  1. parseRateTable 全量校验（version / effective_ts / rates 键值）；
+   *     失败 → 状态保持不变，返回 ok:false 与中文错误原因（UI 层 NMessage）；
+   *  2. 成功 → 覆写 rateTable + persist（本地即时可用，未解锁 / 离线也生效）；
+   *  3. **加密上行（FR-V2-C.2）**：确定性记录 id=`rate@${effectiveTs}`
+   *     （与 Android RateTableRepository 同键），version 按 rateRecordVersions
+   *     严格递增，经 channel.seal 密封后 channel.push 推 records 通道
+   *     type='rate'；skipped（版本竞争）→ 触发全量补拉对账；
+   *  4. 上行异常（MK 未就绪 / 网络）不回滚本地状态，synced=false 告知调用方；
+   *     对端可由下一次同生效时刻导入补推（汇率包幂等覆盖）。
+   *
+   * @param json 汇率包明文 JSON 字符串（FileReader.readAsText 产物）
+   */
+  async function importRateTable(
+    json: string,
+  ): Promise<{ ok: true; table: RateTable; synced: boolean } | { ok: false; error: string }> {
+    let table: RateTable
+    try {
+      table = parseRateTable(json)
+    } catch (e) {
+      // parseRateTable 抛出的 message 已是中文人类可读说明；非 Error 兜底。
+      const error = e instanceof Error ? e.message : '汇率包导入失败：未知错误'
+      return { ok: false, error }
+    }
+
+    // 本地先落地：解锁 / 离线状态下导入也立即可用于看板折算。
+    rateTable.value = table
+    persist()
+
+    // records 通道加密上行（best-effort；与 Android upsertFinanceV2 同语义）。
+    let synced = false
+    try {
+      const id = ratePackageId(table.effectiveTs)
+      const version = (rateRecordVersions.value[id] ?? 0) + 1
+      const now = Date.now()
+      const ciphertext = channel.seal(JSON.parse(json) as Record<string, unknown>, id, version)
+      const res = await channel.push({
+        id,
+        module: FINANCE_MODULE,
+        type: 'rate',
+        ciphertext,
+        version,
+        device_id: 'web',
+        created_at: now,
+        updated_at: now,
+        deleted: false,
+      })
+      if (res.skipped > 0) {
+        // 版本竞争：以服务端为准全量补拉（ingest 内会刷新表与版本号）。
+        await pullAll(0)
+      } else {
+        rateRecordVersions.value = { ...rateRecordVersions.value, [id]: version }
+        persist()
+        synced = true
+      }
+    } catch {
+      // 未解锁 / 离线 / 推送失败：本地表已落地，synced=false 由 UI 提示，不回滚。
+    }
+    return { ok: true, table, synced }
+  }
+
+  /** 汇率包 records 通道确定性 id（与 Android RateTableRepository 同键）。 */
+  function ratePackageId(effectiveTs: number): string {
+    return `rate@${effectiveTs}`
+  }
+
+  /**
+   * 设置默认币种（看板 / 月报折算目标币）。
+   *
+   * 仅接受 ISO 4217 粗校验（/^[A-Z]{3}$/，3 位大写字母）；小写 / 长度不符
+   * 一律拒绝且状态不变。预设 CNY/USD/EUR/JPY/HKD 由 UI 层提供，store 不内置。
+   *
+   * @returns true 表示已更新并持久化；false 表示校验拒绝
+   */
+  function setDefaultCurrency(code: string): boolean {
+    if (typeof code !== 'string' || !/^[A-Z]{3}$/.test(code)) return false
+    defaultCurrency.value = code
+    persist()
+    return true
+  }
+
+  /**
+   * 移除当前汇率包（设置页"移除当前汇率包"按钮；二次确认在 UI 层完成）。
+   * 移除后 rateTable=null，看板回到 v1 面值 1:1 口径；默认币种设置保留。
+   */
+  function clearRateTable(): void {
+    rateTable.value = null
+    persist()
+  }
+
+  /**
+   * hydrate 辅助：从持久化形态还原 RateTable。
+   *
+   * 旧本地数据无该字段（undefined）→ null；字段存在但形态被破坏（本地
+   * JSON 损坏 / 手工篡改）时同样安全降级 null，不阻断其余条目 hydrate。
+   */
+  function restoreRateTable(raw: unknown): RateTable | null {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+    const obj = raw as Record<string, unknown>
+    if (
+      typeof obj.effectiveTs !== 'number'
+      || !Number.isFinite(obj.effectiveTs)
+      || obj.effectiveTs < 0
+    ) {
+      return null
+    }
+    const rates = obj.rates
+    if (rates === null || typeof rates !== 'object' || Array.isArray(rates)) return null
+    return { effectiveTs: obj.effectiveTs, rates: rates as Record<string, number> }
+  }
+
+  /**
+   * hydrate 辅助：从持久化形态还原汇率包信封版本表。
+   *
+   * 仅接受 key 为字符串、value 为正整数的条目；null / 非对象 / 被篡改字段
+   * 一律安全降级为空表（最坏后果是下次导入从 version=1 重新对账）。
+   */
+  function restoreRateVersions(raw: unknown): Record<string, number> {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    const out: Record<string, number> = {}
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof k === 'string' && k.startsWith('rate@') && Number.isInteger(v) && (v as number) > 0) {
+        out[k] = v as number
+      }
+    }
+    return out
+  }
+
   // ========== 启动 hydration ==========
 
   /**
@@ -756,6 +966,16 @@ export const useFinanceStore = defineStore('finance', () => {
       return
     }
     schemaVersion.value = state.schemaVersion
+    // B5：还原汇率表与默认币种；旧本地数据缺这两个字段时安全降级
+    // （null / DEFAULT_CURRENCY），不升 schemaVersion（保持 2）。
+    rateTable.value = restoreRateTable(state.rateTable)
+    defaultCurrency.value =
+      typeof state.defaultCurrency === 'string'
+      && /^[A-Z]{3}$/.test(state.defaultCurrency)
+        ? state.defaultCurrency
+        : DEFAULT_CURRENCY
+    // 还原汇率包信封版本表；仅接受 value 为正整数的键，其余丢弃。
+    rateRecordVersions.value = restoreRateVersions(state.rateRecordVersions)
     // 还原 v1 三类条目。
     for (const acc of state.accounts ?? []) {
       accounts.set(acc.id, {
@@ -876,6 +1096,12 @@ export const useFinanceStore = defineStore('finance', () => {
       contracts: Array.from(contracts.values())
         .filter((r) => !r.deleted)
         .map((r) => r.data as unknown as FinanceContract),
+      // B5：汇率表与默认币种随同一 StorageState 明文落盘（与既有字段同级）。
+      // 汇率包密文另走 records 通道 type='rate' 加密上行（见 importRateTable）；
+      // rateRecordVersions 记录本地上行 / 下行信封版本，支撑同键重复导入递增。
+      rateTable: rateTable.value,
+      defaultCurrency: defaultCurrency.value,
+      rateRecordVersions: { ...rateRecordVersions.value },
     }
     storage.write(state)
   }
@@ -1292,6 +1518,10 @@ export const useFinanceStore = defineStore('finance', () => {
     since = 0
     lastSyncAt.value = 0
     hydrated.value = false
+    // B5：登出 / 重新锁定时汇率状态一并清空（用户本地偏好，不跨账号残留）。
+    rateTable.value = null
+    defaultCurrency.value = DEFAULT_CURRENCY
+    rateRecordVersions.value = {}
   }
 
   /**
@@ -1327,6 +1557,10 @@ export const useFinanceStore = defineStore('finance', () => {
     _attachmentChannel = null
     hydrated.value = false
     since = 0
+    // B5：测试间隔离，汇率状态恢复默认。
+    rateTable.value = null
+    defaultCurrency.value = DEFAULT_CURRENCY
+    rateRecordVersions.value = {}
   }
 
   // ========== 附件 CRUD（TR-3.3） ==========
@@ -1389,6 +1623,14 @@ export const useFinanceStore = defineStore('finance', () => {
     hydrated,
     syncing,
     lastSyncAt,
+    // B5 多币种汇率状态（FR-V2-C.1 ~ C.3）
+    rateTable,
+    defaultCurrency,
+    /** 汇率包信封版本表（只读暴露；测试与未来 push 对账消费，写入仅经 import/ingest）。 */
+    rateRecordVersions,
+    importRateTable,
+    setDefaultCurrency,
+    clearRateTable,
     // 计算属性
     listAccounts,
     listCards,

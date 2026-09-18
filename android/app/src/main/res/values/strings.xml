@@ -363,4 +363,27 @@
     <string name="finance_attachment_size_exceeded">附件大小超出 50MB 限制</string>
     <string name="finance_attachment_delete_confirm_title">删除附件</string>
     <string name="finance_attachment_delete_confirm_message">确定删除此附件？</string>
+
+    <!-- ============== B5 汇率包与默认币种设置（FR-V2-C.2 / FR-V2-C.3；16 条） ============== -->
+    <string name="finance_rates_title">汇率与默认币种</string>
+    <string name="finance_rates_back">返回</string>
+    <string name="finance_rates_section_default_currency">默认折算币种</string>
+    <string name="finance_rates_custom_currency_label">其他币种代码（3 位大写字母）</string>
+    <string name="finance_rates_currency_invalid">币种代码需为 3 位大写字母（如 CNY）</string>
+    <string name="finance_rates_package_section">当前汇率包</string>
+    <string name="finance_rates_not_imported">未导入</string>
+    <string name="finance_rates_effective_date">生效日期：%1$s</string>
+    <string name="finance_rates_pair_count">货币对数量：%1$d</string>
+    <string name="finance_rates_select_file">选择汇率包 JSON</string>
+    <string name="finance_rates_import_success">汇率包导入成功</string>
+    <string name="finance_rates_import_failed">汇率包导入失败</string>
+    <string name="finance_rates_read_failed">文件读取失败</string>
+    <string name="finance_rates_preview_title">汇率明细</string>
+    <string name="finance_rates_zero_knowledge_note">汇率本身为公开数据，仍经端侧加密通道同步</string>
+    <string name="finance_rates_pair_row_format">%1$s = %2$s</string>
+
+    <!-- ============== B5 Dashboard 入口与折算币种后缀 ============== -->
+    <string name="finance_dashboard_default_currency_entry">默认币种：%1$s</string>
+    <string name="finance_dashboard_rate_entry">汇率包导入</string>
+    <string name="finance_dashboard_target_currency_format">折算币种：%1$s</string>
 </resources>

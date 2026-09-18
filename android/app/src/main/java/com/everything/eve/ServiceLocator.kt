@@ -8,6 +8,7 @@ import com.everything.eve.data.RecordsRepository
 import com.everything.eve.data.event.EventsRepository
 import com.everything.eve.data.finance.AttachmentRepository
 import com.everything.eve.data.finance.FinanceRepository
+import com.everything.eve.data.finance.RateTableRepository
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.runBlocking
@@ -40,6 +41,9 @@ object ServiceLocator {
     // 阶段 5 v2 / TR-3.2：财务附件仓库（policy / contract 挂的合同扫描件 / 保单 PDF）；
     // 独立于 financeRepo，单独走 AttachmentDao + records.type="attachment" 通道。
     lateinit var attachmentRepo: AttachmentRepository
+        private set
+    // 阶段 5 v2 / B5：离线汇率包仓库（finance_rate 本地拆行表 + records.type="rate" 通道）。
+    lateinit var rateTableRepository: RateTableRepository
         private set
     lateinit var db: EveDatabase
         private set
@@ -85,6 +89,13 @@ object ServiceLocator {
         // CollectorWorker 末尾调用 pullAndDecrypt + pushChanges 调度上行下行。
         attachmentRepo = AttachmentRepository(
             attachmentDao = db.attachmentDao(),
+            recordsRepository = repo,
+            auth = auth,
+        )
+        // 阶段 5 v2 / B5：离线汇率包仓库（FinanceRateDao 拆行表 + records 通道复用）；
+        // CollectorWorker 末尾调 pullAndDecrypt + pushChanges 对账。
+        rateTableRepository = RateTableRepository(
+            rateDao = db.financeRateDao(),
             recordsRepository = repo,
             auth = auth,
         )

@@ -54,6 +54,7 @@ import com.everything.eve.finance.PolicyRecord
 import com.everything.eve.finance.SubscriptionRecord
 import com.everything.eve.finance.ValidationResult
 import com.everything.eve.finance.NextCardFiring
+import com.everything.eve.finance.RateTable
 import com.everything.eve.finance.V2PayloadCodec
 import com.everything.eve.reminder.ReminderScheduler
 import kotlinx.coroutines.Dispatchers
@@ -61,6 +62,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -333,8 +335,29 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
     /** v2 contract 内存列表。 */
     private val contractsFlow = MutableStateFlow<List<ContractRecord>>(emptyList())
 
+    // =============================================================================
+    // B5 多币种折算状态（stage5-finance-v2 / FR-V2-C.2、FR-V2-C.3）
+    // ============================================================================
+    // rateTable：最新生效汇率包（null=未导入，聚合按面值口径不折算）；
+    // defaultCurrency：看板 / 月报折算目标币（默认 CNY，持久化在 eve-finance prefs）。
+    // 二者都进 [state] 的 combine，驱动 netWorth / monthlyReport 的折算口径；
+    // 同时以独立只读 StateFlow 暴露给 RatesImportScreen 展示状态。
+    // ============================================================================
+
+    /** 最新汇率表（私有可变源；导入 / 启动回填写入）。 */
+    private val rateTableFlow = MutableStateFlow<RateTable?>(null)
+
+    /** 最新汇率表只读流（RatesImportScreen 订阅展示）。 */
+    val rateTableState = rateTableFlow.asStateFlow()
+
+    /** 默认折算目标币（私有可变源；设置屏 / 启动回填写入）。 */
+    private val defaultCurrencyFlow = MutableStateFlow(FinanceSettings.DEFAULT_CURRENCY)
+
+    /** 默认折算目标币只读流（Dashboard 入口与设置屏订阅）。 */
+    val defaultCurrencyState = defaultCurrencyFlow.asStateFlow()
+
     /**
-     * VM 创建即从 records 通道回填 v2 四类记录。
+     * VM 创建即从 records 通道回填 v2 四类记录，并回填 B5 汇率表与默认币种。
      *
      * 时机选择：v1 账户 / 卡 / 流水通过 Room Flow 在 [state] 的 combine 中自动
      * 可用（VM 创建后首个订阅者即拿到全表）；v2 没有独立 Room 表，故在同一
@@ -344,6 +367,12 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     init {
         hydrateV2()
+        hydrateRateTable()
+        // 默认币种取自 eve-finance SharedPreferences；JVM 桩环境（Application 未
+        // mock getSharedPreferences）异常时回退默认 CNY，不阻断 VM 构造。
+        defaultCurrencyFlow.value = runCatching {
+            FinanceSettings.getDefaultCurrency(appCtx)
+        }.getOrDefault(FinanceSettings.DEFAULT_CURRENCY)
     }
 
     // =============================================================================
@@ -367,11 +396,14 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
      *   combine(vararg flows: Flow<T>, transform: suspend (Array<T>) -> R)
      * 在此统一存为 Array<Flow<Any?>>（运行时类型擦除），按索引解包。
      *
-     * 顺序约定（仅文档约束，**严禁改变顺序** —— v1 调用方按索引取值）：
-     *   [0] accounts    [4] sort        [8] subscriptions
-     *   [1] cards       [5] filter      [9] policies
-     *   [2] txs         [6] error       [10] loans
-     *   [3] search                        [11] contracts
+     * 顺序约定（仅文档约束，**严禁改变既有索引** —— 下游按索引取值）：
+     *   [0] accounts       [4] sort       [8]  policies
+     *   [1] cards          [5] filter     [9]  loans
+     *   [2] txs            [6] error      [10] contracts
+     *   [3] search         [7] subscriptions
+     *   B5 追加（顺延在末位，不挪动既有索引）：
+     *   [11] rateTable（RateTable?；null=未导入按面值口径）
+     *   [12] defaultCurrency（String；折算目标币，默认 CNY）
      */
     val state: kotlinx.coroutines.flow.StateFlow<FinanceUiState> = combine(
         financeRepo.observeAccounts(),
@@ -385,6 +417,8 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         policiesFlow as Flow<Any?>,
         loansFlow as Flow<Any?>,
         contractsFlow as Flow<Any?>,
+        rateTableFlow as Flow<Any?>,
+        defaultCurrencyFlow as Flow<Any?>,
     ) { values: Array<Any?> ->
         // 类型按索引解包（顺序与上文约定一致）。
         @Suppress("UNCHECKED_CAST")
@@ -405,6 +439,9 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         val loans = values[9] as List<LoanRecord>
         @Suppress("UNCHECKED_CAST")
         val contracts = values[10] as List<ContractRecord>
+        // B5：最新汇率表（null=未导入，按面值口径）与折算目标币。
+        val rateTable = values[11] as RateTable?
+        val targetCurrency = values[12] as String
 
         val dashboard = FinanceAggregator.netWorth(
             accounts.map { acc ->
@@ -414,7 +451,11 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
             },
             cards.map { card ->
                 FinanceAggregator.CardLike(
-                    id = card.id, kind = card.kind, usedLimit = card.usedLimit, archived = card.archived,
+                    id = card.id,
+                    kind = card.kind,
+                    usedLimit = card.usedLimit,
+                    archived = card.archived,
+                    currency = card.currency,
                 )
             },
             txs.map { tx ->
@@ -427,8 +468,24 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
                     category = tx.category,
                     occurredAt = tx.occurredAt,
                     transferToAccountId = tx.transferToAccountId,
+                    currency = tx.currency,
                 )
             },
+            // B4 LoanLike 适配 + B5 折算：direction/principalMinor/paidMinor/
+            // includeInNetAssets/currency/status 逐字段映射。
+            loans.map { loan ->
+                FinanceAggregator.LoanLike(
+                    id = loan.id,
+                    direction = loan.direction,
+                    principalMinor = loan.principalMinor,
+                    paidMinor = loan.paidMinor,
+                    includeInNetAssets = loan.includeInNetAssets,
+                    currency = loan.currency,
+                    status = loan.status,
+                )
+            },
+            targetCurrency = targetCurrency,
+            rateTable = rateTable,
         )
 
         val monthly = FinanceAggregator.monthlyReport(
@@ -443,8 +500,11 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
                     category = tx.category,
                     occurredAt = tx.occurredAt,
                     transferToAccountId = tx.transferToAccountId,
+                    currency = tx.currency,
                 )
             },
+            targetCurrency = targetCurrency,
+            rateTable = rateTable,
         )
         val budget = FinanceAggregator.budgetThreshold(monthly.income, monthly.expense, 0.8)
 
@@ -922,6 +982,89 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
                 // DB / MK / ServiceLocator 未就绪：保留内存现状，不打扰 UI。
             }
         }
+    }
+
+    // =============================================================================
+    // B5 汇率包与默认币种（stage5-finance-v2 / FR-V2-C.2、FR-V2-C.3）
+    // ============================================================================
+    // 汇率仓库走 ServiceLocator.rateTableRepository 直接懒取（与 persistV2 内
+    // 直接取 ServiceLocator.repo 同款；不引入 bind 注入）。MK / DB 未就绪的 JVM
+    // 桩环境由 try/catch 兜住，不阻断 VM 构造与既有链路。
+    // ============================================================================
+
+    /**
+     * VM 创建即从本地 finance_rate 表回填最新汇率包。
+     *
+     * ServiceLocator 未初始化（JVM 单测桩）/ DB 异常时静默保留 null，
+     * 聚合按面值口径降级（RateTable=null 不折算）。
+     */
+    private fun hydrateRateTable() {
+        viewModelScope.launch {
+            try {
+                rateTableFlow.value = ServiceLocator.rateTableRepository.latest()
+            } catch (_: Exception) {
+                // 未就绪：保持 null（未导入口径）。
+            }
+        }
+    }
+
+    /**
+     * 导入一份汇率包明文 JSON（设置屏 SAF 选文件后调用）。
+     *
+     * 同步返回 [Result]（与 [addAttachment] 同款设计：launch 在 viewModelScope
+     * 内执行；测试在 Dispatchers.setMain 的 UnconfinedTestDispatcher 下可立即
+     * 跑完，返回值即时反映成败）：
+     *  - 成功：rateTable state 更新为新包 + 发 SaveSucceeded 事件；
+     *  - 失败（包非法 / MK 未解锁 / DB 异常）：发 Error("rate_import_invalid")，
+     *    返回 [Result.failure]。
+     *
+     * @param json 汇率包明文 JSON（spec FR-V2-C.2 契约）。
+     */
+    fun importRateTable(json: String): Result<Unit> {
+        var outcome: Result<Unit> = Result.success(Unit)
+        viewModelScope.launch {
+            try {
+                val result = ServiceLocator.rateTableRepository.importPackage(json)
+                val table = result.getOrNull()
+                if (table != null) {
+                    rateTableFlow.value = table
+                    _eventChannel.trySend(
+                        FinanceUiEvent.SaveSucceeded("rate@${table.effectiveTs}"),
+                    )
+                } else {
+                    outcome = Result.failure(
+                        result.exceptionOrNull()
+                            ?: IllegalArgumentException("汇率包导入失败"),
+                    )
+                    _eventChannel.trySend(FinanceUiEvent.Error("rate_import_invalid"))
+                }
+            } catch (e: Exception) {
+                outcome = Result.failure(e)
+                _eventChannel.trySend(FinanceUiEvent.Error("rate_import_invalid"))
+            }
+        }
+        return outcome
+    }
+
+    /**
+     * 设置默认折算目标币种。
+     *
+     * 校验 3 位大写字母 ISO 代码（[FinanceSettings.isValidCurrencyCode]）：
+     *  - 合法：更新 state + 写 eve-finance SharedPreferences（写入 best-effort，
+     *    JVM 桩环境异常不影响内存态）；
+     *  - 非法：发 Error("default_currency_invalid") 事件并返回 [Result.failure]，
+     *    不更新 state。
+     */
+    fun setDefaultCurrency(code: String): Result<Unit> {
+        if (!FinanceSettings.isValidCurrencyCode(code)) {
+            _eventChannel.trySend(FinanceUiEvent.Error("default_currency_invalid"))
+            return Result.failure(
+                IllegalArgumentException("默认币种必须为 3 位大写字母代码（如 CNY）"),
+            )
+        }
+        defaultCurrencyFlow.value = code
+        runCatching { FinanceSettings.setDefaultCurrency(appCtx, code) }
+        return Result.success(Unit)
     }
 
     // =============================================================================

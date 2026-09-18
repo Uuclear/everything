@@ -700,7 +700,10 @@ export function validateV2Payload(
  *   - totalAssetValue：总资产（仅账户余额；不含信用卡信用额度）；
  *   - totalLiability：总负债（所有非归档信用卡的 usedLimit 之和）；
  *   - accountCount / cardCount / txCount：列表计数（含归档条目）；
- *   - currency：货币代码；空集合时 = "CNY"。
+ *   - currency：货币代码；空集合时 = "CNY"（首账户币的原始口径锚点）；
+ *   - targetCurrency：B5 折算目标币（FR-V2-C.3，可选）。v1 面值口径调用
+ *     （netWorth 不传 rateTable 且目标币为默认 CNY）时该键缺省，快照保持
+ *     v1 七字段形态；折算上下文激活（rateTable 非空或目标币非 CNY）时必然存在。
  */
 export interface DashboardSnapshot {
   totalAssets: string
@@ -710,6 +713,8 @@ export interface DashboardSnapshot {
   cardCount: number
   txCount: number
   currency: CurrencyCode
+  /** B5 折算目标币；缺省语义即默认 CNY（v1 面值口径）。 */
+  targetCurrency?: CurrencyCode
 }
 
 /**

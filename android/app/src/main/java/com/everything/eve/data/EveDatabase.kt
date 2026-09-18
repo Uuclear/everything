@@ -16,11 +16,13 @@ import com.everything.eve.data.event.EventReminderLogEntity
 import com.everything.eve.data.finance.dao.AttachmentDao
 import com.everything.eve.data.finance.dao.FinanceAccountDao
 import com.everything.eve.data.finance.dao.FinanceCardDao
+import com.everything.eve.data.finance.dao.FinanceRateDao
 import com.everything.eve.data.finance.dao.FinanceReminderLogDao
 import com.everything.eve.data.finance.dao.FinanceTxDao
 import com.everything.eve.data.finance.entity.AttachmentEntity
 import com.everything.eve.data.finance.entity.FinanceAccountEntity
 import com.everything.eve.data.finance.entity.FinanceCardEntity
+import com.everything.eve.data.finance.entity.FinanceRateEntity
 import com.everything.eve.data.finance.entity.FinanceReminderLogEntity
 import com.everything.eve.data.finance.entity.FinanceTxEntity
 
@@ -41,8 +43,10 @@ import com.everything.eve.data.finance.entity.FinanceTxEntity
         FinanceReminderLogEntity::class,
         // 阶段 5 v2：财务附件本地缓存（v7 迁移新增——密文 envelope 缓存表）
         AttachmentEntity::class,
+        // 阶段 5 v2 / B5：离线汇率本地缓存（v8 迁移新增——按货币对拆行的汇率表）
+        FinanceRateEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 abstract class EveDatabase : RoomDatabase() {
@@ -72,6 +76,9 @@ abstract class EveDatabase : RoomDatabase() {
 
     /** 阶段 5 v2：财务附件本地缓存 DAO（v7 迁移新增）。 */
     abstract fun attachmentDao(): AttachmentDao
+
+    /** 阶段 5 v2 / B5：离线汇率本地缓存 DAO（v8 迁移新增）。 */
+    abstract fun financeRateDao(): FinanceRateDao
 
     companion object {
         /**
@@ -456,6 +463,57 @@ abstract class EveDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v7 → v8：新增 `finance_rate`（离线汇率本地缓存表，B5 多币种折算）。
+         *
+         * 与既有 v6→v7 同模式：仅 CREATE TABLE IF NOT EXISTS + 索引，
+         * 不 ALTER/DROP 既有十二表，保证既有数据零影响。
+         *
+         * finance_rate（spec FR-V2-C.2 汇率包本地缓存）：
+         *  - 12 列，与 FinanceRateEntity 一一对应；id 为确定性键
+         *    "${base}/${quote}@${effective_ts}"，同生效时刻重复导入 REPLACE 幂等；
+         *  - encrypted_payload TEXT NOT NULL：本地导入存空串占位（密文以 records
+         *    通道 type=rate 行为准），pull 下行写服务端 base64 密文；
+         *  - 索引 (currency_base, currency_quote) 按货币对查询、
+         *    (effective_ts) 取 MAX 最新生效时刻、(dirty) 同步推送对账。
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // ---- 步骤 1：建 finance_rate 表（列定义与 Room 实体逐列对齐）----
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS finance_rate (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        currency_base TEXT NOT NULL,
+                        currency_quote TEXT NOT NULL,
+                        rate REAL NOT NULL,
+                        effective_ts INTEGER NOT NULL,
+                        encrypted_payload TEXT NOT NULL,
+                        schema_version INTEGER NOT NULL DEFAULT 1,
+                        module TEXT NOT NULL DEFAULT 'finance',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        dirty INTEGER NOT NULL DEFAULT 1,
+                        deleted INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent(),
+                )
+                // ---- 步骤 2：建 finance_rate 表索引 ----
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_rate_pair " +
+                        "ON finance_rate (currency_base, currency_quote)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_rate_effective_ts " +
+                        "ON finance_rate (effective_ts)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS idx_finance_rate_dirty " +
+                        "ON finance_rate (dirty)",
+                )
+            }
+        }
+
         fun build(context: Context): EveDatabase =
             Room.databaseBuilder(context, EveDatabase::class.java, "eve.db")
                 .addMigrations(
@@ -465,6 +523,7 @@ abstract class EveDatabase : RoomDatabase() {
                     MIGRATION_4_5,
                     MIGRATION_5_6,
                     MIGRATION_6_7,
+                    MIGRATION_7_8,
                 )
                 .build()
     }

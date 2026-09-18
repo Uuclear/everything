@@ -1,0 +1,377 @@
+{
+  "version": 1,
+  "kind": "stage5-finance-v2-b5-rate-table-cases",
+  "tz": "Asia/Shanghai",
+  "_comment_": "stage5-finance-v2 / B5 / TR-5.2 / spec FR-V2-C.2、FR-V2-C.3 双端共享 fixture：离线汇率包 parse / convert 纯函数（convertCases）与 netWorth / monthlyReport 多币种折算（aggregatorCases / monthlyReportCases）。金额全部以 decimal-as-string 输入、minor 分整数口径折算；expectedMinor 为折算后分整数（null 表示 convert 无法折算）。tables 段每个对象本身即是一份合法 FR-V2-C.2 汇率包，双端测试对其重新序列化后走 parse 入口。负数舍入双端锁定规则：绝对值先取整（Android HALF_UP / Web Math.round，非负数等价）再恢复符号。Web 与 Android 镜像文件 SHA-256 必须一致（LF、无 BOM）。",
+  "tables": {
+    "main": {
+      "version": 1,
+      "effective_ts": 1735689600000,
+      "rates": {
+        "USD/CNY": 7.25,
+        "EUR/CNY": 7.85,
+        "JPY/CNY": 0.048,
+        "HKD/CNY": 0.93
+      }
+    },
+    "usdEur": {
+      "version": 1,
+      "effective_ts": 1735689600000,
+      "rates": {
+        "EUR/USD": 1.25
+      }
+    }
+  },
+  "convertCases": [
+    {
+      "name": "usd_cny_forward_10000",
+      "description": "①正向 USD/CNY=7.25：10000 分美元 → 72500 分人民币",
+      "table": "main",
+      "amountMinor": 10000,
+      "from": "USD",
+      "to": "CNY",
+      "expectedMinor": 72500
+    },
+    {
+      "name": "eur_cny_forward_10000",
+      "description": "②正向 EUR/CNY=7.85：10000 分欧元 → 78500 分人民币",
+      "table": "main",
+      "amountMinor": 10000,
+      "from": "EUR",
+      "to": "CNY",
+      "expectedMinor": 78500
+    },
+    {
+      "name": "jpy_cny_forward_10000",
+      "description": "③正向 JPY/CNY=0.048：10000 分日元 → 480 分人民币",
+      "table": "main",
+      "amountMinor": 10000,
+      "from": "JPY",
+      "to": "CNY",
+      "expectedMinor": 480
+    },
+    {
+      "name": "cny_usd_reverse_72500",
+      "description": "④反向（表中仅有 USD/CNY）：72500 分人民币按 7.25 除回 → 10000 分美元",
+      "table": "main",
+      "amountMinor": 72500,
+      "from": "CNY",
+      "to": "USD",
+      "expectedMinor": 10000
+    },
+    {
+      "name": "usd_self_identity_12345",
+      "description": "⑤自交叉 USD→USD：不读汇率表，12345 恒等返回（空表也成立）",
+      "table": "main",
+      "amountMinor": 12345,
+      "from": "USD",
+      "to": "USD",
+      "expectedMinor": 12345
+    },
+    {
+      "name": "gbp_cny_missing_returnsNull",
+      "description": "⑥缺失 GBP/CNY 且无反向：convert 返回 null（fixture 中 expectedMinor=null）；convertOrIdentity 退回原值 10000",
+      "table": "main",
+      "amountMinor": 10000,
+      "from": "GBP",
+      "to": "CNY",
+      "expectedMinor": null
+    },
+    {
+      "name": "hkd_cny_negative_liability_10000",
+      "description": "⑦负数负债 HKD/CNY=0.93：−10000 分港币 → −9300 分人民币（符号规则验证）",
+      "table": "main",
+      "amountMinor": -10000,
+      "from": "HKD",
+      "to": "CNY",
+      "expectedMinor": -9300
+    },
+    {
+      "name": "usd_cny_halfCent_boundary_2",
+      "description": "⑧正向量级在半分边界：2 分 ×7.25 = 14.5 → HALF_UP 与 Math.round 均得 15",
+      "table": "main",
+      "amountMinor": 2,
+      "from": "USD",
+      "to": "CNY",
+      "expectedMinor": 15
+    },
+    {
+      "name": "usd_cny_negative_halfCent_lock_2",
+      "description": "⑨负数量级在半分边界（双端锁定关键例）：−2 分 ×7.25 = −14.5，朴素 Math.round 会得 −14；绝对值取整再恢复符号 → 双端均为 −15",
+      "table": "main",
+      "amountMinor": -2,
+      "from": "USD",
+      "to": "CNY",
+      "expectedMinor": -15
+    },
+    {
+      "name": "eur_usd_negative_101",
+      "description": "⑩负数乘法 EUR/USD=1.25：−101 分 ×1.25 = −126.25 → 双端均为 −126",
+      "table": "usdEur",
+      "amountMinor": -101,
+      "from": "EUR",
+      "to": "USD",
+      "expectedMinor": -126
+    },
+    {
+      "name": "cny_hkd_reverse_negative_9300",
+      "description": "⑪负数反向除法：−9300 分人民币按 HKD/CNY=0.93 除回 → −10000 分港币",
+      "table": "main",
+      "amountMinor": -9300,
+      "from": "CNY",
+      "to": "HKD",
+      "expectedMinor": -10000
+    }
+  ],
+  "aggregatorCases": [
+    {
+      "name": "usd_singleAccount_100_convertsTo725Cny",
+      "description": "①单 USD 账户 100.00，USD/CNY=7.25 → 资产 725.00 CNY；currency 仍为首账户币 USD，targetCurrency=CNY",
+      "targetCurrency": "CNY",
+      "table": "main",
+      "input": {
+        "accounts": [
+          { "id": "a-usd", "balance": "100.00", "currency": "USD", "archived": false }
+        ],
+        "cards": [],
+        "txs": [],
+        "loans": []
+      },
+      "expected": {
+        "totalAssets": "725.00",
+        "totalAssetValue": "725.00",
+        "totalLiability": "0.00",
+        "accountCount": 1,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "USD",
+        "targetCurrency": "CNY"
+      }
+    },
+    {
+      "name": "eur50_plus_cny100_convertsTo49250",
+      "description": "②EUR 账户 50.00（×7.85=392.50）+ CNY 账户 100.00 → 492.50；首账户币 EUR",
+      "targetCurrency": "CNY",
+      "table": "main",
+      "input": {
+        "accounts": [
+          { "id": "a-eur", "balance": "50.00", "currency": "EUR", "archived": false },
+          { "id": "a-cny", "balance": "100.00", "currency": "CNY", "archived": false }
+        ],
+        "cards": [],
+        "txs": [],
+        "loans": []
+      },
+      "expected": {
+        "totalAssets": "492.50",
+        "totalAssetValue": "492.50",
+        "totalLiability": "0.00",
+        "accountCount": 2,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "EUR",
+        "targetCurrency": "CNY"
+      }
+    },
+    {
+      "name": "jpy_10000_convertsTo480Cny",
+      "description": "③JPY 账户 10000.00（1000000 分 ×0.048）→ 480.00 CNY",
+      "targetCurrency": "CNY",
+      "table": "main",
+      "input": {
+        "accounts": [
+          { "id": "a-jpy", "balance": "10000.00", "currency": "JPY", "archived": false }
+        ],
+        "cards": [],
+        "txs": [],
+        "loans": []
+      },
+      "expected": {
+        "totalAssets": "480.00",
+        "totalAssetValue": "480.00",
+        "totalLiability": "0.00",
+        "accountCount": 1,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "JPY",
+        "targetCurrency": "CNY"
+      }
+    },
+    {
+      "name": "gbp_missingRate_faceValueFallback",
+      "description": "④GBP 账户 100.00，汇率表无 GBP（双向缺失）→ 面值 1:1 降级，仍记 100.00",
+      "targetCurrency": "CNY",
+      "table": "main",
+      "input": {
+        "accounts": [
+          { "id": "a-gbp", "balance": "100.00", "currency": "GBP", "archived": false }
+        ],
+        "cards": [],
+        "txs": [],
+        "loans": []
+      },
+      "expected": {
+        "totalAssets": "100.00",
+        "totalAssetValue": "100.00",
+        "totalLiability": "0.00",
+        "accountCount": 1,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "GBP",
+        "targetCurrency": "CNY"
+      }
+    },
+    {
+      "name": "targetUsd_selfBase_usdAccountNotConverted",
+      "description": "⑤targetCurrency=USD 自基准：USD 账户 100.00 不折算，仍为 100.00",
+      "targetCurrency": "USD",
+      "table": "main",
+      "input": {
+        "accounts": [
+          { "id": "a-usd", "balance": "100.00", "currency": "USD", "archived": false }
+        ],
+        "cards": [],
+        "txs": [],
+        "loans": []
+      },
+      "expected": {
+        "totalAssets": "100.00",
+        "totalAssetValue": "100.00",
+        "totalLiability": "0.00",
+        "accountCount": 1,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "USD",
+        "targetCurrency": "USD"
+      }
+    },
+    {
+      "name": "multiCurrency_cnyUsdEur_preciseSum2510",
+      "description": "⑥跨币种精算求和：CNY 1000.00（100000）+ USD 100.00（72500）+ EUR 100.00（78500）→ 2510.00",
+      "targetCurrency": "CNY",
+      "table": "main",
+      "input": {
+        "accounts": [
+          { "id": "a-cny", "balance": "1000.00", "currency": "CNY", "archived": false },
+          { "id": "a-usd", "balance": "100.00", "currency": "USD", "archived": false },
+          { "id": "a-eur", "balance": "100.00", "currency": "EUR", "archived": false }
+        ],
+        "cards": [],
+        "txs": [],
+        "loans": []
+      },
+      "expected": {
+        "totalAssets": "2510.00",
+        "totalAssetValue": "2510.00",
+        "totalLiability": "0.00",
+        "accountCount": 3,
+        "cardCount": 0,
+        "txCount": 0,
+        "currency": "CNY",
+        "targetCurrency": "CNY"
+      }
+    },
+    {
+      "name": "usdCard_liability_and_eurLoan_asset_composite",
+      "description": "⑦综合：CNY 账户 500.00（资产 50000）+ 信用卡 usedLimit USD 100.00（负债折算 72500）+ lent 借款 EUR 100.00（资产折算 78500）→ 资产 1285.00 / 负债 725.00 / 净 560.00",
+      "targetCurrency": "CNY",
+      "table": "main",
+      "input": {
+        "accounts": [
+          { "id": "a-cny", "balance": "500.00", "currency": "CNY", "archived": false }
+        ],
+        "cards": [
+          { "id": "c-usd", "kind": "credit", "usedLimit": "100.00", "archived": false, "currency": "USD" }
+        ],
+        "txs": [],
+        "loans": [
+          { "id": "L-eur", "direction": "lent", "principalMinor": "100.00", "paidMinor": "0.00", "includeInNetAssets": true, "currency": "EUR", "status": "active" }
+        ]
+      },
+      "expected": {
+        "totalAssets": "560.00",
+        "totalAssetValue": "1285.00",
+        "totalLiability": "725.00",
+        "accountCount": 1,
+        "cardCount": 1,
+        "txCount": 0,
+        "currency": "CNY",
+        "targetCurrency": "CNY"
+      }
+    },
+    {
+      "name": "archivedAccountAndDebitCard_excludedUnderConversion",
+      "description": "⑧折算口径下归档过滤与借记卡过滤仍生效：归档 USD 账户 200.00 与 USD 借记卡均不计金额，计数保留；金额全 0.00",
+      "targetCurrency": "CNY",
+      "table": "main",
+      "input": {
+        "accounts": [
+          { "id": "a-usd-archived", "balance": "200.00", "currency": "USD", "archived": true }
+        ],
+        "cards": [
+          { "id": "c-usd-debit", "kind": "debit", "usedLimit": "50.00", "archived": false, "currency": "USD" }
+        ],
+        "txs": [],
+        "loans": []
+      },
+      "expected": {
+        "totalAssets": "0.00",
+        "totalAssetValue": "0.00",
+        "totalLiability": "0.00",
+        "accountCount": 1,
+        "cardCount": 1,
+        "txCount": 0,
+        "currency": "USD",
+        "targetCurrency": "CNY"
+      }
+    }
+  ],
+  "monthlyReportCases": [
+    {
+      "name": "mixedUsdCny_txs_convertToCnyReport",
+      "description": "月报折算①：USD 收入 100.00（725.00）+ USD 支出 10.00 food（72.50）+ CNY 支出 20.00 food（20.00）→ income 725.00 / expense 92.50 / net 632.50 / food 92.50",
+      "yearMonth": "2026-06",
+      "targetCurrency": "CNY",
+      "table": "main",
+      "input": {
+        "txs": [
+          { "id": "t-income-usd", "accountId": "a-usd", "cardId": null, "kind": "income", "amount": "100.00", "category": "salary", "occurredAt": 1782619200000, "transferToAccountId": null, "currency": "USD" },
+          { "id": "t-expense-usd", "accountId": "a-usd", "cardId": null, "kind": "expense", "amount": "10.00", "category": "food", "occurredAt": 1782619200000, "transferToAccountId": null, "currency": "USD" },
+          { "id": "t-expense-cny", "accountId": "a-cny", "cardId": null, "kind": "expense", "amount": "20.00", "category": "food", "occurredAt": 1782619200000, "transferToAccountId": null, "currency": "CNY" }
+        ]
+      },
+      "expected": {
+        "yearMonth": "2026-06",
+        "income": "725.00",
+        "expense": "92.50",
+        "net": "632.50",
+        "txCount": 3,
+        "categoryBreakdown": {
+          "food": "92.50"
+        }
+      }
+    },
+    {
+      "name": "gbpExpense_missingRate_faceValueFallback",
+      "description": "月报折算②：GBP 支出 10.00 且表中无 GBP → 面值 1:1 降级记 10.00，net 为 −10.00",
+      "yearMonth": "2026-06",
+      "targetCurrency": "CNY",
+      "table": "main",
+      "input": {
+        "txs": [
+          { "id": "t-expense-gbp", "accountId": "a-gbp", "cardId": null, "kind": "expense", "amount": "10.00", "category": "food", "occurredAt": 1782619200000, "transferToAccountId": null, "currency": "GBP" }
+        ]
+      },
+      "expected": {
+        "yearMonth": "2026-06",
+        "income": "0.00",
+        "expense": "10.00",
+        "net": "-10.00",
+        "txCount": 1,
+        "categoryBreakdown": {
+          "food": "10.00"
+        }
+      }
+    }
+  ]
+}

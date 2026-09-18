@@ -29,7 +29,8 @@
 // ============================================================================
 
 import { computed } from 'vue'
-import { NCard, NEmpty, NProgress, NSpace, NTag } from 'naive-ui'
+import { useRouter } from 'vue-router'
+import { NButton, NCard, NEmpty, NProgress, NSpace, NTag, NText } from 'naive-ui'
 import { useFinanceStore } from '../../stores/finance'
 import {
   netWorth,
@@ -38,21 +39,46 @@ import {
   toAccountLike,
   toCardLike,
   toTxLike,
+  toLoanLike,
 } from '../../finance/aggregator'
 
+const router = useRouter()
 const store = useFinanceStore()
 
 // ========== 数据适配 ==========
 // store 暴露 listAccounts / listCards / listTxs（明文 FinanceX）;
 // aggregator 入参为 AccountLike / CardLike / TxLike —— 通过适配器转换。
+// B5：toAccountLike 已带 currency；toCardLike v1 适配器严格键锁定不带
+// currency，故卡在此处自行展开补 currency（读 FinanceCard.currency）；
+// FinanceTx 无 currency 字段，toTxLike 输出缺省 CNY（月报按 CNY 入表）。
 const accountLikes = computed(() => store.listAccounts.map(toAccountLike))
-const cardLikes = computed(() => store.listCards.map(toCardLike))
+const cardLikes = computed(() =>
+  store.listCards.map((c) => ({ ...toCardLike(c), currency: c.currency })),
+)
 const txLikes = computed(() => store.listTxs.map(toTxLike))
+// v2 借款（B4）→ 净资产 LoanLike；lent 计资产 / borrowed 计负债的方向
+// 口径在 aggregator 内部，此处仅透传列表。
+const loanLikes = computed(() => store.listLoans.map(toLoanLike))
 
 // ========== 净资产看板 ==========
+// B5：末位两参传默认币种 + 离线汇率表；未导入汇率包时 aggregator 内部按
+// 面值 1:1 口径处理，净折算行为与 v1 完全一致。
 const dashboard = computed(() =>
-  netWorth(accountLikes.value, cardLikes.value, txLikes.value),
+  netWorth(
+    accountLikes.value,
+    cardLikes.value,
+    txLikes.value,
+    loanLikes.value,
+    store.defaultCurrency,
+    store.rateTable,
+  ),
 )
+
+/**
+ * 金额卡币种标签：折算上下文激活时快照必带 targetCurrency；缺省（v1 形态）
+ * 按 CNY 理解。
+ */
+const targetCurrency = computed(() => dashboard.value.targetCurrency ?? 'CNY')
 
 // ========== 当月月报 ==========
 // 取本地年月键（与 aggregator.yearMonthOf 同口径 —— CST 本地日历分量）。
@@ -67,8 +93,17 @@ function currentYearMonth(): string {
 }
 
 const month = computed(() => currentYearMonth())
+// B5：月报金额口径随默认币种 / 汇率表折算；FinanceTx 无 currency 字段，
+// 逐笔按缺省 CNY 经 toTarget 入合计。
 const report = computed(() =>
-  monthlyReport(month.value, txLikes.value, accountLikes.value),
+  monthlyReport(
+    month.value,
+    txLikes.value,
+    accountLikes.value,
+    loanLikes.value,
+    store.defaultCurrency,
+    store.rateTable,
+  ),
 )
 
 // ========== 预算阈值（仅本地，无 DataStore 持久化） ==========
@@ -269,10 +304,25 @@ function ctWindowHint(): string {
 function gotoList(hash: string): void {
   window.location.hash = hash
 }
+
+// ========== B5 跳转：汇率设置页（/finance/settings/rates） ==========
+function gotoRatesSettings(): void {
+  router.push({ name: 'finance-settings-rates' })
+}
 </script>
 
 <template>
   <div class="dashboard">
+    <!-- B5：顶部汇率入口（空态下也可进入设置页导入汇率包 / 切换币种） -->
+    <div class="rate-tools">
+      <n-button size="small" quaternary @click="gotoRatesSettings">
+        默认币种：{{ store.defaultCurrency }}
+      </n-button>
+      <n-button size="small" quaternary @click="gotoRatesSettings">
+        汇率包设置
+      </n-button>
+    </div>
+
     <n-empty
       v-if="empty"
       description="还没有任何财务条目,先在「账户」或「卡」里新建第一条吧"
@@ -285,7 +335,7 @@ function gotoList(hash: string): void {
           <template #header>净资产</template>
           <div class="big-num">{{ formatYuan(dashboard.totalAssets) }}</div>
           <div class="sub">
-            {{ dashboard.currency }}
+            {{ targetCurrency }}
             <n-tag size="tiny" :bordered="false" type="info">聚合</n-tag>
           </div>
         </n-card>
@@ -294,7 +344,7 @@ function gotoList(hash: string): void {
           <template #header>总资产</template>
           <div class="big-num">{{ formatYuan(dashboard.totalAssetValue) }}</div>
           <div class="sub">
-            账户 {{ dashboard.accountCount }} 个
+            {{ targetCurrency }} · 账户 {{ dashboard.accountCount }} 个
           </div>
         </n-card>
 
@@ -302,7 +352,7 @@ function gotoList(hash: string): void {
           <template #header>总负债</template>
           <div class="big-num">{{ formatYuan(dashboard.totalLiability) }}</div>
           <div class="sub">
-            信用卡 {{ dashboard.cardCount }} 张
+            {{ targetCurrency }} · 信用卡 {{ dashboard.cardCount }} 张
           </div>
         </n-card>
 
@@ -310,7 +360,7 @@ function gotoList(hash: string): void {
           <template #header>月支出 ({{ month }})</template>
           <div class="big-num">{{ formatYuan(report.expense) }}</div>
           <div class="sub">
-            流水 {{ report.txCount }} 条
+            {{ targetCurrency }} · 流水 {{ report.txCount }} 条
           </div>
         </n-card>
 
@@ -342,6 +392,10 @@ function gotoList(hash: string): void {
       <n-space class="meta" :size="14">
         <span class="meta-item">净资产 = 总资产 − 总负债</span>
         <span class="meta-item">聚合纯客户端计算,不同步上行</span>
+        <!-- B5：未导入汇率包时弱化提示外币按面值 1:1 计入 -->
+        <n-text v-if="store.rateTable === null" depth="3" style="font-size: 12px;">
+          未导入汇率包，外币按面值计入
+        </n-text>
       </n-space>
 
       <!-- ========== v2 提醒窗口卡片（stage5-finance-v2 / TR-1.6） ========== -->
@@ -402,6 +456,11 @@ function gotoList(hash: string): void {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+.rate-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .grid {
   display: grid;

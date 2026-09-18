@@ -103,6 +103,18 @@ class CollectorWorker(appContext: Context, params: WorkerParameters) :
                         }
                     )
                     ServiceLocator.attachmentRepo.pushChanges()
+                    // ---- 阶段 5 v2 / B5 挂载点：离线汇率包 pull + push 对账 ----
+                    // 复用同一份 financeRecords 过滤 type="rate"；RateTableRepository
+                    // 内部按 module + type 双键兜底过滤。pull 解密下行包并按货币对
+                    // 入库（dirty=0）；pushChanges 兜底重建 records 包并把本地行翻
+                    // 干净，records 行的服务端推送仍由 RecordsRepository.sync 承接。
+                    ServiceLocator.rateTableRepository.pullAndDecrypt(
+                        financeRecords.filter {
+                            it.module == com.everything.eve.data.finance.FinanceModule.MODULE &&
+                                it.type == com.everything.eve.data.finance.FinanceModule.TYPE_RATE
+                        }
+                    )
+                    ServiceLocator.rateTableRepository.pushChanges()
                     ReminderScheduler.rebuildChain(ctx)
                 }
             } catch (t: Throwable) {

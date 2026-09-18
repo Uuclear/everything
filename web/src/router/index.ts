@@ -23,6 +23,8 @@ import FinanceSubscriptionEditor from '../views/finance/FinanceSubscriptionEdito
 import FinancePolicyEditor from '../views/finance/FinancePolicyEditor.vue'
 import FinanceLoanEditor from '../views/finance/FinanceLoanEditor.vue'
 import FinanceContractEditor from '../views/finance/FinanceContractEditor.vue'
+// 阶段 5 v2 B5 — 多币种汇率设置（默认币种 + 离线汇率包导入；FR-V2-C）
+import SettingsRatesView from '../views/SettingsRatesView.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(), // hash 模式对单二进制 SPA 托管最友好
@@ -89,6 +91,13 @@ export const router = createRouter({
           path: 'editor/contract/:id?',
           name: 'finance-editor-contract',
           component: FinanceContractEditor,
+        },
+        // 阶段 5 v2 B5 — 汇率设置（FR-V2-C；spec 路径 /settings/rates，
+        // 实挂 finance 子树下，完整路径 /finance/settings/rates）。
+        {
+          path: 'settings/rates',
+          name: 'finance-settings-rates',
+          component: SettingsRatesView,
         },
       ],
     },

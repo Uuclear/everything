@@ -29,8 +29,24 @@
 //     - monthlyReport：借款本金是资产/负债形态转换而非 income/expense, 本期不累加；
 //       loans 参数为 Task5 多币种折算预留。
 //
+// v2 B5 多币种折算扩展（stage5-finance-v2 / B5 / TR-5.2 / spec FR-V2-C.2、FR-V2-C.3）:
+//   netWorth 与 monthlyReport 在 loans 之后再追加两个末位默认参
+//   （targetCurrency=DEFAULT_CURRENCY, rateTable=null）, 既有调用零回归：
+//     - 账户余额 / 信用卡 usedLimit / loan 剩余本金 / 流水金额统一经私有
+//       toTarget(cents, sourceCurrency, targetCurrency, rateTable) 折算 ——
+//       无表或同币种原值返回, 缺汇率按 1:1 面值降级（RateTable.convertOrIdentity）；
+//     - DashboardSnapshot 新增末位字段 targetCurrency（默认 CNY, data class 默认值,
+//       既有位置构造零回归）；原 currency 字段语义不变（首账户币 / 默认 CNY）；
+//     - MonthlyReport 结构不加字段, 月报金额口径随 targetCurrency（注释锚定）；
+//     - CardLike / TxLike 新增末位 currency 默认参（默认 CNY, 既有具名/位置构造
+//       零回归）；AccountLike / LoanLike 已带 currency 字段, 无需改动；
+//     - 负数舍入双端锁定规则见 RateTable.kt 文件头（绝对值 HALF_UP 再恢复符号）。
+//
 // 关联:
 //   - tasks.md TR-5.1（Android FinanceAggregator.kt 镜像实现）
+//   - tasks.md TR-5.2（B5 多币种折算扩展, stage5-finance-v2）
+//   - spec FR-V2-C.2 / FR-V2-C.3（离线汇率包格式与看板折算口径）
+//   - android/.../finance/RateTable.kt（汇率解析 / 折算纯函数, 本文件唯一折算依赖）
 //   - tasks.md TR-5.3（JUnit 测试套件, 加载共享 fixture）
 //   - tasks.md TR-5.4（三端 fixture SHA-256 一致性核验）
 //   - tasks.md TR-4.2（v2 loan 接入 netWorth, stage5-finance-v2）
@@ -100,7 +116,10 @@ object FinanceAggregator {
      *   - `totalAssetValue`：总资产（仅账户余额；不含信用卡信用额度, 因信用额度非自有资产）；
      *   - `totalLiability`：总负债（所有非归档信用卡的 `usedLimit` 之和）；
      *   - `accountCount` / `cardCount` / `txCount`：列表计数（含归档条目）；
-     *   - `currency`：货币代码；空集合时 = DEFAULT_CURRENCY = "CNY"。
+     *   - `currency`：货币代码；空集合时 = DEFAULT_CURRENCY = "CNY"；
+     *   - `targetCurrency`：B5 折算目标币（FR-V2-C.3）；末位默认参 = "CNY",
+     *     不传 rateTable 时所有金额即面值口径；与 `currency` 语义独立 ——
+     *     `currency` 仍是"首账户币 / 默认 CNY"的原始口径锚点。
      */
     data class DashboardSnapshot(
         val totalAssets: String,
@@ -110,6 +129,7 @@ object FinanceAggregator {
         val cardCount: Int,
         val txCount: Int,
         val currency: String,
+        val targetCurrency: String = DEFAULT_CURRENCY,
     )
 
     /**
@@ -167,6 +187,12 @@ object FinanceAggregator {
      *   - direction="lent" → 计入总资产（应收借款）; "borrowed" → 计入总负债（应付）;
      *   - 其余 direction 值防御性忽略；不新增 loanCount, DashboardSnapshot 结构不变。
      *
+     * v2 B5 多币种折算（TR-5.2 / FR-V2-C.3, 末位两参默认, 不传时与 v1 完全一致）：
+     *   - 账户余额按 acc.currency、信用卡 usedLimit 按 card.currency、借款余量按
+     *     loan.currency 统一经 [toTarget] 折算到 targetCurrency；
+     *   - rateTable=null（默认）或来源币 == 目标币 → 原值；表中缺汇率 → 1:1 面值降级；
+     *   - DashboardSnapshot.targetCurrency 回填目标币；currency 字段仍取首账户币。
+     *
      * 边界：
      *   - accounts / cards / txs / loans 任一为空 → 该部分按 0 处理, 不抛错；
      *   - `usedLimit` 为 null 或非数字 → 视为 "0.00", 跳过该项（不抛错）；
@@ -176,6 +202,8 @@ object FinanceAggregator {
      * @param cards 卡列表（明文 FinanceCardEntity 形态, 仅取必要字段）
      * @param txs 流水列表（本聚合函数暂未消费; 保留参数与 Web 签名一致）
      * @param loans v2 借款列表（默认空; lent 余额计资产, borrowed 余额计负债）
+     * @param targetCurrency B5 折算目标币（默认 CNY; 月报 / 看板金额口径币种）
+     * @param rateTable B5 离线汇率表（默认 null; null 时一律按面值口径不折算）
      * @return DashboardSnapshot 净资产快照（始终非 null; 字段全 0 表示空集合）
      */
     fun netWorth(
@@ -183,17 +211,20 @@ object FinanceAggregator {
         cards: List<CardLike>,
         txs: List<TxLike> = emptyList(),
         loans: List<LoanLike> = emptyList(),
+        targetCurrency: String = DEFAULT_CURRENCY,
+        rateTable: RateTable? = null,
     ): DashboardSnapshot {
-        // ========== 1. 总资产 = 仅非归档账户 balance 之和 ==========
+        // ========== 1. 总资产 = 仅非归档账户 balance 之和（B5: 逐户折算到目标币） ==========
         var assetCents: Long = 0L
         for (acc in accounts) {
             // 归档过滤：仅 `archived=false` 计入资产聚合。
             // 注意：accountCount 包含归档条目, 故遍历在过滤前/后都可, 此处为可读性先过滤。
             if (acc.archived) continue
-            assetCents = addDecimalAsCents(assetCents, acc.balance)
+            val rawCents = parseDecimalAsCents(acc.balance)
+            assetCents += toTarget(rawCents, acc.currency, targetCurrency, rateTable)
         }
 
-        // ========== 2. 总负债 = 仅非归档信用卡 usedLimit 之和 ==========
+        // ========== 2. 总负债 = 仅非归档信用卡 usedLimit 之和（B5: 逐卡折算） ==========
         var liabilityCents: Long = 0L
         for (card in cards) {
             // 归档 / 借记卡 双过滤：kind 必须 = "credit" 才计负债。
@@ -201,10 +232,11 @@ object FinanceAggregator {
             if (card.kind != "credit") continue
             // usedLimit 为 null 时视为未用, 按 0.00 处理（不抛错）。
             val used = card.usedLimit ?: "0"
-            liabilityCents = addDecimalAsCents(liabilityCents, used)
+            val rawCents = parseDecimalAsCents(used)
+            liabilityCents += toTarget(rawCents, card.currency, targetCurrency, rateTable)
         }
 
-        // ========== 2.5 v2 借款：剩余本金按方向计入资产 / 负债（TR-4.2） ==========
+        // ========== 2.5 v2 借款：剩余本金按方向计入资产 / 负债（TR-4.2, B5: 折算） ==========
         for (loan in loans) {
             // 用户显式排除的借款, 资产端与负债端均不统计。
             if (!loan.includeInNetAssets) continue
@@ -212,11 +244,13 @@ object FinanceAggregator {
             val paidCents = parseDecimalAsCents(loan.paidMinor)
             // 剩余本金 = 本金 - 已还；异常数据（已还超额）钳位到 0, 不出现负余量。
             val remainCents = (principalCents - paidCents).coerceAtLeast(0L)
+            // 折算在钳位之后进行 —— 余量是非负数, 与双端"绝对值舍入"锁定规则不冲突。
+            val remainInTarget = toTarget(remainCents, loan.currency, targetCurrency, rateTable)
             when (loan.direction) {
                 // 我借出去的钱（应收）是我的债权资产。
-                "lent" -> assetCents += remainCents
+                "lent" -> assetCents += remainInTarget
                 // 我借进来的钱（应付）是我的待还负债。
-                "borrowed" -> liabilityCents += remainCents
+                "borrowed" -> liabilityCents += remainInTarget
                 // 其他 direction 值（数据异常）防御性忽略, 不加不减。
                 else -> Unit
             }
@@ -229,9 +263,8 @@ object FinanceAggregator {
 
         // ========== 4. 货币与计数 ==========
         // currency 优先取第一条账户; 全空时降级为 DEFAULT_CURRENCY = "CNY"。
-        // 注：CardLike 当前未承载 currency 字段（T5 schema 后续扩展），故直接跳过
-        // 卡片兜底，仅账户 → DEFAULT_CURRENCY 二级降级；与 Web 行为保持一致
-        // （账户优先 + 卡片兜底需要 CardLike 加 currency 字段，待 T5 后续 patch 落地）。
+        // B5 后 CardLike / TxLike 已带 currency 默认参, 但 currency 字段的"首账户
+        // 币"语义保持不变（与 Web 端严格对齐）；折算目标币另见 targetCurrency。
         val currency: String = accounts.firstOrNull()?.currency
             ?: DEFAULT_CURRENCY
 
@@ -248,6 +281,7 @@ object FinanceAggregator {
             cardCount = cardCount,
             txCount = txCount,
             currency = currency,
+            targetCurrency = targetCurrency,
         )
     }
 
@@ -353,10 +387,18 @@ object FinanceAggregator {
      * 形态转换, 不属于 income / expense, 故本函数**不**把任何 loan 金额累加进
      * income / expense / categoryBreakdown；该参数为 Task5 多币种折算预留。
      *
+     * v2 B5 多币种折算（TR-5.2 / FR-V2-C.3, 末位两参默认）：每条流水的
+     * income / expense / categoryBreakdown 金额按 tx.currency 逐笔经 [toTarget]
+     * 折算到 targetCurrency 后再累加；net = 折算后 income − 折算后 expense。
+     * MonthlyReport 结构保持六字段不变（不加币种字段）—— 月报金额口径随
+     * targetCurrency, 由调用方在视图层标注。
+     *
      * @param yearMonth 年月键 "YYYY-MM"（如 "2026-01"）
      * @param txs 流水列表（全集, 函数内部按 occurredAt 本地月过滤）
      * @param accounts 账户列表（本函数暂未消费; 保留参数与 Web 签名一致）
      * @param loans v2 借款列表（本期不消费金额; Task5 多币种折算预留）
+     * @param targetCurrency B5 折算目标币（默认 CNY）
+     * @param rateTable B5 离线汇率表（默认 null; null 时按面值口径不折算）
      * @return MonthlyReport 月度收支汇总（始终非 null; 全零表示无流水）
      */
     fun monthlyReport(
@@ -364,10 +406,15 @@ object FinanceAggregator {
         txs: List<TxLike>,
         accounts: List<AccountLike> = emptyList(),
         loans: List<LoanLike> = emptyList(),
+        targetCurrency: String = DEFAULT_CURRENCY,
+        rateTable: RateTable? = null,
     ): MonthlyReport {
         // v2 预留参数的防御性消费：List.size 恒 >= 0, 本检查永不失败、不改变输出,
         // 仅用于显式引用 loans（与既有 accounts 预留参数同风格, 避免参数静默未用）。
         check(loans.size >= 0)
+        // targetCurrency / rateTable 在下述逐笔折算中被实际消费; 此处显式读一次
+        // targetCurrency 仅为让"口径参数"在空流水路径也不产生未用告警错觉。
+        check(targetCurrency.isNotEmpty())
 
         var incomeCents: Long = 0L
         var expenseCents: Long = 0L
@@ -380,16 +427,20 @@ object FinanceAggregator {
             if (txYearMonth != yearMonth) continue
 
             txCount++
+            // B5: 逐笔按流水币种折算到目标币后再入合计（无表 / 同币 / 缺汇率均安全降级）。
+            val amountInTarget = toTarget(
+                parseDecimalAsCents(tx.amount), tx.currency, targetCurrency, rateTable
+            )
             when (tx.kind) {
                 "income" -> {
-                    incomeCents = addDecimalAsCents(incomeCents, tx.amount)
+                    incomeCents += amountInTarget
                 }
                 "expense" -> {
-                    expenseCents = addDecimalAsCents(expenseCents, tx.amount)
+                    expenseCents += amountInTarget
                     // 分类占比仅对 expense 累计（与 Web aggregator.ts 语义对齐）。
                     val cat = tx.category.ifEmpty { "other" }
                     val prev = categoryCents[cat] ?: 0L
-                    categoryCents[cat] = addDecimalAsCents(prev, tx.amount)
+                    categoryCents[cat] = prev + amountInTarget
                 }
                 "transfer" -> {
                     // transfer 不计入 income / expense, 但计入 txCount。
@@ -475,16 +526,22 @@ object FinanceAggregator {
 
     /**
      * 卡入参形态 —— 仅取聚合所需的最小字段集。
+     *
+     * @param currency B5 卡币种（末位默认参 = DEFAULT_CURRENCY = "CNY",
+     *   既有具名 / 位置构造零回归；v1 卡单币种口径下无需显式传值）
      */
     data class CardLike(
         val id: String,
         val kind: String,
         val usedLimit: String?,
         val archived: Boolean,
+        val currency: String = DEFAULT_CURRENCY,
     )
 
     /**
      * 流水入参形态 —— 仅取聚合所需的最小字段集。
+     *
+     * @param currency B5 流水币种（末位默认参 = "CNY"；月报多币种折算按此币种入表）
      */
     data class TxLike(
         val id: String,
@@ -495,6 +552,7 @@ object FinanceAggregator {
         val category: String,
         val occurredAt: Long,
         val transferToAccountId: String?,
+        val currency: String = DEFAULT_CURRENCY,
     )
 
     /**
@@ -604,6 +662,32 @@ object FinanceAggregator {
     /** cents 减法 —— 兼容负数, 直接 Long 减法（无精度丢失）。 */
     private fun subtractDecimalAsCents(base: Long, decimal: String?): Long {
         return base - parseDecimalAsCents(decimal)
+    }
+
+    /**
+     * B5 多币种折算统一入口（TR-5.2 / FR-V2-C.3, 与 Web aggregator.ts toTarget 锁定）。
+     *
+     * 规则：
+     *   1. [table] == null（调用方未给汇率表）→ 原值, 完全 v1 面值口径；
+     *   2. [sourceCurrency] == [targetCurrency] → 原值（同币无需折算, 自基准成立）；
+     *   3. 其余情形委托 [RateTables.convertOrIdentity] —— 表中双向均缺汇率时
+     *      按 1:1 面值降级, 保证离线汇率包不全时条目不丢失（spec FR-V2-C.3）。
+     *
+     * @param cents 源币种 minor 金额（分；允许负值, 符号规则由 RateTables 锁定）
+     * @param sourceCurrency 来源币 ISO 4217 三字母代码
+     * @param targetCurrency 目标币代码
+     * @param table 离线汇率表（可空）
+     * @return 目标币 minor 金额（分）
+     */
+    private fun toTarget(
+        cents: Long,
+        sourceCurrency: String,
+        targetCurrency: String,
+        table: RateTable?,
+    ): Long {
+        if (table == null) return cents
+        if (sourceCurrency == targetCurrency) return cents
+        return RateTables.convertOrIdentity(cents, sourceCurrency, targetCurrency, table)
     }
 
     /**
