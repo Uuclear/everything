@@ -22,6 +22,10 @@ import type { MenuOption } from 'naive-ui'
 import { useAuthStore } from '../stores/auth'
 import { useVaultStore } from '../stores/vault'
 import { useLocationsStore } from '../stores/locations'
+// B7 / FR-V2-G：财务 store（通知偏好位与补发 / 停止动作的收口方）。
+import { useFinanceStore } from '../stores/finance'
+// B7：解锁成功后注册全站唯一 Service Worker（不支持 / 失败均静默）。
+import { registerFinanceServiceWorker } from '../notifications/financeNotifications'
 import { eventsStatus, getSharedChannel } from '../stores/events'
 import { uiSearch } from '../composables/useUiSearch'
 import { getAccessToken, onAuthExpired } from '../api/client'
@@ -35,6 +39,7 @@ const message = useMessage()
 const auth = useAuthStore()
 const vault = useVaultStore()
 const locations = useLocationsStore()
+const financeStore = useFinanceStore()
 
 const unlockPassword = ref('')
 const unlocking = ref(false)
@@ -160,6 +165,31 @@ function onLockUseRecovery() {
   router.replace({ name: 'welcome' })
 }
 
+/**
+ * B7：解锁成功后恢复财务浏览器通知（FR-V2-G / AC-V2F-15）。
+ *
+ * 顺序刻意安排在首同步（vault.sync → finance.pullAll）之后：此时远端提醒
+ * 数据已入 store。全流程 void 非阻塞，且各环节内部自带异常吞咽，任何
+ * 失败都不影响进入主框架。零知识：恢复过程只传递 { kind, id, triggerMs }。
+ */
+function restoreFinanceNotifications(): void {
+  // 1. 注册 Service Worker（通知点击 / 展示由根作用域 sw.js 承接）；
+  //    环境不支持或注册失败时该 Promise 内部已静默 resolve。
+  void registerFinanceServiceWorker()
+  // 2. 还原本地持久化偏好位（幂等；finance 视图自身也会 hydrate，
+  //    这里提前做是为了不依赖用户是否已访问过财务页）。
+  if (!financeStore.hydrated) financeStore.hydrate()
+  // 3. 仅当用户上次锁定前开启过通知时：重新向通知器申请启用（已是
+  //    granted 权限时不会再弹申请框），随后立即全量重排并补发到期提醒。
+  if (financeStore.notificationsEnabled) {
+    void financeStore.setNotificationsEnabled(true).then((ok) => {
+      if (!ok) return
+      void financeStore.syncNotificationSchedules()
+      void financeStore.replayDueNotifications()
+    })
+  }
+}
+
 /** 解锁公共收尾：首同步、开启 SSE，最后翻转外壳标志进入主框架。 */
 async function finishUnlock() {
   unlockPassword.value = ''
@@ -172,6 +202,8 @@ async function finishUnlock() {
   }
   startChannel()
   shellUnlocked.value = true
+  // B7：解锁成功后恢复财务通知（SW 注册 + 按偏好位重新启用 + 到期补发）。
+  restoreFinanceNotifications()
 }
 
 function lock() {
@@ -180,6 +212,8 @@ function lock() {
   auth.lock()
   vault.reset()
   locations.reset() // 轨迹明文只驻内存，锁定即清
+  // B7：撤销所有已排期财务通知并释放定时器（偏好位保留，解锁后无感恢复）。
+  financeStore.stopNotifications()
   shellUnlocked.value = false
   uiSearch.query = ''
 }
@@ -188,6 +222,8 @@ function logout() {
   channel.stop()
   vault.reset()
   locations.reset()
+  // B7：退出登录同样立即停止财务通知（偏好位留在本地，下次登录仍生效）。
+  financeStore.stopNotifications()
   shellUnlocked.value = false
   auth.logout()
   router.replace({ name: 'welcome' })
@@ -218,6 +254,8 @@ onMounted(async () => {
     channel.stop()
     vault.reset()
     locations.reset()
+    // B7：授权失效立即停止财务通知（与 lock / logout 同口径）。
+    financeStore.stopNotifications()
     shellUnlocked.value = false
     auth.logout()
     router.replace({ name: 'welcome' })

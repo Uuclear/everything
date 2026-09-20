@@ -95,6 +95,21 @@ import {
   toPolicyLike,
   toSubscriptionLike,
 } from '../finance/nextCardFiring'
+// B7 / FR-V2-G：浏览器本地通知基础层（SA-1 交付）。
+// 零知识边界：store 与通知层之间只传递 { kind, id, triggerMs } 三字段，
+// 通知标题 / 正文固定为抽象类型文案，金额、日期、卡号、对手方、保单号、
+// 具体名称一律不离开财务主数据层。
+// 说明：registerFinanceServiceWorker 由 AppShell 在解锁成功后调用，
+// 这里以 re-export 形式从 store 模块同路径透出（任务书要求顶部接线该符号；
+// tsconfig 开启 noUnusedLocals，re-export 既满足接线又不产生未使用报错）；
+// resetFinanceNotifierForTest 在 _resetForTest 测试钩子内实际消费
+// （重置 store 时一并清空通知器进程内单例，保证用例间隔离）。
+export { registerFinanceServiceWorker } from '../notifications/financeNotifications'
+import {
+  getFinanceNotifier,
+  resetFinanceNotifierForTest,
+  type FinanceScheduleEntry,
+} from '../notifications/financeNotifications'
 
 // -----------------------------------------------------------------------------
 // 持久化契约 —— StorageChannel（注入点：默认 localStorage；测试可 mock）
@@ -155,6 +170,17 @@ export interface PersistedFinanceState {
    * 可选字段：旧本地数据无此字段时降级空表。
    */
   rateRecordVersions?: Record<string, number>
+  /**
+   * B7 浏览器通知开关（stage5-finance-v2 / FR-V2-G）。
+   *
+   * 可选字段：旧本地数据（B7 之前落盘的 schemaVersion=2 形态）无此字段，
+   * hydrate 时按 false 还原，不升 schemaVersion（保持 2）。
+   * 该布尔只是「用户曾成功授权并开启」的本地偏好位；真正的通知器启用态
+   * 以浏览器 Notification 权限与通知器单例为准，应用重新解锁后由 AppShell
+   * 调 setNotificationsEnabled(true) 重新接线（已 granted 不会再弹申请框）。
+   * 零知识：本字段不携带任何业务数据。
+   */
+  notificationsEnabled?: boolean
 }
 
 /** localStorage key —— `eve:finance:v1`（spec §持久化 §6 一致）。 */
@@ -369,6 +395,17 @@ export const useFinanceStore = defineStore('finance', () => {
    */
   const rateRecordVersions = ref<Record<string, number>>({})
 
+  // ========== B7 浏览器通知开关（stage5-finance-v2 / FR-V2-G） ==========
+  /**
+   * 用户通知偏好位：是否希望启用财务提醒的浏览器本地通知。
+   *
+   * 默认 false；仅在 setNotificationsEnabled(true) 拿到通知权限（granted）
+   * 后置 true 并随本地状态落盘。它不直接等同于通知器单例的 enabled：
+   * 通知器是进程内单例，应用重新解锁后需要重新 enable（已 granted 时
+   * enable 不会再次弹窗，直接返回 true）。
+   */
+  const notificationsEnabled = ref(false)
+
   // ========== 计算属性 ==========
 
   /**
@@ -537,6 +574,136 @@ export const useFinanceStore = defineStore('finance', () => {
         || REMINDER_KIND_RANK[a.kind] - REMINDER_KIND_RANK[b.kind],
     )
     return items
+  }
+
+  // ========== B7 浏览器通知接线（FR-V2-G；增强能力，绝不影响财务主流程） ==========
+
+  /**
+   * 把纯计算出口 upcomingV2Reminders 的结果全量同步给通知器单例。
+   *
+   * 调用前置条件（三者同时满足才真正调度，否则静默跳过）：
+   *   1. 本地偏好位 notificationsEnabled 为 true；
+   *   2. 当前环境支持通知（getFinanceNotifier() 非空；node 测试环境 /
+   *      不支持 Notification 的浏览器恒为 null，绝不抛错）；
+   *   3. 通知器自身处于 enabled（已拿到 granted 权限）。
+   *
+   * 零知识纪律：传给通知层的条目只做显式字段映射，每个条目严格只有
+   * { kind, id, triggerMs } 三个白名单键，金额、日期、名称、卡号、
+   * 对手方、保单号等敏感字段在此处物理隔离；通知标题与正文由通知层
+   * 按 kind 取固定抽象文案。
+   *
+   * 任何异常都吞掉：通知是增强能力，调度失败不允许冒泡到 CRUD / hydrate /
+   * pullAll 等主流程调用方。
+   */
+  async function syncNotificationSchedules(): Promise<void> {
+    try {
+      if (!notificationsEnabled.value) return
+      const notifier = getFinanceNotifier()
+      if (!notifier || !notifier.enabled) return
+      // 显式逐字段映射，杜绝把整条业务记录（含金额 / 名称等）透传出去。
+      const entries: FinanceScheduleEntry[] = upcomingV2Reminders().map(
+        (item) => ({
+          kind: item.kind,
+          id: item.id,
+          triggerMs: item.triggerMs,
+        }),
+      )
+      // reschedule 为幂等全量替换，内部自行过滤已到期条目（过期补发判断
+      // 由通知器负责，store 不过滤）；返回统计结果本期无 UI 消费方。
+      await notifier.reschedule(entries)
+    } catch {
+      // 静默吞掉：通知调度失败永远不影响财务主数据读写。
+    }
+  }
+
+  /**
+   * 通知开关入口（由 FinanceView 顶部常驻 NSwitch 调用）。
+   *
+   * @param on true=申请权限并启用；false=关闭并清空已调度条目
+   * @returns 最终是否处于启用态；false 时 UI 据返回值提示原因
+   *
+   * on=true 分支：
+   *   - 环境不支持（getFinanceNotifier() 返回 null）：保持 false，返回 false；
+   *   - 调 notifier.enable()：已 granted 直接 true，否则发起权限申请，
+   *     仅 granted 返回 true；
+   *   - 成功：置位、persist 落盘、立刻做一次全量调度；
+   *   - 失败 / 异常：回退 false 并返回 false（switch 的 :value 绑定自动回显）。
+   *
+   * on=false 分支：置位、落盘、通知器禁用（清定时器并清空 IndexedDB），
+   * 返回 false；禁用过程异常同样吞掉。
+   */
+  async function setNotificationsEnabled(on: boolean): Promise<boolean> {
+    try {
+      if (on) {
+        const notifier = getFinanceNotifier()
+        // 环境不支持（node / 非安全上下文 / 无 Notification / IndexedDB 缺失）。
+        if (!notifier) {
+          notificationsEnabled.value = false
+          return false
+        }
+        const ok = await notifier.enable()
+        if (!ok) {
+          // 用户拒绝或浏览器返回非 granted：偏好位保持关闭。
+          notificationsEnabled.value = false
+          return false
+        }
+        notificationsEnabled.value = true
+        persist()
+        await syncNotificationSchedules()
+        return true
+      }
+      // 关闭：先落本地位，再尽力释放通知器资源。
+      notificationsEnabled.value = false
+      persist()
+      const notifier = getFinanceNotifier()
+      if (notifier) {
+        try {
+          await notifier.disable()
+        } catch {
+          // 禁用失败不影响开关语义（本地位已关闭，后续调度全部短路）。
+        }
+      }
+      return false
+    } catch {
+      // 任何意外异常都按「未启用」兜底，绝不把异常抛给 UI 事件处理器。
+      notificationsEnabled.value = false
+      return false
+    }
+  }
+
+  /**
+   * 应用解锁 / 打开时补发已到期提醒（AppShell.finishUnlock 调用）。
+   *
+   * 仅在偏好位开启且通知器可用并处于 enabled 时执行；补发默认走系统
+   * 通知（fireDueOnOpen 未传 onFire 时通知层内部直接 sink.show）。
+   * 全程吞异常，不阻塞解锁主流程。
+   */
+  async function replayDueNotifications(): Promise<void> {
+    try {
+      if (!notificationsEnabled.value) return
+      const notifier = getFinanceNotifier()
+      if (!notifier || !notifier.enabled) return
+      await notifier.fireDueOnOpen()
+    } catch {
+      // 静默：补发是锦上添花，失败不影响进入主框架。
+    }
+  }
+
+  /**
+   * 停止通知并释放资源（锁定 / 退出登录 / 授权失效场景调用）。
+   *
+   * 同步接口：内部清定时器并异步清空 IndexedDB（异步结果由通知层吞掉）。
+   * 注意：本函数不改动 notificationsEnabled 偏好位——该位是跨锁定周期
+   * 的用户偏好，重新解锁时 AppShell 据此无感恢复；通知器进程内单例的
+   * active 态才是当前会话的实时启用状态。
+   */
+  function stopNotifications(): void {
+    try {
+      const notifier = getFinanceNotifier()
+      if (notifier) notifier.dispose()
+    } catch {
+      // 释放失败静默：锁定流程必须继续，不能因通知层异常中断。
+    }
   }
 
   // ========== 附件 getters ==========
@@ -1008,6 +1175,9 @@ export const useFinanceStore = defineStore('finance', () => {
     if (state == null) {
       schemaVersion.value = 2
       hydrated.value = true
+      // B7：无本地数据同样走一次通知对账（偏好位为 true 时把空集合全量
+      // 同步给通知器，清掉可能残留的旧条目）；void 不阻塞 hydrate 返回。
+      void syncNotificationSchedules()
       return
     }
     // schema 版本不匹配 → 按"丢数据"处理（v1 → v2 由 T-migration 接管）。
@@ -1026,6 +1196,9 @@ export const useFinanceStore = defineStore('finance', () => {
         : DEFAULT_CURRENCY
     // 还原汇率包信封版本表；仅接受 value 为正整数的键，其余丢弃。
     rateRecordVersions.value = restoreRateVersions(state.rateRecordVersions)
+    // B7：还原浏览器通知偏好位。旧本地数据无此字段（undefined）时按
+    // false 处理；只接受严格布尔 true，任何异常形态都安全降级为关闭。
+    notificationsEnabled.value = state.notificationsEnabled === true
     // 还原 v1 三类条目。
     for (const acc of state.accounts ?? []) {
       accounts.set(acc.id, {
@@ -1126,6 +1299,11 @@ export const useFinanceStore = defineStore('finance', () => {
       })
     }
     hydrated.value = true
+    // B7：本地数据还原完成后做一次通知全量对账（偏好位关闭或通知器未
+    // 启用时内部短路）。hydrate 是同步 action，故以 void Promise 形式
+    // 触发：通知调度只走内存 Map 计算与通知层异步写入，绝不拖慢 / 阻塞
+    // 财务首屏；任何异常都在 syncNotificationSchedules 内部吞掉。
+    void syncNotificationSchedules()
   }
 
   /**
@@ -1169,6 +1347,9 @@ export const useFinanceStore = defineStore('finance', () => {
       rateTable: rateTable.value,
       defaultCurrency: defaultCurrency.value,
       rateRecordVersions: { ...rateRecordVersions.value },
+      // B7：浏览器通知偏好位随同一 StorageState 明文落盘（可选字段，
+      // schemaVersion 保持 2；旧版本读取时忽略，缺失时 hydrate 按 false 还原）。
+      notificationsEnabled: notificationsEnabled.value,
     }
     storage.write(state)
   }
@@ -1209,6 +1390,10 @@ export const useFinanceStore = defineStore('finance', () => {
       lastSyncAt.value = Date.now()
       // 拉取完成后即时落盘——确保下次解锁 hydrate 能拿到最新视图。
       persist()
+      // B7：远端数据可能改变三类提醒集合，落盘后做一次通知全量对账。
+      // 放在 try 块尾部（仅成功路径执行）；void 不阻塞 pullAll 的 await
+      // 链路，同步循环与偏好位关闭时均为零成本短路。
+      void syncNotificationSchedules()
     } finally {
       syncing.value = false
     }
@@ -1478,6 +1663,8 @@ export const useFinanceStore = defineStore('finance', () => {
     subscriptions.set(record.id, record)
     persist()
     void pushChanges([data])
+    // B7：订阅变化可能改变续费提醒集合；void 触发全量对账（不阻塞 CRUD）。
+    void syncNotificationSchedules()
   }
 
   /** 更新订阅。 */
@@ -1488,6 +1675,8 @@ export const useFinanceStore = defineStore('finance', () => {
     subscriptions.set(record.id, record)
     persist()
     void pushChanges([data])
+    // B7：同 addSubscription，更新后通知条目以最新数据全量重排。
+    void syncNotificationSchedules()
   }
 
   /**
@@ -1516,6 +1705,9 @@ export const useFinanceStore = defineStore('finance', () => {
     }
     since = Math.max(since, res.server_time)
     await pullAll(since)
+    // B7：删除可能减少续费提醒；pullAll 内部虽已触发一次，这里显式补一次以满足
+    // “9 个 CRUD 均接线”的契约。reschedule 为全量幂等替换，重复调用无副作用。
+    void syncNotificationSchedules()
   }
 
   // ========== CRUD —— 保单（policy, v2） ==========
@@ -1526,6 +1718,8 @@ export const useFinanceStore = defineStore('finance', () => {
     policies.set(record.id, record)
     persist()
     void pushChanges([data])
+    // B7：保单变化可能改变到期提醒集合；void 触发全量对账（不阻塞 CRUD）。
+    void syncNotificationSchedules()
   }
 
   function updatePolicy(data: FinancePolicy): void {
@@ -1535,6 +1729,8 @@ export const useFinanceStore = defineStore('finance', () => {
     policies.set(record.id, record)
     persist()
     void pushChanges([data])
+    // B7：同 addPolicy，更新后通知条目以最新数据全量重排。
+    void syncNotificationSchedules()
   }
 
   async function deletePolicy(id: string): Promise<void> {
@@ -1559,6 +1755,8 @@ export const useFinanceStore = defineStore('finance', () => {
     }
     since = Math.max(since, res.server_time)
     await pullAll(since)
+    // B7：删除可能减少到期提醒；显式补一次全量重排（幂等，无副作用）。
+    void syncNotificationSchedules()
   }
 
   // ========== CRUD —— 应收借款（loan, v2） ==========
@@ -1569,6 +1767,8 @@ export const useFinanceStore = defineStore('finance', () => {
     loans.set(record.id, record)
     persist()
     void pushChanges([data])
+    // B7：借款变化可能改变还款提醒集合；void 触发全量对账（不阻塞 CRUD）。
+    void syncNotificationSchedules()
   }
 
   function updateLoan(data: FinanceLoan): void {
@@ -1578,6 +1778,8 @@ export const useFinanceStore = defineStore('finance', () => {
     loans.set(record.id, record)
     persist()
     void pushChanges([data])
+    // B7：同 addLoan，更新后通知条目以最新数据全量重排。
+    void syncNotificationSchedules()
   }
 
   async function deleteLoan(id: string): Promise<void> {
@@ -1602,6 +1804,8 @@ export const useFinanceStore = defineStore('finance', () => {
     }
     since = Math.max(since, res.server_time)
     await pullAll(since)
+    // B7：删除可能减少还款提醒；显式补一次全量重排（幂等，无副作用）。
+    void syncNotificationSchedules()
   }
 
   // ========== CRUD —— 合同（contract, v2） ==========
@@ -1725,6 +1929,9 @@ export const useFinanceStore = defineStore('finance', () => {
     rateTable.value = null
     defaultCurrency.value = DEFAULT_CURRENCY
     rateRecordVersions.value = {}
+    // B7：锁定 / 登出时撤销所有已排期本地通知并释放定时器。
+    // 注意：notificationsEnabled 偏好位刻意保留（下次解锁若仍为 true 可直接恢复）。
+    stopNotifications()
   }
 
   /**
@@ -1765,6 +1972,9 @@ export const useFinanceStore = defineStore('finance', () => {
     rateTable.value = null
     defaultCurrency.value = DEFAULT_CURRENCY
     rateRecordVersions.value = {}
+    // B7：测试间隔离，通知偏好位复位、通知器进程内单例清空。
+    notificationsEnabled.value = false
+    resetFinanceNotifierForTest()
   }
 
   // ========== 附件 CRUD（TR-3.3） ==========
@@ -1848,6 +2058,12 @@ export const useFinanceStore = defineStore('finance', () => {
     precheckTx,
     // v2 提醒纯计算出口（TR-4.3；Web 端无 AlarmManager，仅产出数据）
     upcomingV2Reminders,
+    // B7 浏览器本地通知（FR-V2-G / AC-V2F-14、AC-V2F-15）
+    notificationsEnabled,
+    setNotificationsEnabled,
+    syncNotificationSchedules,
+    replayDueNotifications,
+    stopNotifications,
     // 查询
     byId,
     // 启动 / 持久化

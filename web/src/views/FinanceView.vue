@@ -25,7 +25,10 @@
 // ============================================================================
 
 import { computed, onMounted, ref } from 'vue'
-import { NButton, NRadioGroup, NRadio, NEmpty, NSpace } from 'naive-ui'
+import { NButton, NRadioGroup, NRadio, NEmpty, NSpace, NSwitch, useMessage } from 'naive-ui'
+// B7 / FR-V2-G：仅用于在开关失败时区分“环境不支持”与“权限被拒”两种提示，
+// 不直接操作通知器（启用 / 调度 / 补发全部收口在 store action 内）。
+import { getFinanceNotifier } from '../notifications/financeNotifications'
 import FinanceDashboard from './finance/FinanceDashboard.vue'
 import FinanceAccountList from './finance/FinanceAccountList.vue'
 import FinanceCardList from './finance/FinanceCardList.vue'
@@ -86,6 +89,35 @@ function gotoEditor(
   const hash = '#/finance/editor/' + type
   window.location.hash = hash
 }
+
+// ========== B7 浏览器通知开关（FR-V2-G / AC-V2F-14） ==========
+// useMessage 依赖根级 NMessageProvider（App.vue 已挂载）；node 环境的
+// 静态断言测试不 mount 组件，故此处不会在测试中真实执行。
+const message = useMessage()
+
+/**
+ * NSwitch 切换回调：把启用 / 关闭动作整体收口到 store，
+ * 视图层只负责按返回结果给出固定文案提示。
+ *
+ * 零知识纪律：提示文案只描述“通知能力”本身，绝不出现金额、日期、
+ * 卡号、对手方、保单号、具体名称等任何业务数据。
+ *
+ * @param on 开关目标态（naive-ui NSwitch update:value 回调参数）
+ */
+async function onToggleNotifications(on: boolean): Promise<void> {
+  // 开启前先探测环境：node / 非安全上下文 / 无 Notification 或 IndexedDB
+  // 时通知器单例恒为 null，此时给“不支持”提示，与“权限被拒”区分开。
+  if (on && getFinanceNotifier() === null) {
+    message.warning('当前浏览器不支持系统通知')
+    return
+  }
+  const ok = await store.setNotificationsEnabled(on)
+  if (!ok) {
+    // store 返回 false 覆盖两种情形：环境不支持（理论上上面已拦住）
+    // 与权限申请未获 granted；统一提示用户去浏览器设置中修改。
+    message.warning('通知权限未开启，可在浏览器设置中修改')
+  }
+}
 </script>
 
 <template>
@@ -93,6 +125,19 @@ function gotoEditor(
     <div class="page-head">
       <h2>财务</h2>
       <n-space class="head-tools" :size="10">
+        <!-- B7：浏览器本地通知总开关，常驻显示（不受 Tab 切换影响）。
+             :value 单向绑定 store 偏好位，切换走 @update:value 异步动作；
+             失败时 store 位不变，开关随 :value 自动回弹。零知识：此处及
+             提示文案均不含任何财务业务数据。 -->
+        <span class="notification-switch">
+          <span class="notification-switch-label">浏览器通知</span>
+          <n-switch
+            data-testid="finance-notification-switch"
+            size="small"
+            :value="store.notificationsEnabled"
+            @update:value="onToggleNotifications"
+          />
+        </span>
         <n-button v-if="activeTab === 'accounts'" size="small" type="primary" @click="gotoEditor('account')">
           + 新建账户
         </n-button>
@@ -171,6 +216,18 @@ h2 {
 }
 .head-tools {
   align-items: center;
+}
+/* B7：通知开关组（标签 + NSwitch）垂直居中并留间距 */
+.notification-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.notification-switch-label {
+  font-size: 13px;
+  /* 直接使用字面色值，避免引用 CSS 自定义属性（其变量名语法含双连字符）。 */
+  color: #666;
+  white-space: nowrap;
 }
 .tabs {
   display: flex;
