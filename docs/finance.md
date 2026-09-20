@@ -407,6 +407,49 @@ rebuildChain`，**不新建**第二个 Scheduler；通过"扩展模块分支"接
 
 v1 仅启用前两类写入；订阅 / 保单 / 借款三类留 v2。
 
+### 6.9 Web 端通知（v2 / B7，FR-V2-G）
+
+Web 端通知基建在 stage5-finance-v2 / B7 批次**从零建立**：v1 没有任何
+Service Worker，事件同步只走 SSE 数据通道，与通知无关。全站只注册并持有
+**一个** Service Worker（[`web/public/sw.js`](file:///d:/github/everything/everything/web/public/sw.js)，
+固定名 `eve-sw`），预留 `finance` 与 `events` 两个消息通道路由；本期只实现
+finance 通道，events 通道收到消息一律静默。SW 不拦截 fetch、不订阅 push、
+不注册 sync；install 直接 skipWaiting，activate 立即 clients.claim。
+
+| 组成 | 文件 / 符号 | 职责 |
+|---|---|---|
+| 通知基础层 | [`financeNotifications.ts`](file:///d:/github/everything/everything/web/src/notifications/financeNotifications.ts) | 权限申请、setTimeout 调度、IndexedDB 持久化、SW 消息下发 |
+| Service Worker | [`web/public/sw.js`](file:///d:/github/everything/everything/web/public/sw.js) | `finance` 通道 show/cancel 透传；点击通知聚焦或新开 `#/finance` |
+| store 接线 | [`stores/finance.ts`](file:///d:/github/everything/everything/web/src/stores/finance.ts) | 偏好位持久化、`upcomingV2Reminders()` 全量对账、解锁恢复 / 锁定停用 |
+| 开关 UI | [`FinanceView.vue`](file:///d:/github/everything/everything/web/src/views/FinanceView.vue) | 头部常驻「浏览器通知」NSwitch，权限失败给固定抽象文案 toast |
+| 生命周期 | [`AppShell.vue`](file:///d:/github/everything/everything/web/src/views/AppShell.vue) | 解锁成功注册 SW + 补发到期；lock / logout / 授权失效统一停用 |
+
+关键规则：
+
+- **可测性注入**：基础层通过 `ScheduleStore` / `SchedulerClock` /
+  `NotificationSink` 三个抽象注入，模块顶层不触碰 navigator / Notification /
+  indexedDB，node 环境（无 jsdom）即可全量单测；
+- **调度口径**：store 把纯计算出口 `upcomingV2Reminders()` 的结果显式映射为
+  `{ kind, id, triggerMs }` 三字段调 `reschedule()`，内部为幂等全量替换
+  （先清全部定时器，再与 IndexedDB 全量对账）；三类 CRUD / hydrate / pullAll
+  后均以 `void` 非阻塞重排；setTimeout 延迟按 32 位上限
+  `2147483647` 钳位，超长等待靠到期幂等续排；
+- **零知识红线**：SW 不拼业务文案只透传；标题固定「财务提醒」，三类正文与
+  Android `strings.xml` 逐字一致（订阅续费临近，点击查看 / 保单即将到期，
+  点击查看 / 借款到期临近，点击查看）；IndexedDB 库 `eve-finance-notifications`
+  的 `schedules` 仓库（keyPath `id`）每条只允许 `{ kind, id, triggerMs }`
+  三个白名单键，金额、日期、卡号、对手方、保单号、具体名称既不渲染也不落盘，
+  触发时刻不进 records、不上行；
+- **降级路径**：通知是增强能力，SW 注册 / IndexedDB 写入 / 通知下发任何失败
+  均静默，不影响财务主流程；浏览器不支持或权限非 granted 时开关自动回退，
+  FinanceView 给「当前浏览器不支持系统通知」或「通知权限未开启，可在浏览器
+  设置中修改」两条固定 toast；
+- **生命周期**：解锁成功后注册 SW，偏好位为 true 时无感重新 enable（已 granted
+  不再弹框）并补发已到期提醒；锁定 / 退出 / 授权失效调 `stopNotifications()`
+  清定时器并清空 IndexedDB，偏好位作为跨锁定周期的本地偏好保留；
+- **偏好持久化**：`notificationsEnabled` 作为可选布尔字段随财务本地状态落盘
+  （`eve:finance:v1`），schemaVersion 保持 2 不升级，旧数据缺失按 false 降级。
+
 ---
 
 ## 7. v2 子类型（财务二版 stage5-finance-v2）
@@ -709,6 +752,8 @@ Web 与 Android 端对应 fixture 文件 SHA-256 **逐字节一致**，由 Task 
 | Android Luhn 校验 | [`Luhn.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/Luhn.kt) | 卡号校验 + 后四位提取 |
 | Android 链式调度 | [`ReminderScheduler.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/reminder/ReminderScheduler.kt) | 单闹钟 + module 路由 |
 | Android 接收路由 | [`ReminderReceiver.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/reminder/ReminderReceiver.kt) | event / finance 分支 |
+| Web 通知基础层（B7） | [`financeNotifications.ts`](file:///d:/github/everything/everything/web/src/notifications/financeNotifications.ts) | 权限 / 调度 / IndexedDB / SW 下发（见 §6.9） |
+| Web 全站唯一 SW（B7） | [`web/public/sw.js`](file:///d:/github/everything/everything/web/public/sw.js) | finance 通道透传 + 通知点击路由（events 通道预留） |
 | Android Room v6 | [`EveDatabase.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/EveDatabase.kt) | MIGRATION_5_6 + 四表 schema |
 | FR-1 字段详细定义 | `.trae/specs/stage5-finance/spec.md` §FR-1 | account / card / tx 三类字段源 |
 | 实施任务分解 | `.trae/specs/stage5-finance/tasks.md` Task 1 ~ Task 13 | 批派发序列与子任务 |

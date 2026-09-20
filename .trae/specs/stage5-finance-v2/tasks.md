@@ -363,9 +363,9 @@
 
 ## Task 7: Web 端提醒（Web Notification API + Service Worker）（P1）
 
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
-- **Depends On**: Task 4 + v1 既有 Service Worker
+- **Depends On**: Task 4（实际调查结论：仓库不存在「v1 既有 Service Worker」，本批为从零新建，见证据明细「前提勘误」）
 - **Description**:
   - 修改 `web/public/sw.js`：复用 v1 events 既有注册逻辑，增加 finance 
     通知通道（订阅扣费 / 保单到期 / 借款到期 3 类）
@@ -384,6 +384,13 @@
   - TR-7.2 financeNotifications.ts（schedule / cancel / permission）
   - TR-7.3 FinanceView 通知开关 UI
   - TR-7.4 Web 单测 ≥6 用例
+  - **证据明细（逐条 TR）**：
+    - **前提勘误（影响 Description 两处假设）**：① `web/public/` 在本批前不存在，v1 events 仅有 SSE 数据同步（`stores/events.ts` EventSource `/api/v1/events`），**没有任何 Service Worker**，故 SW 为从零新建的全站唯一实例（固定名 `eve-sw` / 版本 v1），消息路由预留 `finance`（本期实现）与 `events`（占位静默）两通道，不拦截 fetch、不订阅 push/sync；② 开关所在文件实际路径为 `web/src/views/FinanceView.vue`（非 Description 所写 `views/finance/FinanceView.vue`），按真实路径改动；③ 依零知识红线（FR-V2-G.1「触发时刻不进 records」、AC-V2F-19），IndexedDB **不缓存 finance 明文**，每条仅白名单三字段 `{kind,id,triggerMs}`，对原 Description「缓存本地 finance 明文」做合规收窄。
+    - TR-7.1：新建 `web/public/sw.js`（ES2017、无 import、浏览器直跑）。install skipWaiting；activate clients.claim 并清理异名缓存；message 路由 `{channel,type,payload}`，finance 通道 `show` → registration.showNotification（tag 默认 `finance-{kind}-{id}` 同提醒替换式覆盖，data 仅 `{channel,kind,id}`），`cancel` → getNotifications 逐条 close；events 通道与任何畸形消息一律静默；notificationclick 先 close，再 matchAll 聚焦含 `/finance` 的 client（兼容 hash 路由），无则 openWindow('./#/finance')；全程 waitUntil + catch 静默。vite 将 public 原样拷入 `server/web/dist`（gitignore），Go spaHandler 对真实文件直返，`/sw.js` 生产可达，服务端零改动。
+    - TR-7.2：新建 `web/src/notifications/financeNotifications.ts`。三抽象依赖注入（`ScheduleStore` / `SchedulerClock` / `NotificationSink`），模块顶层不触碰 navigator/Notification/indexedDB（适配 vitest node 环境，无 jsdom）。导出 `createFinanceNotifier(deps)`：`enable()` 仅 granted 置启用；`disable()` 清定时器 + 清 IDB；`reschedule(entries)` 幂等全量替换（先清全部定时器，再与 IDB 全量对账删多余/put 本次，未来条目排定时器、过期条目留 store 计 expired，返回 `{scheduled,expired}`）；到点 fire 走 sink.show 后删 store，show reject / onFire 抛错整条链全吞；`fireDueOnOpen()` 处理打开补发，可选 onFire 回调作为页内降级决策点；`dispose()` 同步清定时器 + 异步清 IDB。浏览器工厂：IDB 库 `eve-finance-notifications` / store `schedules` / keyPath `id` / version 1，put 仅写白名单三字段、以 tx oncomplete 为成功信号、indexedDB 缺失抛中文错误；clock 对 setTimeout 按 32 位上限 2147483647 clamp；sink 优先 `registration.active.postMessage({channel:'finance',type:'show',payload})`，SW 不可用退回 `new Notification`。单例 `getFinanceNotifier()`（环境缺失/构造失败均返回 null 绝不抛错）、`resetFinanceNotifierForTest()`、`registerFinanceServiceWorker(navOverride?)`（register('sw.js')，不支持/失败均静默 resolve）。固定文案与 Android strings.xml 逐字一致：标题「财务提醒」；订阅「订阅续费临近，点击查看」/ 保单「保单即将到期，点击查看」/ 借款「借款到期临近，点击查看」。
+    - TR-7.3：`stores/finance.ts` 新增 state `notificationsEnabled`（默认 false，作为可选布尔随 `eve:finance:v1` 持久化，schemaVersion 保持 2 不升级，旧数据缺失按 false 降级）；actions：`setNotificationsEnabled(on)`（不支持→false、enable 非 granted→false 且开关回弹、成功才置位+persist+全量调度）、内部 `syncNotificationSchedules()`（消费纯计算出口 `upcomingV2Reminders()`，显式映射 `{kind,id,triggerMs}` 调 reschedule，三重前置：偏好位/notifier/ enabled，异常全吞）、`replayDueNotifications()`（打开补发）、`stopNotifications()`（dispose，偏好位刻意保留供解锁无感恢复）；9 个三类 CRUD + hydrate 两分支 + pullAll 后均以 `void` 非阻塞重排；`reset()` 停用、`_resetForTest()` 复位偏好位并重置通知器单例。`FinanceView.vue` 头部 head-tools 内常驻 `<n-switch data-testid="finance-notification-switch">`（无 v-if、不受 Tab 影响），`:value` 单向绑定偏好位，失败固定 toast「当前浏览器不支持系统通知」/「通知权限未开启，可在浏览器设置中修改」（FR-V2-G.1 拒绝→页内提示降级）。`AppShell.vue` 在解锁公共收尾 `finishUnlock`（密码/MFA/待审批三路径共用）调 `restoreFinanceNotifications()`：注册 SW + hydrate + 偏好位为 true 时重新 enable（已 granted 不弹框）后 sync + replay；`lock()` / `logout()` / `onAuthExpired()`（先于 auth.logout）三处均 `stopNotifications()`。
+    - TR-7.4：Web 新增 **36 用例**（远超 ≥6）：`notifications/__tests__/financeNotifications.spec.ts` 19 用例（手工内存 ScheduleStore + 可 tick ManualClock + FakeSink + 极小内存假 IndexedDB：权限三态、reschedule 全量替换与计数、三 kind 到点文案逐字、过期补发 onFire/默认双路径、禁用不弹且清空、show reject 静默、回调同异步抛错吞、同 id 幂等、假 IDB 往返与白名单键集合、indexedDB 缺失中文报错、单例 null 两场景、SW 注册三场景、零知识正则红线）；`stores/__tests__/financeNotificationsStore.spec.ts` 11 用例（vi.mock 整体替换通知层：偏好位默认值/持久化往返且 schemaVersion 仍为 2、启用成功 reschedule 条目键集合严格 `['id','kind','triggerMs']`、权限被拒/环境不支持、关闭调 disable、CRUD/hydrate 启用态触发、replay/reset 保留偏好位/_resetForTest 隔离、stopNotifications 直通 dispose 不抛错）；`views/__tests__/FinanceView.spec.ts` 6 用例（沿用 B6 `?raw` 静态断言、不 mount：testid 常驻无 v-if 且位于 head-tools、标签与绑定回调、两条固定文案与环境探测、零知识负向断言（无货币符号/日期形态/四位数字/敏感字段名）、AppShell finishUnlock 注册+恢复+补发、lock/logout/onAuthExpired 三处 stop 且授权失效先于 logout）。
+    - **门禁（主代理亲跑核实）**：Web 全量 `npx vitest run` = **44 files / 654 tests 全通过**（B6 基线 618 + 本批 36，数字双向闭合）；`npx vue-tsc --noEmit` exit 0；`npx vite build` 成功（built in 19.13s，dist/sw.js 已产出；chunk 体积警告为既有）；新增/改动代码 grep 无 ASCII 双连字符（唯一命中为 Vue 模板 HTML 注释定界符 `<!-- -->`，语法必需）；无新增 npm 依赖。
 
 ---
 
