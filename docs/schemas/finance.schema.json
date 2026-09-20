@@ -2,12 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://everything.eve/schemas/finance.schema.json",
   "title": "finance module plaintext JSON Schema",
-  "description": "阶段 5 finance 模块明文 JSON Schema（v1）。三条子类型：account / card / tx；v2 占位：policy / subscription / loan / contract（仅在 FinanceType 枚举里登记，本 schema 不下发字段）。\n\n==\n\n设计要点：\n- module 固定 \"finance\"；type 子类型由 record-level type 字段区分，本文件按 type 分别给出 schema。\n- 完全复用阶段 1 records 信封（XChaCha20-Poly1305 + AAD `eve:v1:record:{id}:{module}:{BE(uint64 version)}`，module=\"finance\"）；不新造 envelope 参数。\n- 服务端零知识：只校验 id / module 非空与密文非空，不校验 type、不解密、不接触任何明文财务字段。\n- decimal-as-string：所有金额字段以字符串承载，避免 JavaScript Number 浮点精度丢失。\n- 时间戳字段一律 Unix 毫秒 int64。\n- 卡号后四位纪律：card.last4 仅入 schema 后四位（4 位数字字符串），完整卡号不入任何持久化层。\n\n==\n\n跨端契约：Web `web/src/finance/types.ts`、Android `FinanceAccountEntity.kt` / `FinanceCardEntity.kt` / `FinanceTxEntity.kt` 与本 schema 字段逐字段一致。任何字段变更须三端同改 + 同步更新 `docs/module-schemas.md` 第 9 章 + 更新跨端 fixture（保持 SHA-256 一致仍由 fixture 派生）。",
+  "description": "阶段 5 finance 模块明文 JSON Schema。v1 三条子类型：account / card / tx（schema_version=1）；v2 预算：budget（B6 启用，schema_version=2，走 records 密文通道、无独立 Room 表）；v2 占位：policy / subscription / loan / contract（仅在 FinanceType 枚举里登记，本 schema 不下发字段）。\n\n==\n\n设计要点：\n- module 固定 \"finance\"；type 子类型由 record-level type 字段区分，本文件按 type 分别给出 schema。\n- 完全复用阶段 1 records 信封（XChaCha20-Poly1305 + AAD `eve:v1:record:{id}:{module}:{BE(uint64 version)}`，module=\"finance\"）；不新造 envelope 参数。\n- 服务端零知识：只校验 id / module 非空与密文非空，不校验 type、不解密、不接触任何明文财务字段。\n- decimal-as-string：所有金额字段以字符串承载，避免 JavaScript Number 浮点精度丢失。\n- 时间戳字段一律 Unix 毫秒 int64。\n- 卡号后四位纪律：card.last4 仅入 schema 后四位（4 位数字字符串），完整卡号不入任何持久化层。\n- B6 预算零知识红线：预算相关通知 / 对话框文案只允许出现“百分比 + 分类名”，禁止渲染金额、日期、卡号、对手方。\n\n==\n\n跨端契约：Web `web/src/finance/types.ts`、Android `FinanceAccountEntity.kt` / `FinanceCardEntity.kt` / `FinanceTxEntity.kt` 与本 schema 字段逐字段一致（预算为 `FinanceRecords.kt` 的 BudgetRecord）。任何字段变更须三端同改 + 同步更新 `docs/module-schemas.md` 第 9 章 + 更新跨端 fixture（保持 SHA-256 一致仍由 fixture 派生）。",
   "type": "object",
   "oneOf": [
     { "$ref": "#/$defs/FinanceAccount" },
     { "$ref": "#/$defs/FinanceCard" },
-    { "$ref": "#/$defs/FinanceTx" }
+    { "$ref": "#/$defs/FinanceTx" },
+    { "$ref": "#/$defs/FinanceBudget" }
   ],
   "$defs": {
     "FinanceType": {
@@ -16,12 +17,13 @@
         "account",
         "card",
         "tx",
+        "budget",
         "policy",
         "subscription",
         "loan",
         "contract"
       ],
-      "$comment": "v1 仅下发前三类（account / card / tx）；policy / subscription / loan / contract 在 v2 启用，本期仅占位常量。"
+      "$comment": "v1 仅下发前三类（account / card / tx）；budget 随 B6 在 v2 启用（records 通道，无独立 Room 表，schema_version=2）；policy / subscription / loan / contract 在 v2 启用，本期仅占位常量。"
     },
     "SchemaVersion": {
       "type": "integer",
@@ -292,6 +294,90 @@
         "updated_at": {
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "BudgetScope": {
+      "type": "string",
+      "enum": ["monthly", "weekly", "yearly", "custom"],
+      "$comment": "预算周期口径（B6）。monthly/yearly 按 CST（UTC+8）自然月/自然年滚动分桶；weekly 以 start_ts 所在 CST 日期零点为 epoch 每 7 天一个滚动桶（非自然周）；custom 在有效期内仅一个桶 [start_ts, end_ts+1)。"
+    },
+    "BudgetAmountString": {
+      "type": "string",
+      "pattern": "^(\\d+)(?:\\.(\\d{1,2}))?$",
+      "$comment": "预算额度 decimal-as-string（元）；正数、最多两位小数；纯函数计算时统一转 minor 分整数（Android Long / Web bigint），禁止浮点。"
+    },
+    "FinanceBudget": {
+      "type": "object",
+      "title": "FinanceBudget (type=budget, B6, schema_version=2)",
+      "description": "预算条目明文 payload（B6；13 字段，schema_version 固定 2）。走 records 密文通道（module=\"finance\"、type=\"budget\"），不建独立 Room 表，复用 upsertFinanceV2 / 墓碑 / decryptFinanceV2。零知识红线：预算通知与对话框文案只允许出现“百分比 + 分类名”，禁止渲染金额、日期、卡号、对手方。判定与分桶口径见 docs/finance.md §7.7、docs/module-schemas.md §9.5.2。",
+      "required": [
+        "id",
+        "schema_version",
+        "scope",
+        "category",
+        "amount_minor",
+        "currency",
+        "start_ts",
+        "end_ts",
+        "warning_threshold_pct",
+        "block_threshold_pct",
+        "active",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/UuidString" },
+        "schema_version": {
+          "type": "integer",
+          "const": 2,
+          "$comment": "预算记录固定 schema_version=2（v2 记录），不可引用 SchemaVersion（其 const=1）。"
+        },
+        "scope": { "$ref": "#/$defs/BudgetScope" },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "$comment": "分类匹配值；特殊值 \"all\" 表示覆盖全部分类，其余为具体分类名（1-20 字符）。"
+        },
+        "amount_minor": { "$ref": "#/$defs/BudgetAmountString" },
+        "currency": { "$ref": "#/$defs/Iso4217Currency" },
+        "start_ts": {
+          "type": "integer",
+          "minimum": 1,
+          "$comment": "预算有效期起点，Unix 毫秒（含）；必须为正整数；也是 weekly 滚动桶 epoch 锚点。"
+        },
+        "end_ts": {
+          "type": "integer",
+          "minimum": 1,
+          "$comment": "预算有效期终点，Unix 毫秒（含）；必须大于等于 start_ts；custom 桶为 [start_ts, end_ts+1)。"
+        },
+        "warning_threshold_pct": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "$comment": "预警阈值百分数（80 表示 80%）；合法区间 1..10000，且必须小于等于 block_threshold_pct；命中仅 Toast 告警，不阻断。"
+        },
+        "block_threshold_pct": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "$comment": "阻断确认阈值百分数（100 表示 100%，150 表示 150%）；合法区间 1..10000；命中弹超支确认对话框，确认后方可二次保存。"
+        },
+        "active": {
+          "type": "boolean",
+          "$comment": "是否启用；false 表示停用且不参与判定，但保留历史记录。"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "$comment": "创建时刻，Unix 毫秒。"
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "$comment": "最后更新时刻，Unix 毫秒。"
         }
       }
     }

@@ -478,9 +478,9 @@ Web `locations/core/types.ts` 与之逐字段一致（三方契约，任何改�
 finance 作为 records 表一条密文记录写入，明文载荷符合本节定义：
 
 - **`module = "finance"`**、`type ∈ { "account", "card", "tx", "policy",
-  "subscription", "loan", "contract" }`（与第 7 章 `place`、第 8 章 `event`
-  同款 `module`/`type` 双键约定；前者用于 records 投递索引，后者随明文写
-  入密文内供端侧识别）。
+  "subscription", "loan", "contract", "budget" }`（与第 7 章 `place`、第 8 章
+  `event` 同款 `module`/`type` 双键约定；前者用于 records 投递索引，后者随
+  明文写入密文内供端侧识别；`budget` 为 B6 新增子标识，不建独立 Room 表）。
 - **AAD 沿用 `eve:v1:record:{id}:{module}:{BE(uint64 version)}`**，与既有
   records 记录**逐字节一致**（module=`"finance"`），**不新造** envelope 参数；
   详见 [crypto.md](crypto.md) §5.1。
@@ -498,15 +498,17 @@ finance 作为 records 表一条密文记录写入，明文载荷符合本节定
 |---|---|---|---|
 | `account`（账户） | ✅ | ✅ | 9.3（11 字段） |
 | `card`（银行卡 / 信用卡） | ✅ | ✅ | 9.4（17 字段） |
-| `tx`（日常记账） | ✅ | ✅ | 9.5（13 字段） |
+| `tx`（日常记账） | ✅ | ✅ | 9.5（13 业务字段 + B6 审计列 `overspend_acknowledged`） |
+| `budget`（预算，B6） | ⏳ v1 无 | ✅ | 9.5.2（13 字段，`schema_version=2`；records 通道，无独立 Room 表） |
 | `policy`（保单） | ⏳ 占位 | ✅ | v2 启用时按 9.3 + 保单专属字段扩展 |
 | `subscription`（订阅） | ⏳ 占位 | ✅ | v2 启用时按 9.4 + 订阅专属字段扩展 |
 | `loan`（应收 / 借款） | ⏳ 占位 | ✅ | v2 启用时按 9.3 + loan 专属字段扩展 |
 | `contract`（合同 / 发票） | ⏳ 占位 | ✅ | v2 启用时按 9.3 + 合同专属字段扩展 |
 
-`v1` 仅下发前三类（`account` / `card` / `tx`）；`policy` / `subscription` /
-`loan` / `contract` 在 v2 启用，本期**仅占位**——类型常量与 `schema_version=1`
-钩子保留，不下发编辑器与详情页。
+`v1` 仅下发前三类（`account` / `card` / `tx`）；`budget` 已随 B6 在 v2
+启用（见 §9.5.2，预算记录走 records 密文通道、不建独立 Room 表）；
+`policy` / `subscription` / `loan` / `contract` 在 v2 启用，本期**仅占位**
+——类型常量与 `schema_version=1` 钩子保留，不下发编辑器与详情页。
 
 ### 9.3 字段定义：type=account
 
@@ -604,6 +606,51 @@ finance 作为 records 表一条密文记录写入，明文载荷符合本节定
   校验拒绝保存）；取消转账对账等价于删两条 + 重录（不提供单条覆盖）。
 - 账户 / 卡被删除时其历史流水保留 `account_id=null` / `card_id=null` 墓碑，
   避免历史断裂（与 4a place / 4b event 删除语义一致）。
+
+#### 9.5.1 tx 审计扩展列：`overspend_acknowledged`（B6）
+
+B6 预算硬约束给 `finance_tx` Room 表增加一个**本地审计列**：
+
+| Room 列 | 类型 | 对应明文字段 | 说明 |
+|---|---|---|---|
+| `overspend_acknowledged` | INTEGER NOT NULL DEFAULT 0 | `overspend_acknowledged`（Web `FinanceTx` 可选 boolean；Android 明文 JSON 同名键） | 用户在超支确认对话框选"仍保存"时置 1；仅本地审计留痕，不参与预算判定。 |
+
+- Room 迁移 **v8 → v9**：`ALTER TABLE finance_tx ADD COLUMN
+  overspend_acknowledged INTEGER NOT NULL DEFAULT 0`，旧流水升级后一律为
+  未经确认；
+- 该字段不升 tx 的明文 `schema_version`（仍为 1）：它是端侧审计位而非业务
+  契约变更，对端侧预算判定无影响。
+
+### 9.5.2 字段定义：type=budget（B6 预算硬约束）
+
+预算走 records 密文通道子标识 `type="budget"`（**不新建 Room 表**，复用
+upsertFinanceV2 / 墓碑 / decryptFinanceV2 链路），明文固定
+`schema_version=2`，13 字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | 客户端生成（UUID v4）。 |
+| `schema_version` | integer | 是 | 固定 `2`。 |
+| `scope` | enum | 是 | `monthly` / `weekly` / `yearly` / `custom`。 |
+| `category` | string | 是 | `all` 表示覆盖全部分类；否则分类标签，1–20 字符。 |
+| `amount_minor` | string | 是 | decimal-as-string，预算额度，必须 > 0、最多 2 位小数。 |
+| `currency` | string | 是 | ISO 4217 三字母，默认 CNY。 |
+| `start_ts` | integer (int64) | 是 | 有效期起点（Unix 毫秒，> 0）。 |
+| `end_ts` | integer (int64) | 是 | 有效期终点（含），≥ `start_ts`。 |
+| `warning_threshold_pct` | integer | 是 | 预警阈值百分比，默认 80；`1 ≤ warning ≤ block ≤ 10000`。 |
+| `block_threshold_pct` | integer | 是 | 硬拦截阈值百分比，默认 100（允许 > 100）。 |
+| `active` | boolean | 是 | 停用预算不参与判定。 |
+| `created_at` | integer (int64) | 是 | Unix 毫秒。 |
+| `updated_at` | integer (int64) | 是 | Unix 毫秒。 |
+
+判定 / 分桶 / 拦截 / 零知识文案细则见 [`finance.md`](finance.md) §7.7。要点：
+
+- 分桶一律按 CST（UTC+8）：`monthly` 自然月、`yearly` 自然年、`weekly`
+  以预算 `start_ts` 所在 CST 日期零点为 epoch 的 7 天滚动窗（非周一自然周）、
+  `custom` 桶为 `[start_ts, end_ts + 1ms)`；锚点是流水 `occurred_at`；
+- 异币支出经 B5 汇率表折算到预算币种，**缺汇率保守放行**（不误拦）；
+- 预算告警文案只含"百分比 + 分类名"，**不渲染金额 / 日期 / 卡号 / 对手方**，
+  且不接入 Reminders 通知通道（仅端侧 toast / 对话框）。
 
 ### 9.6 调色板（color 枚举，扩展自 4a/4b 既有）
 
@@ -781,9 +828,10 @@ Room 表在业务字段之外**统一追加**以下 5 列系统字段，便于 r
 > 是**录入辅助字段**，不入 §9.4 明文 JSON（明文仍仅承载 §9.4 表字段），
 > Room 缓存便于 UI 展示与提醒排程；明文合同与 §9.4 一致，**不冲突**。
 
-#### 9.9.4 finance_tx（type=tx，18 列 = 13 业务字段 + 5 系统字段）
+#### 9.9.4 finance_tx（type=tx，19 列 = 14 业务字段 + 5 系统字段）
 
-业务字段与 §9.5 对应（13 字段），加 5 系统字段共 18 列：
+业务字段与 §9.5 对应（13 字段）+ B6 审计列 `overspend_acknowledged`，
+加 5 系统字段共 19 列：
 
 | Room 列 | 类型 | 对应 §9.5 字段 | 说明 |
 |---|---|---|---|
@@ -801,6 +849,7 @@ Room 表在业务字段之外**统一追加**以下 5 列系统字段，便于 r
 | `transfer_to_account_id` | TEXT | `transfer_to_account_id` | 转账入账方；`kind="transfer"` 时必填且 ≠ `account_id`。 |
 | `created_at` | INTEGER NOT NULL | `created_at` | Unix 毫秒。 |
 | `updated_at` | INTEGER NOT NULL | `updated_at` | Unix 毫秒。 |
+| `overspend_acknowledged` | INTEGER NOT NULL DEFAULT 0 | `overspend_acknowledged`（B6 审计列） | 0/1；超支确认对话框选"仍保存"时置 1，详见 §9.5.1；v8→v9 迁移新增。 |
 | `schema_version` | INTEGER NOT NULL DEFAULT 1 | 系统字段 | 见 9.9.1。 |
 | `module` | TEXT NOT NULL DEFAULT 'finance' | 系统字段 | 见 9.9.1。 |
 | `type` | TEXT NOT NULL DEFAULT 'tx' | 系统字段 | 见 9.9.1。 |
@@ -811,6 +860,9 @@ Room 表在业务字段之外**统一追加**以下 5 列系统字段，便于 r
 > `idx_finance_tx_occurred_at (occurred_at)` /
 > `idx_finance_tx_account_id (account_id)` /
 > `idx_finance_tx_dirty (dirty)`。
+>
+> Room 版本演进：v6 初版 → v7 四张子类型表（B4）→ v8 finance_rate 汇率表
+> （B5）→ **v9 本列 `overspend_acknowledged`（B6）**。
 
 #### 9.9.5 finance_reminder_log（4 列 + 自增主键）
 
@@ -833,8 +885,14 @@ Room 表在业务字段之外**统一追加**以下 5 列系统字段，便于 r
 |---|---|---|---|---|
 | `account` | 9 | 9 | 5 | 14 |
 | `card` | 14 | 14 | 5 | 19 |
-| `tx` | 13 | 13 | 5 | 18 |
+| `tx` | 13（另加 B6 审计列 `overspend_acknowledged`，不入明文 JSON 字段计数） | 14 | 5 | 19 |
 | `reminder_log` | — | 4（含自增主键） | — | 4 |
+
+> B6 增补：`finance_tx` 表随 Room v8→v9 迁移新增审计列
+> `overspend_acknowledged INTEGER NOT NULL DEFAULT 0`（详见 §9.5.1），
+> 该列**不进 §9.5 明文 JSON 业务字段**（records 载荷仍为 13 业务字段，
+> Web 端 `schema_version` 不升级），仅作本机 Room 审计位，故业务字段
+> 计数保持 13、Room 业务列与总列各 +1。
 
 > 说明：§9.3 / §9.4 / §9.5 中标注的 "11 字段 / 17 字段 / 13 字段"
 > 为**业务字段计数**（不含 Room 系统列，且 card 17 = 业务 14 + 系统 5

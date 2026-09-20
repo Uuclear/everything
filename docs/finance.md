@@ -426,8 +426,11 @@ Contract**。本期 v2 已落地数据契约 + 校验函数（[TR-1.1](#) / [TR-
 | `SUBSCRIPTION`（订阅） | ⏳ v1 占位 | ✅ v2 启用 |
 | `LOAN`（应收 / 借款） | ⏳ v1 占位 | ✅ v2 启用 |
 | `CONTRACT`（合同 / 发票） | ⏳ v1 占位 | ✅ v2 启用 |
+| `BUDGET`（预算，B6） | ⏳ v1 无 | ✅ v2 启用（records 通道 `type="budget"`，无独立 Room 表，详见 §7.7） |
 
-v2 启用时，类型枚举常量无需新增；4 子类型即 `FinanceType` 常量后 4 位。
+v2 启用时，类型枚举常量无需新增；4 子类型即 `FinanceType` 常量后 4 位；
+B6 预算复用 records 密文通道的子标识 `type="budget"`（见
+[`FinanceModule.TYPE_BUDGET`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/FinanceModule.kt)）。
 
 ### 7.2 schema_version
 
@@ -555,13 +558,87 @@ v2 启用后，policy / contract 可挂附件。**二进制走 records 通道 ty
 | Android Room 表 | `finance_policy / _subscription / _loan / _contract`（Room 迁移 v6 → v7） |
 | Android Repository | `FinanceRepository`（v2 启用后联动 records 通道 type='attachment'） |
 | 提醒枚举 | 启用后三类（`subscription_renewal / policy_expiry / loan_due`），**预算告警不接入 Reminders 通道**（仅 toast/banner） |
+| 预算（B6） | records 通道 `type="budget"`（无独立 Room 表）；Android `BudgetEnforcer` / `BudgetGate` / `BudgetConfirmDialog` / `BudgetListScreen` / `BudgetEditorScreen` + VM 硬闸门；Web `budgetEnforcer.ts` / `budgetGate.ts` / `BudgetConfirmDialog.vue` / `BudgetList.vue` / `BudgetEditor.vue` + store `precheckTx` 硬闸门；审计列触发 Room v8→v9，详见 §7.7 |
 
-### 7.7 v3 候选（非 v2 立即启用）
+### 7.7 预算硬约束 + 超支拦截（B6，type="budget"）
+
+预算是 v2 第 5 个 records 子类型（**不新建 Room 表**）：`module="finance"` +
+`type="budget"`，复用既有密文通道、墓碑与 hydrate 链路；AAD 沿用
+`eve:v1:record:{id}:finance:{BE(uint64 version)}`。预算明文 payload 固定
+`schema_version=2`，共 13 字段：
+
+| 字段 | 类型 | 备注 |
+|---|---|---|
+| `id` | string (UUID v4) | — |
+| `schema_version` | int (=2) | — |
+| `scope` | `'monthly' \| 'weekly' \| 'yearly' \| 'custom'` | 周期分桶口径 |
+| `category` | string (1..20) | `'all'` 表示覆盖全部分类，否则为具体分类标签 |
+| `amount_minor` | string (decimal-as-string) | 预算额度，必须 > 0，最多 2 位小数 |
+| `currency` | string (ISO 4217) | 默认 CNY |
+| `start_ts` | number (Unix 毫秒, >0) | 有效期起点 |
+| `end_ts` | number (Unix 毫秒) | 有效期终点（含），必须 ≥ `start_ts` |
+| `warning_threshold_pct` | number (int) | 预警阈值，默认 80；1 ≤ warning ≤ block ≤ 10000 |
+| `block_threshold_pct` | number (int) | 硬拦截阈值，默认 100（允许 >100 表示弹性容忍） |
+| `active` | boolean | 停用预算不参与判定 |
+| `created_at` / `updated_at` | number (Unix 毫秒) | — |
+
+#### 7.7.1 三档判定（BudgetEnforcer 纯函数，双端镜像）
+
+- 纯函数 `checkTx(incoming, budgets, existing, rateTable, nowMs)` 返回
+  `BudgetCheckResult`，档位 `OK / WARNING / BLOCK`，结果字段含
+  `usedPct`（Long 整除向下取整）/ `category` / 阈值百分比，**不含任何金额**；
+- 仅对 `kind="expense"` 支出做判定；收入 / 转账直接 `OK_EMPTY`；
+- `inactive` 预算、与本笔流水 `occurred_at` 不同桶的预算均不参与；
+- 异币支出经 B5 `RateTables.convert`（Android）/ `convertMinor`（Web）折算
+  到预算币种；**缺汇率保守放行**（convert 返回 null 时跳过该预算，不误拦）；
+- 多预算命中取最严重档位；同级取 `usedPct` 更大者；再相同取 `budgetId`
+  字典序，保证双端判定结果唯一且一致；
+- 编辑既有流水时，`existing` 中同 id 旧记录自动排除自身，避免重复累计；
+- 金额全程整数分（Android `Long` / Web `bigint`），decimal 元字符串解析
+  禁止浮点，正则 `^(\d+)(?:\.(\d{1,2}))?$`。
+
+#### 7.7.2 周期分桶（CST，UTC+8）
+
+- `monthly`：按 Asia/Shanghai（`ZoneOffset.ofHours(8)`）自然月切桶；
+- `yearly`：CST 自然年；
+- `weekly`：**非自然周**——以预算 `start_ts` 所在 CST 日期零点为 epoch，
+  7 天滚动窗口；
+- `custom`：桶即 `[start_ts, end_ts + 1ms)`；
+- 分桶锚点是流水自身的 `occurred_at`（支持补录历史账），`nowMs` 仅作预留
+  参数，不改变判定。
+
+#### 7.7.3 双层拦截 + 审计位
+
+1. **UI 预检查**：保存支出前同步跑 precheck——`BLOCK` 挂超支确认对话框，
+   本次不保存、不退出；用户选"仍保存"后携带 `overspendAcknowledged=true`
+   二次提交才落库；`WARNING` 不拦截，保存成功后 Toast 软提示。
+2. **VM / store 硬闸门兜底**：`saveBuffer`（Android）/ `addTx、updateTx`
+   （Web，返回 boolean）在 BLOCK 且未 ack 时直接中止，绕过 UI 也无法落库。
+3. **审计字段**：`finance_tx` 新增 `overspend_acknowledged`（Android Room
+   **v8 → v9**：`ALTER TABLE finance_tx ADD COLUMN overspend_acknowledged
+   INTEGER NOT NULL DEFAULT 0`，旧流水升级后一律视为未经超支确认；Web 在
+   `FinanceTx` 上以可选字段承载，**不升** tx 的 `schema_version`，仍为 1）。
+   该位仅本地审计留痕，不参与预算判定与同步业务语义。
+
+#### 7.7.4 零知识文案纪律（安全红线）
+
+预算告警 / 拦截文案**只允许出现"已用百分比 + 分类名"**，严禁渲染金额、
+币种数字、日期、卡号、对手方账户：
+
+- WARNING Toast：`本月{分类}已用 X%，接近预算上限`（分类 `all` 降级为
+  "全部支出"）；
+- BLOCK 对话框正文：`预计已用 X%，超过预算阈值，是否仍保存？`；
+- 预算列表行只展示周期、分类、预警 / 拦截百分比、启停态，**不渲染额度**；
+- 文案集中在纯函数层（Android `BudgetGate.kt` / Web `budgetGate.ts`），
+  便于 JVM / node 单测对稳定字符串断言；
+- 预算告警**不接入 Reminders 闹钟 / 通知通道**，仅端侧实时 toast / 对话框。
+
+### 7.8 v3 候选（非 v2 立即启用）
 
 - loan 分期扣款场景（`repayment_installment`，总到期 `loan_due` v2 已覆盖）；
 - 投资账户自动同步 / 自动再平衡（券商 API 直连）；
 - 合同 `notice_deadline_ts` 提醒（走 v2 评估，v3 实施）；
-- 银行 API / 银联开放接口直连同步；
+- 银行 API / 银联开放平台直连同步；
 - Web 端生物识别解锁（如 TouchID / FaceID）。
 
 ---
@@ -578,6 +655,7 @@ web/src/finance/__fixtures__/
   ├─ aggregator-cases.json        # netWorth / accountBalance / cardUsedLimit
   │                                 / monthlyReport / budgetThreshold（≥16 用例）
   ├─ next-card-firing-cases.json  # nextTrigger / upcomingTriggers
+  ├─ budget-enforcer-cases.json   # B6 预算三档判定（20 用例，与 Android 同 SHA-256）
   └─ account-cases.json / card-cases.json / tx-cases.json   # 三类条目输入
 ```
 
@@ -595,7 +673,8 @@ android/app/src/test/resources/finance/__fixtures__/
 
 ```
 android/app/src/test/java/com/everything/eve/finance/__fixtures__/
-  └─ account-cases.json / card-cases.json / tx-cases.json   # 三类条目输入
+  ├─ account-cases.json / card-cases.json / tx-cases.json   # 三类条目输入
+  └─ budget-enforcer-cases.json   # B6 预算判定镜像（与 Web 逐字节同 SHA-256）
 ```
 
 ### 8.4 命名与字段规范
@@ -624,6 +703,8 @@ Web 与 Android 端对应 fixture 文件 SHA-256 **逐字节一致**，由 Task 
 | ReminderScheduler 复用 | [`android.md`](android.md) "财务模块（阶段 5）" | 4b 链式 AlarmManager 财务复用路径 |
 | Room v5→v6 迁移 | [`android.md`](android.md) "财务模块（阶段 5）" | finance_* 四表扩展 |
 | Android 纯函数聚合 | [`FinanceAggregator.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt) | 五个聚合 API 实现 |
+| Android B6 预算判定 | [`BudgetEnforcer.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/BudgetEnforcer.kt) / [`BudgetGate.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/BudgetGate.kt) | 预算三档纯函数 + 零知识文案闸门（Web 对应 `budgetEnforcer.ts` / `budgetGate.ts`，见 §7.7） |
+| Android Room v8→v9 | [`EveDatabase.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/EveDatabase.kt) | B6 审计列 `overspend_acknowledged` 迁移（MIGRATION_8_9） |
 | Android 触发计算 | [`NextCardFiring.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/NextCardFiring.kt) | nextTrigger / upcomingTriggers |
 | Android Luhn 校验 | [`Luhn.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/Luhn.kt) | 卡号校验 + 后四位提取 |
 | Android 链式调度 | [`ReminderScheduler.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/reminder/ReminderScheduler.kt) | 单闹钟 + module 路由 |

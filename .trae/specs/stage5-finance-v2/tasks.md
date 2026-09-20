@@ -313,9 +313,13 @@
 
 ## Task 6: 预算硬约束 + 超支拦截（P1）
 
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: v1 `FinanceAggregator.monthlyReport(...)` + 任务编辑器
+- **Completion Evidence**:
+  - **Pass Condition**: type=budget 子类型（13 字段，schema_version=2，records 密文通道零扩展、无独立 Room 表）+ 双端 BudgetEnforcer 三档纯函数（OK/WARNING/BLOCK）+ Android tx 保存拦截与 BudgetConfirmDialog + Web 预算 CRUD 与 tx 拦截 + Room v8 到 v9 审计列 overspend_acknowledged + 双端 fixture SHA-256 一致 + 单测 Android 新增 33 / Web 新增 62；五门禁全绿（Android testDebugUnitTest 433/433、0 failures、0 errors；Web vitest 618/618、vue-tsc 0 error、vite build 成功）。
+  - **Status**: `completed`（2026-09-20 代码提交 `b8576d6`，38 文件，+7363/-45；文档与本回填随后同批提交并推送 main）。
+  - **Completion Evidence**:
 - **Description**:
   - 修改 `docs/finance.md`：增加"预算"章节（v2 spec FR-V2-F 详细化）
   - 修改 `docs/module-schemas.md` §9：增加 `type="budget"` 子类型 schema
@@ -345,6 +349,15 @@
   - TR-6.3 Android 端 tx 保存拦截 + 确认对话框
   - TR-6.4 Web 端 Budget CRUD + tx 拦截
   - TR-6.5 单测 ≥16 + Web 单测 ≥6 用例
+  - **证据明细（逐条 TR）**：
+    - TR-6.1：Android `FinanceRecords.kt` 新增 `BudgetRecord`（13 字段）+ `validateBudget`（scope 四值、category 1..20、amount_minor 必须大于 0、start_ts 大于 0、end_ts 不小于 start_ts、1 ≤ warning ≤ block ≤ 10000）；`V2PayloadCodec.encode/decodeBudget` 13 个 snake_case 字段可逆；`FinanceModule.TYPE_BUDGET="budget"`。Web `finance/types.ts` 新增 `FinanceBudget`（schema_version 字面量 2）。
+    - TR-6.2：双端纯函数 `BudgetEnforcer.kt` / `budgetEnforcer.ts`，三档 OK/WARNING/BLOCK；整数分运算（Android Long / Web bigint），金额正则 `^(\d+)(?:\.(\d{1,2}))?$`，usedPct 整除向下取整；缺汇率 convert 返回 null 保守放行；多预算取最严重、同级取 usedPct 更大、再同取 budgetId 字典序；编辑场景按 id 排除自身旧记录；CST（UTC+8）分桶：monthly/yearly 自然周期、weekly 以 start_ts 的 CST 日期零点为 epoch 的 7 天滚动窗（非自然周）、custom 桶 [start_ts, end_ts+1)，锚点为流水 occurred_at。
+    - TR-6.3：Android `FinanceEditor.kt` 保存前同步 precheck，BLOCK 置 pendingBlock 弹 `BudgetConfirmDialog`（"仍保存"/"返回修改"），确认后 `saveBuffer(buffer, overspendAcknowledged=true)` 二次保存；`FinanceViewModel.saveBuffer` 硬闸门（BLOCK 且未 ack 发 budget_blocked 并 return，零落库）；WARNING 仅 Toast；`BudgetGate.kt` 集中零知识文案（仅百分比 + 分类名）；预算闭环 BudgetListScreen/BudgetEditorScreen + Dashboard 入口 + strings 34 条；Room `EveDatabase.kt` version=9 + MIGRATION_8_9（ALTER TABLE finance_tx ADD COLUMN overspend_acknowledged INTEGER NOT NULL DEFAULT 0）+ instrumented 迁移用例。
+    - TR-6.4：Web `stores/finance.ts` 新增 budgets 响应式 Map 与预算 CRUD、`precheckTx`（经 account/card 反查币种、缺省 CNY），`addTx/updateTx` 硬闸门返回 boolean；FinanceTxEditor 保存前 precheck + `BudgetConfirmDialog.vue`；BudgetList/BudgetEditor + FinanceView 路由（#/finance/.../budget）。
+    - TR-6.5：Android 新增 33 用例（BudgetRecordTest 7 + BudgetEnforcerTest 11 + BudgetConfirmDialogTest 6 + FinanceViewModelBudgetTest 9），远超 ≥16；Web 新增 62 用例（budgetEnforcer 37 + store-budget 13 + budgetGate 7 + BudgetList 5），远超 ≥6。全量门禁：Android 433 通过（B5 基线 400 + 本批 33）；Web 618 通过（B5 基线 556 + 本批 62）；vue-tsc 0 error；vite build 成功。
+    - **fixture**：`budget-enforcer-cases.json` 20 cases（锚点 now=1782619200000，含 USD/CNY 7.1），双端逐字节 SHA-256 = `7e568077870c608172bd6a0b643aaf50fdbf15c8a571512871db113900342e44`。
+    - **本批门禁中修复（非生产缺陷）**：① 旧守护用例 FinanceRepositoryTest「tx toJson snake_case」锁死字段集合，补入 overspend_acknowledged；② Web BudgetList.spec.ts 原用 node:fs/node:url（项目未装 @types/node 致 vue-tsc 报错），改用 Vite `?raw` 导入；③ FinanceViewModelBudgetTest 两处测试基建（JDK Proxy 默认返回值移入 companion object；反射排空 BUFFERED 通道残留事件）。生产代码零改动。
+    - **审计列口径**：overspend_acknowledged 仅本机 Room 缓存 JSON（FinanceRepository toJson/fromJsonObj）持有，不进 records 密文明文载荷（FinanceTx schema 13 业务字段不变、Web schema_version 不升级、finance.schema.json 不加该字段）。
 
 ---
 
