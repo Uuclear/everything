@@ -56,6 +56,15 @@ import com.everything.eve.ui.settings.RatesImportScreen
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
+// =============================================================================
+// B6 预算管理路由哨兵值（budgetMode: String?；null=未进入预算模式）
+// =============================================================================
+/** 预算列表态。 */
+const val BUDGET_LIST = "LIST"
+
+/** 预算新建态（编辑态直接用预算 id 作为 mode 值）。 */
+const val BUDGET_NEW = "NEW"
+
 /**
  * 财务模块主屏幕（NavHost 容器）。
  *
@@ -80,6 +89,10 @@ fun FinanceScreen(
 
     // B5 设置屏路由态（false = 不显示；全屏承载 RatesImportScreen，返回态仿编辑器）
     var settingsMode by remember { mutableStateOf(false) }
+
+    // B6 预算管理路由态：null=不显示；BUDGET_LIST=列表；BUDGET_NEW=新建；
+    // 其他字符串=按预算 id 编辑（见文件顶部哨兵常量）。
+    var budgetMode by remember { mutableStateOf<String?>(null) }
 
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -126,6 +139,36 @@ fun FinanceScreen(
             onClose = { settingsMode = false },
         )
         return
+    }
+
+    // B6 预算管理模式：列表 / 新建 / 按 id 编辑（三个全屏分支，返回态各自回退）。
+    when (budgetMode) {
+        BUDGET_LIST -> {
+            BudgetListScreen(
+                vm = vm,
+                onClose = { budgetMode = null },
+                onEdit = { id -> budgetMode = id ?: BUDGET_NEW },
+            )
+            return
+        }
+        BUDGET_NEW -> {
+            BudgetEditorScreen(
+                budgetId = null,
+                vm = vm,
+                onClose = { budgetMode = BUDGET_LIST },
+            )
+            return
+        }
+        null -> Unit
+        else -> {
+            // 其余取值视为预算 id（从列表行点击进入编辑）。
+            BudgetEditorScreen(
+                budgetId = budgetMode,
+                vm = vm,
+                onClose = { budgetMode = BUDGET_LIST },
+            )
+            return
+        }
     }
 
     Scaffold(
@@ -180,6 +223,7 @@ fun FinanceScreen(
                     FinanceRoutes.TAB_DASHBOARD -> FinanceDashboard(
                         vm = vm,
                         onOpenSettings = { settingsMode = true },
+                        onOpenBudgets = { budgetMode = BUDGET_LIST },
                     )
                     FinanceRoutes.TAB_ACCOUNTS -> FinanceAccountList(
                         vm = vm,

@@ -438,6 +438,9 @@ class FinanceRepositoryTest {
             "module",
             "type",
             "dirty",
+            // B6 预算硬约束审计位：仅本机 Room 缓存 JSON 持有，
+            // 不进 records 密文明文载荷（见 docs/finance.md §7.7.3 / module-schemas §9.5.1）。
+            "overspend_acknowledged",
             "deleted",
         )
         val actual = map.keys.toSet()

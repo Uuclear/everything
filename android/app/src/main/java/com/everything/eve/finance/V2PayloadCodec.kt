@@ -139,6 +139,26 @@ object V2PayloadCodec {
         return JSONObject(map).toString()
     }
 
+    /** 预算记录 → 明文 JSON（B6；字段顺序对齐 web FinanceBudget）。 */
+    fun encodeBudget(r: BudgetRecord): String {
+        val map = linkedMapOf<String, Any?>(
+            "id" to r.id,
+            "schema_version" to r.schemaVersion,
+            "scope" to r.scope,
+            "category" to r.category,
+            "amount_minor" to r.amountMinor,
+            "currency" to r.currency,
+            "start_ts" to r.startTs,
+            "end_ts" to r.endTs,
+            "warning_threshold_pct" to r.warningThresholdPct,
+            "block_threshold_pct" to r.blockThresholdPct,
+            "active" to r.active,
+            "created_at" to r.createdAt,
+            "updated_at" to r.updatedAt,
+        )
+        return JSONObject(map).toString()
+    }
+
     // ============================================================================
     // decode：snake_case JSON → camelCase data class（缺字段按默认值容错）
     // ============================================================================
@@ -236,6 +256,26 @@ object V2PayloadCodec {
             status = o.strOrDefault("status", ""),
             linkedAccountId = o.nullableString("linked_account_id"),
             attachments = o.attachmentArray("attachments"),
+            createdAt = o.longOrDefault("created_at", 0L),
+            updatedAt = o.longOrDefault("updated_at", 0L),
+        )
+    }
+
+    /** 明文 JSON → 预算记录；字段缺失按默认值兜底（B6）。 */
+    fun decodeBudget(json: String): BudgetRecord {
+        val o = JSONObject(json)
+        return BudgetRecord(
+            id = o.strOrDefault("id", ""),
+            schemaVersion = o.intOrDefault("schema_version", FINANCE_V2_SCHEMA_VERSION),
+            scope = o.strOrDefault("scope", ""),
+            category = o.strOrDefault("category", ""),
+            amountMinor = o.strOrDefault("amount_minor", ""),
+            currency = o.strOrDefault("currency", ""),
+            startTs = o.longOrDefault("start_ts", 0L),
+            endTs = o.longOrDefault("end_ts", 0L),
+            warningThresholdPct = o.intOrDefault("warning_threshold_pct", 0),
+            blockThresholdPct = o.intOrDefault("block_threshold_pct", 0),
+            active = o.boolOrDefault("active", false),
             createdAt = o.longOrDefault("created_at", 0L),
             updatedAt = o.longOrDefault("updated_at", 0L),
         )

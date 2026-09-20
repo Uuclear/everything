@@ -36,6 +36,14 @@ import {
 import { useFinanceStore } from '../../stores/finance'
 import type { TxKind, FinanceTx } from '../../finance/types'
 import { DEFAULT_TX_COLOR } from '../../finance/types'
+// B6：预算硬约束门控（纯函数文案 + 阻断确认模态）。
+import { OK_EMPTY, type BudgetCheckResult } from '../../finance/budgetEnforcer'
+import {
+  needsConfirmDialog,
+  needsWarningToast,
+  warningText,
+} from '../../finance/budgetGate'
+import BudgetConfirmDialog from './BudgetConfirmDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -73,6 +81,11 @@ const toAccountId = ref<string | null>(null)
 const occurredAt = ref<number>(Date.now())
 const note = ref('')
 const submitting = ref(false)
+/**
+ * B6 超支阻断待确认状态：非 null 时挂“超支确认”模态；
+ * 为 null 时模板以 OK_EMPTY 作为 result 兜底。
+ */
+const blockPending = ref<BudgetCheckResult | null>(null)
 
 // ========== 模式 ==========
 const editingId = computed<string | null>(() => {
@@ -118,7 +131,30 @@ const errors = computed(() => {
   return e
 })
 
-// ========== 保存 ==========
+// ========== 组装 payload（保存与超支确认复用，保证两次提交同字段） ==========
+function buildPayload(): FinanceTx {
+  const now = Date.now()
+  return {
+    id: editingId.value ?? cryptoRandomId(),
+    schema_version: 1,
+    account_id: accountId.value,
+    card_id: null,
+    kind: kind.value,
+    amount: String(Math.floor(amountYuan.value)) + '.00',
+    category: category.value.trim(),
+    occurred_at: occurredAt.value,
+    note: note.value.trim() || null,
+    transfer_to_account_id: kind.value === 'transfer' ? toAccountId.value : null,
+    icon: null,
+    color: DEFAULT_TX_COLOR,
+    created_at: editingId.value
+      ? (store.byId('tx', editingId.value)?.createdAt ?? now)
+      : now,
+    updated_at: now,
+  }
+}
+
+// ========== 保存（B6：先过预算门控） ==========
 function save() {
   if (Object.keys(errors.value).length > 0) {
     message.error('请修正表单错误后再保存')
@@ -126,37 +162,56 @@ function save() {
   }
   submitting.value = true
   try {
-    const now = Date.now()
-    const payload: FinanceTx = {
-      id: editingId.value ?? cryptoRandomId(),
-      schema_version: 1,
-      account_id: accountId.value,
-      card_id: null,
-      kind: kind.value,
-      amount: String(Math.floor(amountYuan.value)) + '.00',
-      category: category.value.trim(),
-      occurred_at: occurredAt.value,
-      note: note.value.trim() || null,
-      transfer_to_account_id: kind.value === 'transfer' ? toAccountId.value : null,
-      icon: null,
-      color: DEFAULT_TX_COLOR,
-      created_at: editingId.value
-        ? (store.byId('tx', editingId.value)?.createdAt ?? now)
-        : now,
-      updated_at: now,
+    // 不预设 overspend_acknowledged：是否挂标记由 store 按 ack 决定。
+    const payload = buildPayload()
+    const check = store.precheckTx(payload)
+    if (needsConfirmDialog(check)) {
+      // BLOCK 档：挂确认模态，本轮不保存 / 不跳转。
+      blockPending.value = check
+      return
     }
-    if (editingId.value) {
-      store.updateTx(payload)
-    } else {
-      store.addTx(payload)
-    }
-    message.success('已保存')
-    router.replace({ name: 'finance' })
+    doSave(payload, false, check)
   } catch (e) {
     message.error('保存失败:' + String(e))
   } finally {
     submitting.value = false
   }
+}
+
+/**
+ * 实际落库（初次保存 ack=false；确认弹窗“仍保存”后 ack=true）。
+ *
+ * store 返回 false 表示被预算硬拦截（UI 已拦的双保险路径）：提示并停留。
+ * 落库成功后 WARNING 档补一条零知识 toast（仅百分比 + 分类）。
+ */
+function doSave(payload: FinanceTx, ack: boolean, check: BudgetCheckResult) {
+  const saved = editingId.value
+    ? store.updateTx(payload, ack)
+    : store.addTx(payload, ack)
+  if (saved === false) {
+    message.error('超过预算拦截阈值，请确认后保存')
+    return
+  }
+  if (needsWarningToast(check)) {
+    message.warning(warningText(check))
+  }
+  message.success('已保存')
+  router.replace({ name: 'finance' })
+}
+
+/** 超支确认弹窗：用当前表单重新组装同字段 payload，带 ack=true 落库。 */
+function onConfirmOverspend() {
+  try {
+    const payload = buildPayload()
+    doSave(payload, true, blockPending.value ?? OK_EMPTY)
+  } finally {
+    blockPending.value = null
+  }
+}
+
+/** 放弃超支保存：关弹窗，留在编辑器。 */
+function onCancelOverspend() {
+  blockPending.value = null
 }
 
 function deleteTx() {
@@ -242,6 +297,14 @@ const CATEGORY_SUGGESTIONS = [
         </n-form-item>
       </n-form>
     </n-card>
+
+    <!-- B6：预算超支阻断确认（BLOCK 档）；result 为空时以 OK_EMPTY 兜底 -->
+    <BudgetConfirmDialog
+      :show="blockPending !== null"
+      :result="blockPending ?? OK_EMPTY"
+      @confirm="onConfirmOverspend"
+      @cancel="onCancelOverspend"
+    />
   </div>
 </template>
 

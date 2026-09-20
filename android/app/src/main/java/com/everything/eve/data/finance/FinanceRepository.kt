@@ -554,7 +554,7 @@ fun FinanceCardEntity.Companion.fromJsonObj(obj: Map<String, Any?>): FinanceCard
 // FinanceTxEntity
 // ----------------------------------------------------------------------------
 
-/** FinanceTxEntity → 字段映射 Map（21 字段；顺序固定）。 */
+/** FinanceTxEntity → 字段映射 Map（22 字段；顺序固定）。 */
 fun FinanceTxEntity.toJson(): Map<String, Any?> {
     val map = linkedMapOf<String, Any?>(
         "id" to id,
@@ -575,6 +575,7 @@ fun FinanceTxEntity.toJson(): Map<String, Any?> {
         "module" to module,
         "type" to type,
         "dirty" to dirty,
+        "overspend_acknowledged" to overspendAcknowledged,
         "deleted" to deleted,
     )
     return map
@@ -601,6 +602,7 @@ fun FinanceTxEntity.Companion.fromJsonObj(obj: Map<String, Any?>): FinanceTxEnti
         module = obj.stringOr("module", "finance"),
         type = obj.stringOr("type", "tx"),
         dirty = obj.boolean("dirty", false),
+        overspendAcknowledged = obj.boolean("overspend_acknowledged", false),
         deleted = obj.boolean("deleted", false),
     )
 

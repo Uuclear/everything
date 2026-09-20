@@ -52,6 +52,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
@@ -59,6 +60,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
+import android.widget.Toast
 import com.everything.eve.R
 import com.everything.eve.finance.Luhn
 
@@ -86,6 +88,43 @@ fun FinanceEditor(
             entityId?.let { vm.bufferFor(kind, it) }
                 ?: FinanceEditorBuffer(id = vm.newId(), kind = kind)
         )
+    }
+
+    // B6 预算硬约束：保存支出时若命中 BLOCK，挂起本次提交并弹出超支确认对话框；
+    // 用户在对话框选"仍保存"后携带 overspendAcknowledged=true 二次提交。
+    var pendingBlock by remember { mutableStateOf<com.everything.eve.finance.BudgetCheckResult?>(null) }
+    val context = LocalContext.current
+
+    /**
+     * B6 统一保存入口：
+     *  - 非流水（账户 / 卡片）：保持原行为，直接保存退出；
+     *  - 流水：先跑 [FinanceViewModel.precheckTxBuffer]：
+     *    · BLOCK：弹 [BudgetConfirmDialog]，本次不落库、不退出；
+     *    · WARNING：正常保存退出，额外 Toast 零知识预警（仅百分比 + 分类）；
+     *    · OK / 无预算：正常保存退出。
+     */
+    val handleSave: () -> Unit = {
+        if (kind != FinanceEditorKind.TX) {
+            vm.saveBuffer(buffer)
+            onDone()
+        } else {
+            val check = vm.precheckTxBuffer(buffer)
+            when {
+                BudgetGate.needsConfirmDialog(check) -> {
+                    // 拦截：仅挂对话框，不保存、不退出。
+                    pendingBlock = check
+                }
+                else -> {
+                    vm.saveBuffer(buffer)
+                    if (BudgetGate.needsWarningToast(check)) {
+                        Toast
+                            .makeText(context, BudgetGate.warningText(check), Toast.LENGTH_SHORT)
+                            .show()
+                    }
+                    onDone()
+                }
+            }
+        }
     }
 
     Scaffold(
@@ -138,16 +177,26 @@ fun FinanceEditor(
 
             EditorFormShell(
                 isNew = entityId == null,
-                onSave = {
-                    vm.saveBuffer(buffer)
-                    onDone()
-                },
+                onSave = handleSave,
                 onDelete = {
                     entityId?.let { vm.deleteEntity(kind, it) }
                     onDone()
                 },
             )
         }
+    }
+
+    // B6 超支确认对话框：仅 BLOCK 态挂载；确认后带审计位二次提交。
+    pendingBlock?.let { blockResult ->
+        BudgetConfirmDialog(
+            result = blockResult,
+            onConfirm = {
+                pendingBlock = null
+                vm.saveBuffer(buffer, overspendAcknowledged = true)
+                onDone()
+            },
+            onDismiss = { pendingBlock = null },
+        )
     }
 }
 

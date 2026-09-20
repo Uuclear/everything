@@ -39,6 +39,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.everything.eve.ServiceLocator
+import com.everything.eve.data.RecordDao
 import com.everything.eve.data.finance.AttachmentRepository
 import com.everything.eve.data.finance.FinanceModule
 import com.everything.eve.data.finance.entity.AttachmentEntity
@@ -46,6 +47,11 @@ import com.everything.eve.data.finance.entity.FinanceAccountEntity
 import com.everything.eve.data.finance.entity.FinanceCardEntity
 import com.everything.eve.data.finance.entity.FinanceTxEntity
 import com.everything.eve.finance.AttachmentRef
+import com.everything.eve.finance.BudgetCheckResult
+import com.everything.eve.finance.BudgetEnforcer
+import com.everything.eve.finance.BudgetLevel
+import com.everything.eve.finance.BudgetRecord
+import com.everything.eve.finance.BudgetTxLike
 import com.everything.eve.finance.ContractRecord
 import com.everything.eve.finance.FinanceAggregator
 import com.everything.eve.finance.FinanceRecords
@@ -254,6 +260,8 @@ data class FinanceUiState(
     val loans: List<LoanRecord> = emptyList(),
     /** 合同/发票（v2 sub-type） */
     val contracts: List<ContractRecord> = emptyList(),
+    /** 预算（v2 sub-type；B6 预算硬约束，保存支出时做闸门判定）。 */
+    val budgets: List<BudgetRecord> = emptyList(),
     val dashboard: FinanceAggregator.DashboardSnapshot =
         FinanceAggregator.DashboardSnapshot("0.00", "0.00", "0.00", 0, 0, 0, "CNY"),
     val monthly: FinanceAggregator.MonthlyReport =
@@ -291,7 +299,7 @@ sealed class FinanceUiEvent {
  * 编辑器侧通过 [saveBuffer] / [deleteEntity] 调 FinanceRepository +
  * ReminderScheduler.rebuildChain。
  */
-class FinanceViewModel(app: Application) : AndroidViewModel(app) {
+open class FinanceViewModel(app: Application) : AndroidViewModel(app) {
 
     private val financeRepo = ServiceLocator.financeRepo
     private val appCtx = app.applicationContext
@@ -335,6 +343,9 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
     /** v2 contract 内存列表。 */
     private val contractsFlow = MutableStateFlow<List<ContractRecord>>(emptyList())
 
+    /** B6 预算内存列表（与其余 v2 子类型同款，走 records 密文通道，无独立 Room 表）。 */
+    private val budgetsFlow = MutableStateFlow<List<BudgetRecord>>(emptyList())
+
     // =============================================================================
     // B5 多币种折算状态（stage5-finance-v2 / FR-V2-C.2、FR-V2-C.3）
     // ============================================================================
@@ -367,6 +378,7 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     init {
         hydrateV2()
+        hydrateBudgets()
         hydrateRateTable()
         // 默认币种取自 eve-finance SharedPreferences；JVM 桩环境（Application 未
         // mock getSharedPreferences）异常时回退默认 CNY，不阻断 VM 构造。
@@ -404,6 +416,8 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
      *   B5 追加（顺延在末位，不挪动既有索引）：
      *   [11] rateTable（RateTable?；null=未导入按面值口径）
      *   [12] defaultCurrency（String；折算目标币，默认 CNY）
+     *   B6 追加（顺延在末位，不挪动既有索引）：
+     *   [13] budgets（List<BudgetRecord>；预算硬约束候选全集）
      */
     val state: kotlinx.coroutines.flow.StateFlow<FinanceUiState> = combine(
         financeRepo.observeAccounts(),
@@ -419,6 +433,7 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         contractsFlow as Flow<Any?>,
         rateTableFlow as Flow<Any?>,
         defaultCurrencyFlow as Flow<Any?>,
+        budgetsFlow as Flow<Any?>,
     ) { values: Array<Any?> ->
         // 类型按索引解包（顺序与上文约定一致）。
         @Suppress("UNCHECKED_CAST")
@@ -442,6 +457,9 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         // B5：最新汇率表（null=未导入，按面值口径）与折算目标币。
         val rateTable = values[11] as RateTable?
         val targetCurrency = values[12] as String
+        // B6：预算候选全集（保存支出时的闸门判定输入）。
+        @Suppress("UNCHECKED_CAST")
+        val budgets = values[13] as List<BudgetRecord>
 
         val dashboard = FinanceAggregator.netWorth(
             accounts.map { acc ->
@@ -516,6 +534,7 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
             policies = policies,
             loans = loans,
             contracts = contracts,
+            budgets = budgets,
             dashboard = dashboard,
             monthly = monthly,
             budget = budget,
@@ -620,8 +639,14 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
      * 保存编辑器 buffer → Entity → FinanceRepository.upsert + rebuildChain。
      *
      * 校验失败 → 通过 eventFlow 发送 Error，**不**入库。
+     *
+     * B6 预算硬约束：支出（expense）落库前先做一次同步预校验（[precheckTxBuffer]）。
+     * 结果为 [BudgetLevel.BLOCK] 且用户未在确认对话框选择"仍保存"
+     * （[overspendAcknowledged]=false）时，发送 "budget_blocked" 事件并直接拦截，
+     * 不构造/落库任何实体；WARNING/OK 不拦截（WARNING 的 Toast 由 UI 层处理）。
+     * [overspendAcknowledged] 仅对 TX 生效，并随实体落库做本地审计留痕。
      */
-    fun saveBuffer(buffer: FinanceEditorBuffer) {
+    fun saveBuffer(buffer: FinanceEditorBuffer, overspendAcknowledged: Boolean = false) {
         viewModelScope.launch {
             try {
                 val now = System.currentTimeMillis()
@@ -712,6 +737,15 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
                                 return@launch
                             }
                         }
+                        // B6 预算硬约束闸门：仅对支出做拦截；非支出（收入/转账）直接放行。
+                        if (buffer.txKind.ifBlank { "expense" } == "expense") {
+                            val check = precheckTxBuffer(buffer)
+                            if (check.level == BudgetLevel.BLOCK && !overspendAcknowledged) {
+                                // 触发 UI 层 BudgetConfirmDialog；本次不落库。
+                                _eventChannel.send(FinanceUiEvent.Error("budget_blocked"))
+                                return@launch
+                            }
+                        }
                         val entity = FinanceTxEntity(
                             id = buffer.id,
                             accountId = buffer.accountId,
@@ -729,6 +763,7 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
                             updatedAt = now,
                             dirty = true,
                             deleted = false,
+                            overspendAcknowledged = overspendAcknowledged,
                         )
                         financeRepo.upsertTx(entity)
                     }
@@ -886,6 +921,78 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // =============================================================================
+    // B6 预算 CRUD + 超支闸门（走 v2 records 密文通道，无独立 Room 表）
+    // ============================================================================
+
+    /**
+     * B6 预算 upsert（内存更新 + records 通道 best-effort 持久化）。
+     *
+     * 与其余 v2 子类型同纪律：[FinanceRecords.validateBudget] 失败先发
+     * "budget_invalid" 事件并返回 failure，不动内存、不持久化；成功先换内存再
+     * best-effort 密封落库。
+     */
+    fun upsertBudget(r: BudgetRecord): Result<Unit> {
+        val validation = FinanceRecords.validateBudget(r)
+        if (validation is ValidationResult.Invalid) {
+            _eventChannel.trySend(FinanceUiEvent.Error("budget_invalid"))
+            return Result.failure(IllegalArgumentException(validation.reason))
+        }
+        val current = budgetsFlow.value
+        budgetsFlow.value = current.filterNot { it.id == r.id } + r
+        _eventChannel.trySend(FinanceUiEvent.SaveSucceeded(r.id))
+        persistV2(FinanceModule.TYPE_BUDGET, r.id, V2PayloadCodec.encodeBudget(r))
+        return Result.success(Unit)
+    }
+
+    /** B6 预算 delete（内存移除 + 墓碑 best-effort）。id 不存在视为成功（幂等）。 */
+    fun deleteBudget(id: String): Result<Unit> {
+        val current = budgetsFlow.value
+        budgetsFlow.value = current.filterNot { it.id == id }
+        _eventChannel.trySend(FinanceUiEvent.DeleteSucceeded(id))
+        tombstoneV2(FinanceModule.TYPE_BUDGET, id)
+        return Result.success(Unit)
+    }
+
+    /**
+     * B6 支出保存前同步预校验：把当前内存中的预算全集、既有流水与编辑器本笔
+     * 组装成纯函数 [BudgetEnforcer.checkTx] 的输入，返回闸门判定结果。
+     *
+     * - 非支出（收入 / 转账等）直接返回 [BudgetCheckResult.OK_EMPTY]；
+     * - 既有流水取 state 中的 txs（编辑场景同 id 旧额由纯函数自动排除）；
+     * - 异币折算复用 B5 的 rateTableFlow；预算与流水均为 minor 元字符串口径；
+     * - 纯同步、无副作用、不抛业务异常（预算缺失时纯函数返回 OK_EMPTY）。
+     */
+    fun precheckTxBuffer(buffer: FinanceEditorBuffer): BudgetCheckResult {
+        val kind = buffer.txKind.ifBlank { "expense" }
+        if (kind != "expense") return BudgetCheckResult.OK_EMPTY
+        val existing = state.value.txs.map { entity ->
+            BudgetTxLike(
+                id = entity.id,
+                kind = entity.kind,
+                amountMinor = entity.amount,
+                category = entity.category,
+                currency = entity.currency,
+                occurredAt = entity.occurredAt,
+            )
+        }
+        val incoming = BudgetTxLike(
+            id = buffer.id,
+            kind = kind,
+            amountMinor = buffer.balance,
+            category = buffer.category.ifBlank { "other" },
+            currency = buffer.currency.ifBlank { "CNY" },
+            occurredAt = buffer.occurredAtMs,
+        )
+        return BudgetEnforcer.checkTx(
+            incoming = incoming,
+            budgets = budgetsFlow.value,
+            existing = existing,
+            rateTable = rateTableFlow.value,
+            nowMs = System.currentTimeMillis(),
+        )
+    }
+
+    // =============================================================================
     // v2 records 通道持久化辅助（B4）—— best-effort 协程，全部异常静默
     // ============================================================================
 
@@ -983,6 +1090,41 @@ class FinanceViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /**
+     * B6：VM 创建即从 records 表一次性解密回填预算列表（与 [hydrateV2] 同款）。
+     *
+     * RecordDao.getActiveByModuleType(module=finance, type=budget) 只取
+     * deleted=0 的密封记录 → RecordsRepository.decryptFinanceV2 解密 →
+     * V2PayloadCodec.decodeBudget 解析；单条失败跳过，整体失败（DB / MK /
+     * ServiceLocator 未就绪，如 JVM 桩环境）静默保留空内存态。
+     */
+    fun hydrateBudgets() {
+        viewModelScope.launch {
+            try {
+                val recordsDao = loadBudgetRecordDao() ?: return@launch
+                val recordsRepo = ServiceLocator.repo
+                val budgets = recordsDao
+                    .getActiveByModuleType(FinanceModule.MODULE, FinanceModule.TYPE_BUDGET)
+                    .mapNotNull { entity ->
+                        runCatching {
+                            V2PayloadCodec.decodeBudget(recordsRepo.decryptFinanceV2(entity))
+                        }.getOrNull()
+                    }
+                budgetsFlow.value = budgets
+            } catch (_: Exception) {
+                // DB / MK / ServiceLocator 未就绪：保留内存现状，不打扰 UI。
+            }
+        }
+    }
+
+    /**
+     * B6 测试可替换接缝：默认直接取 [ServiceLocator.db] 的 RecordDao；
+     * JVM 单测可覆写返回桩 DAO，避免触碰抽象 RoomDatabase。
+     * 返回 null 表示环境未就绪，hydrate 静默跳过。
+     */
+    internal open fun loadBudgetRecordDao(): RecordDao? =
+        runCatching { ServiceLocator.db.recordDao() }.getOrNull()
 
     // =============================================================================
     // B5 汇率包与默认币种（stage5-finance-v2 / FR-V2-C.2、FR-V2-C.3）

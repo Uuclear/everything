@@ -386,4 +386,47 @@
     <string name="finance_dashboard_default_currency_entry">默认币种：%1$s</string>
     <string name="finance_dashboard_rate_entry">汇率包导入</string>
     <string name="finance_dashboard_target_currency_format">折算币种：%1$s</string>
+
+    <!-- ============== B6 预算硬约束（零知识：只允许百分比 + 分类标签，禁金额/日期） ============== -->
+    <!-- Dashboard / 列表 / 编辑器骨架 -->
+    <string name="finance_budget_dashboard_entry">预算管理</string>
+    <string name="finance_budget_title">预算管理</string>
+    <string name="finance_budget_add">新建预算</string>
+    <string name="finance_budget_empty">暂无预算，点击右上角新建预算</string>
+    <string name="finance_budget_editor_title_new">新建预算</string>
+    <string name="finance_budget_editor_title_edit">编辑预算</string>
+    <!-- 周期标签 -->
+    <string name="finance_budget_scope_monthly">月度预算</string>
+    <string name="finance_budget_scope_weekly">周度预算</string>
+    <string name="finance_budget_scope_yearly">年度预算</string>
+    <string name="finance_budget_scope_custom">自定义预算</string>
+    <!-- 字段标签 -->
+    <string name="finance_budget_field_scope">预算周期</string>
+    <string name="finance_budget_field_category_all">覆盖全部分类</string>
+    <string name="finance_budget_field_category">分类名称</string>
+    <string name="finance_budget_category_all">全部分类</string>
+    <string name="finance_budget_field_amount">金额（元）</string>
+    <string name="finance_budget_field_currency">币种</string>
+    <string name="finance_budget_field_start">起始时间戳（毫秒）</string>
+    <string name="finance_budget_field_end">结束时间戳（毫秒）</string>
+    <string name="finance_budget_field_warning">预警阈值（百分比）</string>
+    <string name="finance_budget_field_block">拦截阈值（百分比）</string>
+    <string name="finance_budget_field_active">启用</string>
+    <!-- 列表行短标签与启停 -->
+    <string name="finance_budget_warning_short">预警</string>
+    <string name="finance_budget_block_short">拦截</string>
+    <string name="finance_budget_active">启用</string>
+    <string name="finance_budget_inactive">已停用</string>
+    <string name="finance_budget_enable">启用</string>
+    <string name="finance_budget_disable">停用</string>
+    <!-- 操作按钮 -->
+    <string name="finance_budget_save">保存</string>
+    <string name="finance_budget_delete">删除</string>
+    <!-- 删除二次确认（不展示金额 / 日期） -->
+    <string name="finance_budget_delete_confirm_title">删除预算</string>
+    <string name="finance_budget_delete_confirm_message">确定删除该预算？删除后支出将不再受此预算约束。</string>
+    <!-- 超支确认对话框（正文由 BudgetGate 纯函数产出，仅含百分比） -->
+    <string name="finance_budget_confirm_title">超支确认</string>
+    <string name="finance_budget_confirm_save">仍保存</string>
+    <string name="finance_budget_confirm_cancel">返回修改</string>
 </resources>

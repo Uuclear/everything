@@ -125,6 +125,14 @@ data class FinanceTxEntity(
      * UI 列表过滤 `deleted = 0`。
      */
     val deleted: Boolean,
+
+    /**
+     * 超支确认审计标记（B6 预算硬约束，v9 迁移新增）。
+     *
+     * 用户在超支确认对话框选择“仍保存”时置 true，仅作本地审计留痕，
+     * 不参与预算判定与同步业务语义；默认 false（含收入 / 转账等非支出流水）。
+     */
+    @ColumnInfo(name = "overspend_acknowledged") val overspendAcknowledged: Boolean = false,
 ) {
     /** 阶段 5 / TR-11.2 配套：companion 用于挂载顶层扩展 fromJsonObj。 */
     companion object

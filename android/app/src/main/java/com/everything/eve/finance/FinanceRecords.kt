@@ -151,6 +151,33 @@ data class ContractRecord(
 )
 
 /**
+ * 预算条目（type='budget'）明文 payload（B6 / FR-V2-F 预算硬约束）。
+ *
+ * 字段语义同 Web `FinanceBudget`（B6 纯函数层独立子类型，本批次不接入
+ * UI / ViewModel / store / Room / 路由）：
+ *   - 金额字段 [amountMinor] 承载 decimal-as-string（"1000.00"，元）;
+ *   - [startTs] / [endTs] 为预算有效期双闭区间（ms，均为正, end 大于等于
+ *     start），四种 scope 同口径；流水发生时刻不在有效期内时该预算不参与
+ *     判定，周期桶由 BudgetEnforcer.periodBucket 在有效期内按 CST 分桶；
+ *   - 阈值字段为百分数整数：80 表示 80%，150 表示 150%。
+ */
+data class BudgetRecord(
+    val id: String,
+    val schemaVersion: Int = FINANCE_V2_SCHEMA_VERSION, // 固定 2
+    val scope: String, // 'monthly' | 'weekly' | 'yearly' | 'custom'
+    val category: String, // 'all' 或具体分类（自由文本，如“餐饮”）
+    val amountMinor: String, // decimal-as-string 元（如 "1000.00"），与其他 v2 record 同口径
+    val currency: String, // ISO 4217 三字母
+    val startTs: Long, // 预算有效期起点（ms）
+    val endTs: Long, // 预算有效期终点（ms，含）；必须 >= startTs
+    val warningThresholdPct: Int, // 预警阈值百分比，默认 80
+    val blockThresholdPct: Int, // 硬拦截阈值百分比，默认 100
+    val active: Boolean,
+    val createdAt: Long,
+    val updatedAt: Long,
+)
+
+/**
  * FinanceRecords 纯函数 object 容器（无状态, 全静态方法）。
  *
  * 命名风格与 Luhn.kt / FinanceAggregator.kt 保持一致（Kotlin 单例 + 顶层常量）。
@@ -302,6 +329,42 @@ object FinanceRecords {
                 return ValidationResult.Invalid("attachment.size 超 50MB 或非正")
             }
             if (a.mime.isEmpty()) return ValidationResult.Invalid("attachment.mime 缺失")
+        }
+        return ValidationResult.Ok
+    }
+
+    /**
+     * 校验预算条目（B6 / FR-V2-F，独立校验入口，不接入任何 v2 分发）。
+     *
+     * 规则（与 Web `validateBudget` 逐条一致）：
+     *   1. schemaVersion 必须为 2；id 非空；
+     *   2. scope 必须为 monthly / weekly / yearly / custom 四值之一；
+     *   3. category 非空且长度 1..20；"all" 是允许的特殊值（覆盖全部分类）,
+     *      长度约束对其同样适用；
+     *   4. amountMinor 走必填金额校验（正数, 最多两位小数）；
+     *   5. currency 走 ISO 4217 三字母大写代码校验；
+     *   6. startTs 必须为正毫秒；endTs 必须大于等于 startTs（四种 scope
+     *      同口径：二者表达预算有效期双闭区间）；
+     *   7. 阈值满足 1 <= warningThresholdPct <= blockThresholdPct <= 10000。
+     *
+     * 注意：reason 文案为中文字段级提示, 不含金额 / 日期等敏感数值。
+     */
+    fun validateBudget(p: BudgetRecord): ValidationResult {
+        if (p.schemaVersion != FINANCE_V2_SCHEMA_VERSION) return ValidationResult.Invalid("schemaVersion 必须是 2")
+        if (p.id.isEmpty()) return ValidationResult.Invalid("id 缺失")
+        val scopes = setOf("monthly", "weekly", "yearly", "custom")
+        if (p.scope !in scopes) return ValidationResult.Invalid("scope 非法")
+        if (p.category.isEmpty() || p.category.length > 20) {
+            return ValidationResult.Invalid("category 长度需在 1-20 字符")
+        }
+        if (!isValidDecimalString(p.amountMinor)) return ValidationResult.Invalid("amountMinor 非法")
+        if (!isValidCurrencyCode(p.currency)) return ValidationResult.Invalid("currency 必须为 ISO 4217 三字母大写代码")
+        if (p.startTs <= 0L) return ValidationResult.Invalid("startTs 必须为正整数毫秒")
+        if (p.endTs < p.startTs) return ValidationResult.Invalid("endTs 必须为整数且大于等于 startTs")
+        if (p.warningThresholdPct < 1 || p.blockThresholdPct < p.warningThresholdPct ||
+            p.blockThresholdPct > 10000
+        ) {
+            return ValidationResult.Invalid("阈值需满足 1 <= warningThresholdPct <= blockThresholdPct <= 10000")
         }
         return ValidationResult.Ok
     }

@@ -1,0 +1,1039 @@
+{
+  "_schema_ref_": "docs/schemas/finance.schema.json#/$defs/FinanceBudget",
+  "anchor_now_ms": 1782619200000,
+  "cases": [
+    {
+      "name": "ok_under_warning_70",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-01",
+          "kind": "expense",
+          "amount_minor": "600.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        }
+      ],
+      "incoming": {
+        "id": "tx-01",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 70,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_food_1000",
+        "spent_minor": 60000,
+        "incoming_minor": 10000,
+        "projected_minor": 70000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    },
+    {
+      "name": "warn_boundary_80_exact",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-02",
+          "kind": "expense",
+          "amount_minor": "700.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        }
+      ],
+      "incoming": {
+        "id": "tx-02",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "WARNING",
+        "used_pct": 80,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_food_1000",
+        "spent_minor": 70000,
+        "incoming_minor": 10000,
+        "projected_minor": 80000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    },
+    {
+      "name": "warning_85",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-03",
+          "kind": "expense",
+          "amount_minor": "750.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        }
+      ],
+      "incoming": {
+        "id": "tx-03",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "WARNING",
+        "used_pct": 85,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_food_1000",
+        "spent_minor": 75000,
+        "incoming_minor": 10000,
+        "projected_minor": 85000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    },
+    {
+      "name": "block_boundary_100_exact",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-04",
+          "kind": "expense",
+          "amount_minor": "900.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        }
+      ],
+      "incoming": {
+        "id": "tx-04",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "BLOCK",
+        "used_pct": 100,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_food_1000",
+        "spent_minor": 90000,
+        "incoming_minor": 10000,
+        "projected_minor": 100000,
+        "limit_minor": 100000,
+        "threshold_pct": 100
+      }
+    },
+    {
+      "name": "block_105",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-05",
+          "kind": "expense",
+          "amount_minor": "950.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        }
+      ],
+      "incoming": {
+        "id": "tx-05",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "BLOCK",
+        "used_pct": 105,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_food_1000",
+        "spent_minor": 95000,
+        "incoming_minor": 10000,
+        "projected_minor": 105000,
+        "limit_minor": 100000,
+        "threshold_pct": 100
+      }
+    },
+    {
+      "name": "ok_boundary_79",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-06",
+          "kind": "expense",
+          "amount_minor": "690.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        }
+      ],
+      "incoming": {
+        "id": "tx-06",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 79,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_food_1000",
+        "spent_minor": 69000,
+        "incoming_minor": 10000,
+        "projected_minor": 79000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    },
+    {
+      "name": "category_specific_mismatch",
+      "budgets": [
+        {
+          "id": "budget_monthly_traffic_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "交通",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [],
+      "incoming": {
+        "id": "tx-07",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 0,
+        "category": "",
+        "currency": "",
+        "budget_id": null,
+        "spent_minor": 0,
+        "incoming_minor": 0,
+        "projected_minor": 0,
+        "limit_minor": 0,
+        "threshold_pct": 0
+      }
+    },
+    {
+      "name": "category_all_aggregates",
+      "budgets": [
+        {
+          "id": "budget_monthly_all_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "all",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-08a",
+          "kind": "expense",
+          "amount_minor": "400.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        },
+        {
+          "id": "h-08b",
+          "kind": "expense",
+          "amount_minor": "300.00",
+          "category": "交通",
+          "currency": "CNY",
+          "occurred_at": 1781452800000
+        }
+      ],
+      "incoming": {
+        "id": "tx-08",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "WARNING",
+        "used_pct": 80,
+        "category": "all",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_all_1000",
+        "spent_minor": 70000,
+        "incoming_minor": 10000,
+        "projected_minor": 80000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    },
+    {
+      "name": "multiple_budgets_pick_worst",
+      "budgets": [
+        {
+          "id": "budget_monthly_all_2000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "all",
+          "amount_minor": "2000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        },
+        {
+          "id": "budget_monthly_food_700",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "700.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-09",
+          "kind": "expense",
+          "amount_minor": "600.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        }
+      ],
+      "incoming": {
+        "id": "tx-09",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "BLOCK",
+        "used_pct": 100,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_food_700",
+        "spent_minor": 60000,
+        "incoming_minor": 10000,
+        "projected_minor": 70000,
+        "limit_minor": 70000,
+        "threshold_pct": 100
+      }
+    },
+    {
+      "name": "monthly_reset_previous_month_excluded",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-10-may",
+          "kind": "expense",
+          "amount_minor": "600.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1779249600000
+        }
+      ],
+      "incoming": {
+        "id": "tx-10",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 10,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_food_1000",
+        "spent_minor": 0,
+        "incoming_minor": 10000,
+        "projected_minor": 10000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    },
+    {
+      "name": "edit_existing_excludes_self",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "tx-edit",
+          "kind": "expense",
+          "amount_minor": "900.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        },
+        {
+          "id": "h-11-other",
+          "kind": "expense",
+          "amount_minor": "100.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781452800000
+        }
+      ],
+      "incoming": {
+        "id": "tx-edit",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 20,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_food_1000",
+        "spent_minor": 10000,
+        "incoming_minor": 10000,
+        "projected_minor": 20000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    },
+    {
+      "name": "currency_conversion_usd_to_cny",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": {
+        "effective_ts": 1735689600000,
+        "rates": {
+          "USD/CNY": 7.1
+        }
+      },
+      "existing": [
+        {
+          "id": "h-12",
+          "kind": "expense",
+          "amount_minor": "90.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        }
+      ],
+      "incoming": {
+        "id": "tx-12",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "USD",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "WARNING",
+        "used_pct": 80,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_monthly_food_1000",
+        "spent_minor": 9000,
+        "incoming_minor": 71000,
+        "projected_minor": 80000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    },
+    {
+      "name": "missing_rate_skips_budget",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": {
+        "effective_ts": 1735689600000,
+        "rates": {
+          "EUR/CNY": 7.85
+        }
+      },
+      "existing": [
+        {
+          "id": "h-13",
+          "kind": "expense",
+          "amount_minor": "500.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        }
+      ],
+      "incoming": {
+        "id": "tx-13",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "USD",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 0,
+        "category": "",
+        "currency": "",
+        "budget_id": null,
+        "spent_minor": 0,
+        "incoming_minor": 0,
+        "projected_minor": 0,
+        "limit_minor": 0,
+        "threshold_pct": 0
+      }
+    },
+    {
+      "name": "inactive_budget_skipped",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000_inactive",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": false,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-14",
+          "kind": "expense",
+          "amount_minor": "900.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781064000000
+        }
+      ],
+      "incoming": {
+        "id": "tx-14",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 0,
+        "category": "",
+        "currency": "",
+        "budget_id": null,
+        "spent_minor": 0,
+        "incoming_minor": 0,
+        "projected_minor": 0,
+        "limit_minor": 0,
+        "threshold_pct": 0
+      }
+    },
+    {
+      "name": "custom_scope_inside",
+      "budgets": [
+        {
+          "id": "budget_custom_food_1000",
+          "schema_version": 2,
+          "scope": "custom",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1780243200000,
+          "end_ts": 1781971199999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-15",
+          "kind": "expense",
+          "amount_minor": "600.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781452800000
+        }
+      ],
+      "incoming": {
+        "id": "tx-15",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1781064000000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 70,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_custom_food_1000",
+        "spent_minor": 60000,
+        "incoming_minor": 10000,
+        "projected_minor": 70000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    },
+    {
+      "name": "custom_scope_outside",
+      "budgets": [
+        {
+          "id": "budget_custom_food_1000",
+          "schema_version": 2,
+          "scope": "custom",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1780243200000,
+          "end_ts": 1781971199999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-16",
+          "kind": "expense",
+          "amount_minor": "600.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1781452800000
+        }
+      ],
+      "incoming": {
+        "id": "tx-16",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 0,
+        "category": "",
+        "currency": "",
+        "budget_id": null,
+        "spent_minor": 0,
+        "incoming_minor": 0,
+        "projected_minor": 0,
+        "limit_minor": 0,
+        "threshold_pct": 0
+      }
+    },
+    {
+      "name": "income_tx_not_counted",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1767196800000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [],
+      "incoming": {
+        "id": "tx-17",
+        "kind": "income",
+        "amount_minor": "5000.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 0,
+        "category": "",
+        "currency": "",
+        "budget_id": null,
+        "spent_minor": 0,
+        "incoming_minor": 0,
+        "projected_minor": 0,
+        "limit_minor": 0,
+        "threshold_pct": 0
+      }
+    },
+    {
+      "name": "weekly_reset_adjacent_week_excluded",
+      "budgets": [
+        {
+          "id": "budget_weekly_food_1000",
+          "schema_version": 2,
+          "scope": "weekly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1782057600000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [
+        {
+          "id": "h-18-in",
+          "kind": "expense",
+          "amount_minor": "600.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1782057600000
+        },
+        {
+          "id": "h-18-next",
+          "kind": "expense",
+          "amount_minor": "600.00",
+          "category": "餐饮",
+          "currency": "CNY",
+          "occurred_at": 1782662400000
+        }
+      ],
+      "incoming": {
+        "id": "tx-18",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1782619200000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 70,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_weekly_food_1000",
+        "spent_minor": 60000,
+        "incoming_minor": 10000,
+        "projected_minor": 70000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    },
+    {
+      "name": "monthly_outside_validity_window",
+      "budgets": [
+        {
+          "id": "budget_monthly_food_1000_jun_start",
+          "schema_version": 2,
+          "scope": "monthly",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1780243200000,
+          "end_ts": 1798732799999,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1780243200000,
+          "updated_at": 1780243200000
+        }
+      ],
+      "rate_table": null,
+      "existing": [],
+      "incoming": {
+        "id": "tx-19",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1780156800000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 0,
+        "category": "",
+        "currency": "",
+        "budget_id": null,
+        "spent_minor": 0,
+        "incoming_minor": 0,
+        "projected_minor": 0,
+        "limit_minor": 0,
+        "threshold_pct": 0
+      }
+    },
+    {
+      "name": "custom_end_boundary_inclusive",
+      "budgets": [
+        {
+          "id": "budget_custom_food_1000_short",
+          "schema_version": 2,
+          "scope": "custom",
+          "category": "餐饮",
+          "amount_minor": "1000.00",
+          "currency": "CNY",
+          "start_ts": 1780243200000,
+          "end_ts": 1781020800000,
+          "warning_threshold_pct": 80,
+          "block_threshold_pct": 100,
+          "active": true,
+          "created_at": 1767196800000,
+          "updated_at": 1767196800000
+        }
+      ],
+      "rate_table": null,
+      "existing": [],
+      "incoming": {
+        "id": "tx-20",
+        "kind": "expense",
+        "amount_minor": "100.00",
+        "category": "餐饮",
+        "currency": "CNY",
+        "occurred_at": 1781020800000
+      },
+      "expect": {
+        "level": "OK",
+        "used_pct": 10,
+        "category": "餐饮",
+        "currency": "CNY",
+        "budget_id": "budget_custom_food_1000_short",
+        "spent_minor": 0,
+        "incoming_minor": 10000,
+        "projected_minor": 10000,
+        "limit_minor": 100000,
+        "threshold_pct": 80
+      }
+    }
+  ]
+}

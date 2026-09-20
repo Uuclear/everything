@@ -56,6 +56,7 @@ import type {
   AttachmentRef,
   CachedFinanceRecord,
   FinanceAccount,
+  FinanceBudget,
   FinanceCard,
   FinanceContract,
   FinanceLoan,
@@ -67,6 +68,12 @@ import type {
   FinanceType,
   FinanceV2Payload,
 } from '../finance/types'
+import {
+  checkTx,
+  OK_EMPTY,
+  type BudgetCheckResult,
+  type BudgetTxLike,
+} from '../finance/budgetEnforcer'
 import {
   DEFAULT_CURRENCY,
   FINANCE_MODULE,
@@ -118,6 +125,14 @@ export interface PersistedFinanceState {
   policies: FinancePolicy[]
   loans: FinanceLoan[]
   contracts: FinanceContract[]
+  /**
+   * B6 预算条目（FR-V2-F 预算硬约束）。
+   *
+   * 可选字段：旧本地数据（B6 之前落盘的 schemaVersion=2 形态）无此字段，
+   * hydrate 时按空数组还原，不升 schemaVersion（保持 2）；budget payload
+   * 自身 schema_version=2，走 v2 records 通道。
+   */
+  budgets?: FinanceBudget[]
   /**
    * B5 离线汇率表（stage5-finance-v2 / FR-V2-C.2、FR-V2-C.3）。
    *
@@ -278,6 +293,8 @@ export const useFinanceStore = defineStore('finance', () => {
   const policies = reactive(new Map<string, CachedFinanceRecord>())
   const loans = reactive(new Map<string, CachedFinanceRecord>())
   const contracts = reactive(new Map<string, CachedFinanceRecord>())
+  /** B6 预算条目（v2 budget；预算硬约束判定的候选全集）。 */
+  const budgets = reactive(new Map<string, CachedFinanceRecord>())
   /** 持久化通道（默认 localStorage；测试可注入 mock）。 */
   let storage: StorageChannel = defaultStorageChannel()
   /** 加密通道（默认直连 crypto/envelope + api/client；测试可注入 mock）。 */
@@ -441,6 +458,23 @@ export const useFinanceStore = defineStore('finance', () => {
       .map((r) => r.data as unknown as FinanceContract),
   )
 
+  /**
+   * 所有预算（B6；过滤墓碑，按 start_ts 降序，其次 created_at 降序）。
+   *
+   * 预算列表是预算硬约束门面 precheckTx 的候选全集；停用（active=false）
+   * 的预算仍保留在列表中（UI 展示“已停用”），判定时由纯函数层跳过。
+   */
+  const listBudgets = computed<FinanceBudget[]>(() =>
+    Array.from(budgets.values())
+      .filter((r) => !r.deleted)
+      .sort((a, b) => {
+        const aB = a.data as unknown as FinanceBudget
+        const bB = b.data as unknown as FinanceBudget
+        return bB.start_ts - aB.start_ts || bB.created_at - aB.created_at
+      })
+      .map((r) => r.data as unknown as FinanceBudget),
+  )
+
   // ========== v2 提醒纯计算出口（TR-4.3） ==========
 
   /**
@@ -562,6 +596,8 @@ export const useFinanceStore = defineStore('finance', () => {
         return loans.get(id)
       case 'contract':
         return contracts.get(id)
+      case 'budget':
+        return budgets.get(id)
     }
   }
 
@@ -601,7 +637,13 @@ export const useFinanceStore = defineStore('finance', () => {
    * 校验失败抛 Error，调用方捕获后按"丢数据兜底"处理（v1 阶段策略）。
    */
   function assertValidV2(type: FinanceType, data: unknown): asserts data is FinanceV2Payload {
-    if (type !== 'subscription' && type !== 'policy' && type !== 'loan' && type !== 'contract') {
+    if (
+      type !== 'subscription'
+      && type !== 'policy'
+      && type !== 'loan'
+      && type !== 'contract'
+      && type !== 'budget'
+    ) {
       return
     }
     const r: ValidationResult = validateV2Payload(type, data)
@@ -662,6 +704,7 @@ export const useFinanceStore = defineStore('finance', () => {
       policies.delete(remote.id)
       loans.delete(remote.id)
       contracts.delete(remote.id)
+      budgets.delete(remote.id)
       // 附件墓碑：从密文缓存 + 二级索引移除（attachmentCipherCache 保留墓碑用于审计）。
       if (remote.type === 'attachment') {
         const cipher = attachmentCipherCache.get(remote.id)
@@ -747,7 +790,13 @@ export const useFinanceStore = defineStore('finance', () => {
     // 解密（失败抛异常，让上层观测）。
     const data = channel.open(remote.id, remote.module, remote.ciphertext, remote.version)
     // v2 校验（v1 类型跳过）：失败抛异常（与 4b 同纪律）。
-    if (type === 'subscription' || type === 'policy' || type === 'loan' || type === 'contract') {
+    if (
+      type === 'subscription'
+      || type === 'policy'
+      || type === 'loan'
+      || type === 'contract'
+      || type === 'budget'
+    ) {
       const r: ValidationResult = validateV2Payload(type, data)
       if (!r.ok) throw new Error(`远端 v2 ${type} 校验失败: ${r.reason}`)
     }
@@ -765,7 +814,7 @@ export const useFinanceStore = defineStore('finance', () => {
   }
 
   /**
-   * 按 type 路由到对应 Map；v1+v2 共 7 子类型。
+   * 按 type 路由到对应 Map；v1 三类 + v2 五子类型（含 B6 budget）。
    */
   function mapForType(type: FinanceType): Map<string, CachedFinanceRecord> | null {
     switch (type) {
@@ -776,6 +825,7 @@ export const useFinanceStore = defineStore('finance', () => {
       case 'policy': return policies
       case 'loan': return loans
       case 'contract': return contracts
+      case 'budget': return budgets
     }
   }
 
@@ -1062,6 +1112,19 @@ export const useFinanceStore = defineStore('finance', () => {
         data: c,
       })
     }
+    // 还原 B6 预算（旧持久化形态缺 budgets 字段时按空数组容错，不升版本）。
+    for (const b of state.budgets ?? []) {
+      budgets.set(b.id, {
+        id: b.id,
+        module: FINANCE_MODULE,
+        type: 'budget',
+        version: 1,
+        createdAt: b.created_at,
+        updatedAt: b.updated_at,
+        deleted: false,
+        data: b,
+      })
+    }
     hydrated.value = true
   }
 
@@ -1096,6 +1159,10 @@ export const useFinanceStore = defineStore('finance', () => {
       contracts: Array.from(contracts.values())
         .filter((r) => !r.deleted)
         .map((r) => r.data as unknown as FinanceContract),
+      // B6：预算随同一 StorageState 明文落盘（可选字段，旧版本读取时忽略）。
+      budgets: Array.from(budgets.values())
+        .filter((r) => !r.deleted)
+        .map((r) => r.data as unknown as FinanceBudget),
       // B5：汇率表与默认币种随同一 StorageState 明文落盘（与既有字段同级）。
       // 汇率包密文另走 records 通道 type='rate' 加密上行（见 importRateTable）；
       // rateRecordVersions 记录本地上行 / 下行信封版本，支撑同键重复导入递增。
@@ -1162,7 +1229,13 @@ export const useFinanceStore = defineStore('finance', () => {
       const type = payloadTypeOf(payload)
       if (type == null) continue
       // v2 子类型校验（兜底）：失败抛异常, 不写本地缓存。
-      if (type === 'subscription' || type === 'policy' || type === 'loan' || type === 'contract') {
+      if (
+        type === 'subscription'
+        || type === 'policy'
+        || type === 'loan'
+        || type === 'contract'
+        || type === 'budget'
+      ) {
         assertValidV2(type, payload)
       }
       const target = mapForType(type)
@@ -1186,7 +1259,9 @@ export const useFinanceStore = defineStore('finance', () => {
    *   - 含 `next_renewal_ts` + `billing_cycle` + `provider` → subscription；
    *   - 含 `policy_number` + `premium_minor` + `expiry_ts` → policy；
    *   - 含 `counterparty` + `principal_minor` + `due_ts` + `direction` → loan；
-   *   - 含 `signed_ts` + `end_ts` + `auto_renew` → contract。
+   *   - 含 `signed_ts` + `end_ts` + `auto_renew` → contract；
+   *   - B6：含 `warning_threshold_pct` + `block_threshold_pct` → budget
+   *     （阈值百分数对为预算独有判别字段）。
    */
   function payloadTypeOf(payload: FinancePayloadAll): FinanceType | null {
     const p = payload as unknown as Record<string, unknown>
@@ -1197,6 +1272,7 @@ export const useFinanceStore = defineStore('finance', () => {
     if ('policy_number' in p && 'premium_minor' in p && 'expiry_ts' in p) return 'policy'
     if ('counterparty' in p && 'principal_minor' in p && 'due_ts' in p && 'direction' in p) return 'loan'
     if ('signed_ts' in p && 'end_ts' in p && 'auto_renew' in p) return 'contract'
+    if ('warning_threshold_pct' in p && 'block_threshold_pct' in p) return 'budget'
     return null
   }
 
@@ -1269,21 +1345,95 @@ export const useFinanceStore = defineStore('finance', () => {
     void pushChanges([next])
   }
 
-  // ========== CRUD —— 流水 ==========
+  // ========== CRUD —— 流水（B6：预算硬约束拦截） ==========
 
-  function addTx(data: FinanceTx): void {
+  /**
+   * 把持久化流水映射为预算判定最小形态 BudgetTxLike。
+   *
+   * FinanceTx 自身不承载币种：按出账方账户 / 卡解析其 currency，均缺失
+   * 时降级默认币种（与看板面值口径一致）；金额直接透传 decimal 元字符串，
+   * 由 budgetEnforcer 内部以 bigint 解析，本函数不做任何数值运算。
+   */
+  function txToBudgetLike(tx: FinanceTx): BudgetTxLike {
+    let currency = defaultCurrency.value
+    if (tx.account_id) {
+      const acc = accounts.get(tx.account_id)?.data as FinanceAccount | undefined
+      if (acc?.currency) currency = acc.currency
+    }
+    if (!tx.account_id && tx.card_id) {
+      const card = cards.get(tx.card_id)?.data as FinanceCard | undefined
+      if (card?.currency) currency = card.currency
+    }
+    return {
+      id: tx.id,
+      kind: tx.kind,
+      amountMinor: tx.amount,
+      category: tx.category,
+      currency,
+      occurredAt: tx.occurred_at,
+    }
+  }
+
+  /**
+   * B6 预算硬约束门面（同步纯读，不写任何状态）。
+   *
+   * 保存 / 编辑一笔流水前由 UI 层调用：非 expense（收入 / 转账）直接
+   * OK_EMPTY；支出则以全量 listBudgets 为候选、listTxs（编辑场景同 id
+   * 旧记录由纯函数层自动排除）为既有支出、store 内 B5 汇率表完成异币
+   * 折算，返回最严重一档命中（OK / WARNING / BLOCK）。
+   */
+  function precheckTx(data: FinanceTx): BudgetCheckResult {
+    if (data.kind !== 'expense') return OK_EMPTY
+    const incoming = txToBudgetLike(data)
+    const existing: BudgetTxLike[] = listTxs.value.map(txToBudgetLike)
+    return checkTx(incoming, listBudgets.value, existing, rateTable.value, Date.now())
+  }
+
+  /**
+   * 新建流水。
+   *
+   * B6 返回值语义：true=已落库；false=命中预算 BLOCK 档且未显式确认，
+   * 此时不写 Map、不推上行、不持久化。其余写入失败（校验 / 网络）行为
+   * 与历史一致（推送 fire-and-forget，保留本地副本）。
+   *
+   * @param overspendAcknowledged 超支确认；仅 true 时给 payload 挂
+   *        overspend_acknowledged=true（本地审计），false 时不挂该键。
+   */
+  function addTx(data: FinanceTx, overspendAcknowledged = false): boolean {
+    const check = precheckTx(data)
+    if (check.level === 'BLOCK' && !overspendAcknowledged) return false
+    if (overspendAcknowledged) {
+      data.overspend_acknowledged = true
+    } else {
+      // 未确认路径保持旧数据形态干净（不持久化 false）。
+      delete data.overspend_acknowledged
+    }
     const record = wrap('tx', data)
     txs.set(record.id, record)
     persist()
     void pushChanges([data])
+    return true
   }
 
-  function updateTx(data: FinanceTx): void {
+  /**
+   * 更新流水（预算判定同 addTx；同 id 旧额在 precheckTx 内自动排除）。
+   *
+   * @returns true=已落库；false=被预算硬拦截（未确认），状态不变。
+   */
+  function updateTx(data: FinanceTx, overspendAcknowledged = false): boolean {
+    const check = precheckTx(data)
+    if (check.level === 'BLOCK' && !overspendAcknowledged) return false
+    if (overspendAcknowledged) {
+      data.overspend_acknowledged = true
+    } else {
+      delete data.overspend_acknowledged
+    }
     const existing = txs.get(data.id)
     const record = wrap('tx', data, existing)
     txs.set(record.id, record)
     persist()
     void pushChanges([data])
+    return true
   }
 
   /**
@@ -1497,6 +1647,58 @@ export const useFinanceStore = defineStore('finance', () => {
     await pullAll(since)
   }
 
+  // ========== CRUD —— 预算（budget, v2 B6） ==========
+
+  /**
+   * 新建预算（B6）。
+   * 写入前经 validateBudget 硬闸门；成功后入 Map / persist / 上行。
+   */
+  function addBudget(data: FinanceBudget): void {
+    assertValidV2('budget', data)
+    const record = wrap('budget', data)
+    budgets.set(record.id, record)
+    persist()
+    void pushChanges([data])
+  }
+
+  /** 更新预算（version 严格递增）。 */
+  function updateBudget(data: FinanceBudget): void {
+    assertValidV2('budget', data)
+    const existing = budgets.get(data.id)
+    const record = wrap('budget', data, existing)
+    budgets.set(record.id, record)
+    persist()
+    void pushChanges([data])
+  }
+
+  /**
+   * 硬删除预算（B6；预算无归档语义，误录后可彻底删除）。
+   * 完全仿 deleteSubscription：推墓碑上行 + 增量回拉 + 本地清理。
+   */
+  async function deleteBudget(id: string): Promise<void> {
+    const existing = budgets.get(id)
+    if (!existing) return
+    const version = existing.version + 1
+    const now = Date.now()
+    const res = await channel.push({
+      id,
+      module: FINANCE_MODULE,
+      type: 'budget',
+      ciphertext: '',
+      version,
+      device_id: 'web',
+      created_at: existing.createdAt,
+      updated_at: now,
+      deleted: true,
+    })
+    if (res.skipped === 0) {
+      budgets.delete(id)
+      persist()
+    }
+    since = Math.max(since, res.server_time)
+    await pullAll(since)
+  }
+
   // ========== 重置 / 测试钩子 ==========
 
   /**
@@ -1510,6 +1712,7 @@ export const useFinanceStore = defineStore('finance', () => {
     policies.clear()
     loans.clear()
     contracts.clear()
+    budgets.clear()
     // 附件子状态一并清空（与 v1/v2 子类型同节奏）。
     attachments.clear()
     attachmentsByRecordId.clear()
@@ -1550,6 +1753,7 @@ export const useFinanceStore = defineStore('finance', () => {
     policies.clear()
     loans.clear()
     contracts.clear()
+    budgets.clear()
     attachments.clear()
     attachmentsByRecordId.clear()
     attachmentCipherCache.clear()
@@ -1639,6 +1843,9 @@ export const useFinanceStore = defineStore('finance', () => {
     listPolicies,
     listLoans,
     listContracts,
+    // B6 预算（预算硬约束 + 超支拦截）
+    listBudgets,
+    precheckTx,
     // v2 提醒纯计算出口（TR-4.3；Web 端无 AlarmManager，仅产出数据）
     upcomingV2Reminders,
     // 查询
@@ -1677,6 +1884,10 @@ export const useFinanceStore = defineStore('finance', () => {
     addContract,
     updateContract,
     deleteContract,
+    // CRUD 预算（v2 B6）
+    addBudget,
+    updateBudget,
+    deleteBudget,
     // 附件 getters / CRUD（TR-3.3 + TR-3.4）
     attachments,
     attachmentsByRecordId,

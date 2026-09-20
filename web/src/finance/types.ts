@@ -33,7 +33,10 @@
  *
  * - v1 仅启用前三类（account / card / tx）；
  * - v2 启用后扩展后四类（policy / subscription / loan / contract）；
- * - 编辑器 / 列表 / 视图本期不实现 v2（spec FR-1 边界）。
+ * - B6 追加 budget（预算硬约束 + 超支拦截），复用 v2 records 通道。
+ *
+ * 向后兼容：budget 仅在数组末尾追加，不调整既有顺序，不升任何
+ * schema_version（budget payload 自身 schema_version=2）。
  */
 export const FINANCE_TYPES = [
   'account',
@@ -43,6 +46,7 @@ export const FINANCE_TYPES = [
   'subscription',
   'loan',
   'contract',
+  'budget',
 ] as const
 
 /** FinanceType 子类型联合。 */
@@ -201,6 +205,15 @@ export interface FinanceTx {
   icon?: string | null
   /** 色板。 */
   color: ColorPalette
+  /**
+   * 超支硬拦截确认标记（B6 / FR-V2-F，可选；仅本地审计语义）。
+   *
+   * 用户在预算阻断确认弹窗中选择“仍保存”后置 true：表示本笔支出保存时
+   * 已预计超过预算拦截阈值，且经用户显式确认。旧数据无此键时按
+   * undefined / false 处理；未触发拦截的新流水也不挂该键，保持旧数据
+   * 形态干净。流水自身 v1，schema_version 仍为 1，不随本字段升级。
+   */
+  overspend_acknowledged?: boolean
   /** 创建时刻。 */
   created_at: number
   /** 最后更新时刻。 */
@@ -406,6 +419,51 @@ export interface FinanceContract {
 }
 
 /**
+ * 预算条目（type='budget'）明文 payload（B6 / FR-V2-F 预算硬约束）。
+ *
+ * B6 Web 集成层接线后：已并入 FINANCE_TYPES 常量、FinanceV2Payload 联合
+ * 与 validateV2Payload 分发，store / UI 全链路复用 v2 records 通道。
+ *
+ * 字段与 Android `BudgetRecord` 一一对应；金额 amount_minor 为
+ * decimal-as-string，纯函数计算时统一转成 minor 分整数 bigint。
+ *
+ * 周期口径（与 Android BudgetEnforcer.periodBucket 同口径）：
+ *   - start_ts / end_ts 为预算有效期（双闭区间，均为正整数毫秒，end 大于
+ *     等于 start），流水发生时刻不在有效期内则该预算完全不参与判定；
+ *   - monthly / yearly 在有效期内按 CST（UTC+8）自然月 / 自然年滚动分桶；
+ *   - weekly 以 start_ts 所在 CST 日期零点为 epoch，每 7 天一个滚动桶；
+ *   - custom 在有效期内只有一个桶 [start_ts, end_ts + 1)（末点开区间）。
+ */
+export interface FinanceBudget {
+  /** UUID v4 字符串。 */
+  id: string
+  /** schema 版本（v2 固定 2）。 */
+  schema_version: 2
+  /** 周期口径：monthly | weekly | yearly | custom。 */
+  scope: 'monthly' | 'weekly' | 'yearly' | 'custom'
+  /** 分类匹配值；'all' 为特殊值表示覆盖全部分类，其余为具体分类名（1-20 字符）。 */
+  category: string
+  /** 预算额度（decimal-as-string；正数，最多两位小数，如 "1000.00"）。 */
+  amount_minor: string
+  /** 预算币种（ISO 4217 三字母代码；异币流水按离线汇率表折算）。 */
+  currency: CurrencyCode
+  /** 预算有效期起点（Unix 毫秒，含；必须为正整数）。 */
+  start_ts: number
+  /** 预算有效期终点（Unix 毫秒，含；必须大于等于 start_ts）。 */
+  end_ts: number
+  /** 预警阈值百分数（80 表示 80%；合法区间 1..10000 且小于等于 block）。 */
+  warning_threshold_pct: number
+  /** 阻断确认阈值百分数（100 表示 100%，150 表示 150%）。 */
+  block_threshold_pct: number
+  /** 是否启用；false 表示停用且不参与判定，但保留历史。 */
+  active: boolean
+  /** 创建时刻，Unix 毫秒。 */
+  created_at: number
+  /** 最后更新时刻，Unix 毫秒。 */
+  updated_at: number
+}
+
+/**
  * 附件引用（policy / contract 等 v2 记录挂的附件列表项）。
  *
  * 实际二进制走 records 通道 type='attachment'；这里只存元数据。
@@ -432,6 +490,7 @@ export type FinanceV2Payload =
   | FinancePolicy
   | FinanceLoan
   | FinanceContract
+  | FinanceBudget
 
 /** 全部财务条目明文 payload 联合（v1 三类 + v2 四类）。 */
 export type FinancePayloadAll = FinancePayload | FinanceV2Payload
@@ -668,6 +727,58 @@ export function validateContract(p: FinanceContract): ValidationResult {
 }
 
 /**
+ * 校验预算条目（B6 / FR-V2-F，经 validateV2Payload 按 type='budget' 分发）。
+ *
+ * 规则与 Android `FinanceRecords.validateBudget` 逐分支一致：
+ *   1. schema_version 必须为 2；id 非空；
+ *   2. scope 必须为 monthly / weekly / yearly / custom 四值之一；
+ *   3. category 非空且长度 1..20；'all' 是允许的特殊值（覆盖全部分类）；
+ *   4. amount_minor 走必填金额校验（正数，最多两位小数）；
+ *   5. currency 走 ISO 4217 三字母大写代码校验；
+ *   6. start_ts 必须为正整数毫秒，end_ts 必须为整数且大于等于 start_ts
+ *      （四种 scope 同口径：二者表达预算有效期双闭区间）；
+ *   7. 阈值为整数且满足 1 <= warning <= block <= 10000。
+ *
+ * reason 文案为中文字段级提示，不含金额 / 日期等敏感数值。
+ */
+export function validateBudget(p: FinanceBudget): ValidationResult {
+  if (p.schema_version !== FINANCE_V2_SCHEMA_VERSION) {
+    return { ok: false, reason: 'schema_version 必须是 2' }
+  }
+  if (!p.id || typeof p.id !== 'string') return { ok: false, reason: 'id 缺失' }
+  const scopes = ['monthly', 'weekly', 'yearly', 'custom'] as const
+  if (!scopes.includes(p.scope)) return { ok: false, reason: 'scope 非法' }
+  if (!p.category || typeof p.category !== 'string' || p.category.length === 0 || p.category.length > 20) {
+    return { ok: false, reason: 'category 长度需在 1-20 字符' }
+  }
+  if (!isValidDecimalString(p.amount_minor)) {
+    return { ok: false, reason: 'amountMinor 非法' }
+  }
+  if (!isValidCurrencyCode(p.currency)) {
+    return { ok: false, reason: 'currency 必须为 ISO 4217 三字母大写代码' }
+  }
+  if (!Number.isInteger(p.start_ts) || p.start_ts <= 0) {
+    return { ok: false, reason: 'startTs 必须为正整数毫秒' }
+  }
+  if (!Number.isInteger(p.end_ts) || p.end_ts < p.start_ts) {
+    return { ok: false, reason: 'endTs 必须为整数且大于等于 startTs' }
+  }
+  if (
+    !Number.isInteger(p.warning_threshold_pct) ||
+    !Number.isInteger(p.block_threshold_pct) ||
+    p.warning_threshold_pct < 1 ||
+    p.block_threshold_pct < p.warning_threshold_pct ||
+    p.block_threshold_pct > 10000
+  ) {
+    return {
+      ok: false,
+      reason: '阈值需满足 1 <= warningThresholdPct <= blockThresholdPct <= 10000',
+    }
+  }
+  return { ok: true }
+}
+
+/**
  * v2 子类型校验统一入口（按 type 路由）。
  */
 export function validateV2Payload(
@@ -683,6 +794,9 @@ export function validateV2Payload(
       return validateLoan(payload as FinanceLoan)
     case 'contract':
       return validateContract(payload as FinanceContract)
+    // B6：预算子类型接入统一分发（FINANCE_TYPES / FinanceV2Payload 已含）。
+    case 'budget':
+      return validateBudget(payload as FinanceBudget)
     default:
       return { ok: false, reason: `不支持的 type=${String(type)}` }
   }

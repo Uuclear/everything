@@ -17,6 +17,7 @@ package com.everything.eve.data.finance
  *     - "loan"         —— 应收借款
  *     - "contract"     —— 合同 / 发票
  *     - "rate"         —— 离线汇率包（B5 多币种折算；整包一条 records 行）
+ *     - "budget"       —— 预算（B6 预算硬约束；预计累计达阈值端侧实时预警 / 阻断确认）
  */
 object FinanceModule {
     /** records module 字段值（AAD / 路由都用）。 */
@@ -63,4 +64,17 @@ object FinanceModule {
      * 本地 finance_rate 表按货币对拆行冗余缓存，密文以 records 通道为准。
      */
     const val TYPE_RATE: String = "rate"
+
+    // ============================================================================
+    // B6 预算硬约束（stage5-finance-v2 / FR-V2-F）
+    // ============================================================================
+
+    /**
+     * 子类型：预算（B6）。
+     *
+     * 预算走 records 密文通道（module=finance）保存；保存支出流水时由端侧
+     * 纯函数 BudgetEnforcer 实时判定预计累计占比，达预警阈值保存后提示、
+     * 达阻断阈值保存前弹确认框；全程端侧判定, 不接 Reminders 通道。
+     */
+    const val TYPE_BUDGET: String = "budget"
 }

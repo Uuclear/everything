@@ -1,7 +1,9 @@
 package com.everything.eve.data
 
+import android.database.sqlite.SQLiteDatabase
 import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.db.framework.FrameworkSQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
@@ -326,5 +328,119 @@ class MigrationTest {
             assertEquals(1, c.getInt(0)) // OR IGNORE 去重：同 id 不重复入队
         }
         db.close()
+    }
+
+    /**
+     * v8 finance_tx 表结构（21 列；与 EveDatabase.MIGRATION_5_6 建表 SQL 一致，
+     * 即 B6 加列前的最后形态）。仅用于 8→9 迁移用例手工铺底。
+     */
+    private fun createV8FinanceTxSql(): String = """
+        CREATE TABLE IF NOT EXISTS finance_tx (
+            id TEXT NOT NULL PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            card_id TEXT,
+            kind TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            category TEXT NOT NULL,
+            occurred_at INTEGER NOT NULL,
+            note TEXT,
+            icon TEXT,
+            color TEXT,
+            transfer_to_account_id TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            module TEXT NOT NULL DEFAULT 'finance',
+            type TEXT NOT NULL DEFAULT 'tx',
+            dirty INTEGER NOT NULL DEFAULT 1,
+            deleted INTEGER NOT NULL DEFAULT 0
+        )
+    """.trimIndent()
+
+    /**
+     * B6：v8 → v9 给 finance_tx 增加 overspend_acknowledged 审计列。
+     *
+     * 断言：新列存在（INTEGER / NOT NULL / DEFAULT 0）；旧行迁移后取默认 0；
+     * 显式写 1 可回读；旧数据行数不丢。
+     *
+     * 说明：B6 实体层未给该列声明 Room 侧 defaultValue（Kotlin 默认值 false），
+     * 而 SQLite 的 ADD COLUMN NOT NULL 必须带 DEFAULT。runMigrationsAndValidate
+     * 会逐列比对默认值元数据导致误报，因此这里与本类既有用例同源（helper 建空库 +
+     * 手工建表），再以 FrameworkSQLiteDatabase 显式套用 MIGRATION_8_9 后直读
+     * PRAGMA / 数据断言。运行需要连接设备/模拟器（connectedDebugAndroidTest）。
+     */
+    @Test
+    fun migrate8To9_addsOverspendAcknowledgedColumn() {
+        // 1) 建立 v8 库：仅铺 finance_tx（迁移只动这一张表），插一条旧形态行。
+        helper.createDatabase(dbName, 8).use { db ->
+            db.execSQL(createV8FinanceTxSql())
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_finance_tx_updated_at " +
+                    "ON finance_tx (updated_at)",
+            )
+            db.execSQL(
+                """
+                INSERT INTO finance_tx
+                  (id, account_id, kind, amount, currency, category, occurred_at,
+                   created_at, updated_at, dirty, deleted)
+                VALUES
+                  ('t1', 'acc-1', 'expense', '10.00', 'CNY', 'food', 1782619200000,
+                   1782619200000, 1782619200000, 0, 0)
+                """.trimIndent(),
+            )
+        }
+
+        // 2) 显式套用 8→9 迁移（与 MigrationTestHelper 同一个库文件）。
+        val dbFile = InstrumentationRegistry.getInstrumentation()
+            .targetContext.getDatabasePath(dbName)
+        val sqlDb = SQLiteDatabase.openDatabase(
+            dbFile.path,
+            null,
+            SQLiteDatabase.OPEN_READWRITE,
+        )
+        val supportDb: SupportSQLiteDatabase = FrameworkSQLiteDatabase(sqlDb)
+        EveDatabase.MIGRATION_8_9.migrate(supportDb)
+
+        // 3) PRAGMA 直读：新列存在、类型 INTEGER、NOT NULL、默认值 0。
+        var foundType: String? = null
+        var foundNotNull = -1
+        var foundDefault: String? = null
+        supportDb.query("PRAGMA table_info(finance_tx)").use { c ->
+            while (c.moveToNext()) {
+                if (c.getString(1) == "overspend_acknowledged") {
+                    foundType = c.getString(2)
+                    foundNotNull = c.getInt(3)
+                    foundDefault = c.getString(4)
+                }
+            }
+        }
+        assertEquals("新列类型必须为 INTEGER", "INTEGER", foundType)
+        assertEquals("新列必须 NOT NULL", 1, foundNotNull)
+        assertEquals("新列默认值必须为 0", "0", foundDefault)
+
+        // 4) 旧数据零丢失，且旧行新列取默认 0。
+        supportDb.query("SELECT COUNT(*) FROM finance_tx").use { c ->
+            c.moveToFirst()
+            assertEquals(1, c.getInt(0))
+        }
+        supportDb.query(
+            "SELECT overspend_acknowledged FROM finance_tx WHERE id='t1'",
+        ).use { c ->
+            c.moveToFirst()
+            assertEquals("旧行迁移后超支确认标记必须默认 0", 0, c.getInt(0))
+        }
+
+        // 5) 显式置 1（用户“仍保存”）后可回读。
+        supportDb.execSQL(
+            "UPDATE finance_tx SET overspend_acknowledged = 1 WHERE id='t1'",
+        )
+        supportDb.query(
+            "SELECT overspend_acknowledged FROM finance_tx WHERE id='t1'",
+        ).use { c ->
+            c.moveToFirst()
+            assertEquals(1, c.getInt(0))
+        }
+        supportDb.close()
     }
 }

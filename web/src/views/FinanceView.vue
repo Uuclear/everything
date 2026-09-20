@@ -35,12 +35,15 @@ import FinanceSubscriptionList from './finance/FinanceSubscriptionList.vue'
 import FinancePolicyList from './finance/FinancePolicyList.vue'
 import FinanceLoanList from './finance/FinanceLoanList.vue'
 import FinanceContractList from './finance/FinanceContractList.vue'
+// 阶段 5 v2 B6 —— 预算列表（FR-V2-F 预算硬约束）
+import BudgetList from './finance/BudgetList.vue'
 import { useFinanceStore } from '../stores/finance'
 
 const store = useFinanceStore()
 
 // ========== Tab 切换状态 ==========
-// 阶段 5 v2 —— 扩展 4 子类型 Tab（subscription / policy / loan / contract）。
+// 阶段 5 v2 —— 扩展 4 子类型 Tab（subscription / policy / loan / contract）；
+// B6 追加 budgets（预算）。
 type Tab =
   | 'dashboard'
   | 'accounts'
@@ -50,6 +53,7 @@ type Tab =
   | 'policies'
   | 'loans'
   | 'contracts'
+  | 'budgets'
 const activeTab = ref<Tab>('dashboard')
 
 // ========== 启动 hydration ==========
@@ -70,12 +74,15 @@ const subCount = computed(() => store.listSubscriptions.length)
 const polCount = computed(() => store.listPolicies.length)
 const loanCount = computed(() => store.listLoans.length)
 const ctCount = computed(() => store.listContracts.length)
+const budgetCount = computed(() => store.listBudgets.length)
 
 // ========== 新建跳转 ==========
 // 编辑器走独立路由 /finance/editor/{type}/:id? —— 不在主视图内嵌对话框,
 // 与 4a / 4b CalendarView 的 EventEditorDialog 模式区分（财务编辑器独立页面
 // 用于承接更长的字段表单，且便于分享直达链接）。
-function gotoEditor(type: 'account' | 'card' | 'tx' | 'subscription' | 'policy' | 'loan' | 'contract'): void {
+function gotoEditor(
+  type: 'account' | 'card' | 'tx' | 'subscription' | 'policy' | 'loan' | 'contract' | 'budget',
+): void {
   const hash = '#/finance/editor/' + type
   window.location.hash = hash
 }
@@ -108,6 +115,10 @@ function gotoEditor(type: 'account' | 'card' | 'tx' | 'subscription' | 'policy' 
         <n-button v-if="activeTab === 'contracts'" size="small" type="primary" @click="gotoEditor('contract')">
           + 新建合同
         </n-button>
+        <!-- B6 —— 预算新建按钮（列表内也有同入口） -->
+        <n-button v-if="activeTab === 'budgets'" size="small" type="primary" @click="gotoEditor('budget')">
+          + 新建预算
+        </n-button>
       </n-space>
     </div>
 
@@ -121,6 +132,7 @@ function gotoEditor(type: 'account' | 'card' | 'tx' | 'subscription' | 'policy' 
       <n-radio value="policies">保单 ({{ polCount }})</n-radio>
       <n-radio value="loans">借款 ({{ loanCount }})</n-radio>
       <n-radio value="contracts">合同 ({{ ctCount }})</n-radio>
+      <n-radio value="budgets">预算 ({{ budgetCount }})</n-radio>
     </n-radio-group>
 
     <div v-if="!hydrated" class="state-block">
@@ -137,6 +149,7 @@ function gotoEditor(type: 'account' | 'card' | 'tx' | 'subscription' | 'policy' 
       <FinancePolicyList v-else-if="activeTab === 'policies'" />
       <FinanceLoanList v-else-if="activeTab === 'loans'" />
       <FinanceContractList v-else-if="activeTab === 'contracts'" />
+      <BudgetList v-else-if="activeTab === 'budgets'" />
     </template>
   </div>
 </template>

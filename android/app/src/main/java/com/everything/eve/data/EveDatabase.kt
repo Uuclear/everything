@@ -46,7 +46,7 @@ import com.everything.eve.data.finance.entity.FinanceTxEntity
         // 阶段 5 v2 / B5：离线汇率本地缓存（v8 迁移新增——按货币对拆行的汇率表）
         FinanceRateEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = false,
 )
 abstract class EveDatabase : RoomDatabase() {
@@ -514,6 +514,24 @@ abstract class EveDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v8 → v9：finance_tx 新增 `overspend_acknowledged`（B6 预算硬约束审计列）。
+         *
+         * 与既有逐版本迁移同模式：仅 ALTER TABLE ADD COLUMN，不改动其他十二表；
+         * 新列 INTEGER NOT NULL DEFAULT 0，旧流水升级后一律视为“未经超支确认”。
+         *
+         * 语义：用户在超支确认对话框选择“仍保存”时该流水置 1，仅本地审计留痕，
+         * 不参与预算判定与同步业务语义。
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE finance_tx ADD COLUMN overspend_acknowledged " +
+                        "INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
         fun build(context: Context): EveDatabase =
             Room.databaseBuilder(context, EveDatabase::class.java, "eve.db")
                 .addMigrations(
@@ -524,6 +542,7 @@ abstract class EveDatabase : RoomDatabase() {
                     MIGRATION_5_6,
                     MIGRATION_6_7,
                     MIGRATION_7_8,
+                    MIGRATION_8_9,
                 )
                 .build()
     }

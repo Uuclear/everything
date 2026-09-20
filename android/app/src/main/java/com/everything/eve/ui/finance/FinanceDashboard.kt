@@ -67,11 +67,14 @@ private const val DAY_MS = 86_400_000L
  * @param vm 注入 FinanceViewModel（默认从 viewModel() 取）。
  * @param onOpenSettings B5 回调：点击"默认币种 / 汇率包导入"入口时全屏打开
  *   RatesImportScreen（由 FinanceScreen 切 settingsMode）。
+ * @param onOpenBudgets B6 回调：点击"预算管理"入口时全屏打开 BudgetListScreen
+ *   （由 FinanceScreen 切 budgetMode）。
  */
 @Composable
 fun FinanceDashboard(
     vm: FinanceViewModel,
     onOpenSettings: () -> Unit = {},
+    onOpenBudgets: () -> Unit = {},
 ) {
     val state by vm.state.collectAsState()
     val dashboard = state.dashboard
@@ -110,6 +113,13 @@ fun FinanceDashboard(
                 modifier = Modifier.semantics { testTag = "dashboard_rate_import_entry" },
             ) {
                 Text(stringResource(R.string.finance_dashboard_rate_entry))
+            }
+            // B6 预算管理入口（零知识：入口标签不含任何金额信息）。
+            TextButton(
+                onClick = onOpenBudgets,
+                modifier = Modifier.semantics { testTag = "dashboard_budget_entry" },
+            ) {
+                Text(stringResource(R.string.finance_budget_dashboard_entry))
             }
         }
 
