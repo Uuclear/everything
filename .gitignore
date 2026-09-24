@@ -37,3 +37,8 @@ android/compileDebug*.log
 .trae/specs/*/gating-report.md
 .trae/specs/*/review.md
 .trae/documents/everything_plan_improvements.md
+
+# 本地 CI 解析脚本与 Android Kotlin 缓存（不进入仓库）
+.trae/parse-junit.ps1
+/tmp_calculate_times.ps1
+android/.kotlin/
