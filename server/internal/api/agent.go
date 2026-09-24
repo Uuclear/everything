@@ -225,6 +225,124 @@ func writeAgentError(w http.ResponseWriter, status int, code, message, errorCode
 	})
 }
 
+// ---- Agent 解锁 token 路由（阶段 6 Task 4，TR-4.4）----
+//
+// 端点：
+//   POST /api/v1/agent/unlock   （无需 agent_unlock_token；只用 access_token）
+//   POST /api/v1/agent/refresh  body: { token }
+//   POST /api/v1/agent/lock     body: { session_id }
+//
+// unlock 与 refresh 错误码 → HTTP 状态码映射：
+//   - ErrInvalidSessionToken      → 401
+//   - ErrSessionExpired           → 401
+//   - ErrSessionUserMismatch      → 401（防碰撞）
+//   - ErrSessionDeviceMismatch    → 401（多设备隔离）
+//   - ErrSessionNotFound          → 401（已强制解锁 / 过期 GC）
+
+// unlockResponseBody 是 /agent/unlock 与 /agent/refresh 的出参。
+type unlockResponseBody struct {
+	Token     string `json:"token"`
+	SessionID string `json:"session_id"`
+	ExpiresAt int64  `json:"expires_at"` // Unix 秒
+}
+
+// refreshRequestBody 是 /agent/refresh 的入参。
+type refreshRequestBody struct {
+	Token string `json:"token"`
+}
+
+// agentLockRequestBody 是 /agent/lock 的入参。
+type agentLockRequestBody struct {
+	SessionID string `json:"session_id"`
+}
+
+// agentUnlock 处理 POST /agent/unlock。
+// access_token 通过 requireScope 已校验；此处仅生成解锁 token。
+func (s *Server) agentUnlock(w http.ResponseWriter, r *http.Request) {
+	if s.agentSession == nil {
+		writeAgentError(w, http.StatusServiceUnavailable, "unavailable", "Agent 会话未启用", "agent.unavailable")
+		return
+	}
+	claims := claimsFrom(r)
+	res, err := s.agentSession.Unlock(claims.UserID, claims.DeviceID)
+	if err != nil {
+		writeAgentError(w, http.StatusInternalServerError, "unlock_failed", err.Error(), "agent.unlock_failed")
+		return
+	}
+	if s.agentProxy != nil && s.agentProxy.Audit() != nil {
+		s.agentProxy.Audit().Write(r.Context(), agent.AuditEvent{
+			UserID:    claims.UserID,
+			DeviceID:  claims.DeviceID,
+			SessionID: res.SessionID,
+			Event:     agent.EventChatRequested, // 复用"会话建立"事件；远期补 EventUnlocked
+			Status:    agent.StatusOK,
+			IP:        clientIP(r),
+			Detail:    "<redacted>",
+		})
+	}
+	writeJSON(w, http.StatusOK, unlockResponseBody{
+		Token:     res.Token,
+		SessionID: res.SessionID,
+		ExpiresAt: res.ExpiresAt.Unix(),
+	})
+}
+
+// agentRefresh 处理 POST /agent/refresh。
+func (s *Server) agentRefresh(w http.ResponseWriter, r *http.Request) {
+	if s.agentSession == nil {
+		writeAgentError(w, http.StatusServiceUnavailable, "unavailable", "Agent 会话未启用", "agent.unavailable")
+		return
+	}
+	claims := claimsFrom(r)
+	var body refreshRequestBody
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	res, err := s.agentSession.Refresh(body.Token, claims.UserID, claims.DeviceID)
+	if err != nil {
+		writeSessionTokenError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, unlockResponseBody{
+		Token:     res.Token,
+		SessionID: res.SessionID,
+		ExpiresAt: res.ExpiresAt.Unix(),
+	})
+}
+
+// agentLock 处理 POST /agent/lock。
+func (s *Server) agentLock(w http.ResponseWriter, r *http.Request) {
+	if s.agentSession == nil {
+		writeAgentError(w, http.StatusServiceUnavailable, "unavailable", "Agent 会话未启用", "agent.unavailable")
+		return
+	}
+	claims := claimsFrom(r)
+	var body agentLockRequestBody
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.SessionID == "" {
+		writeAgentError(w, http.StatusBadRequest, "bad_request", "session_id 必填", "agent.invalid_request")
+		return
+	}
+	s.agentSession.Lock(body.SessionID, claims.UserID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// writeSessionTokenError 把 SessionManager 错误映射为 HTTP 状态码。
+func writeSessionTokenError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, agent.ErrInvalidSessionToken),
+		errors.Is(err, agent.ErrSessionExpired),
+		errors.Is(err, agent.ErrSessionUserMismatch),
+		errors.Is(err, agent.ErrSessionDeviceMismatch),
+		errors.Is(err, agent.ErrSessionNotFound):
+		writeAgentError(w, http.StatusUnauthorized, "session_locked", err.Error(), agent.ErrorCodeName(agent.CodeSessionLocked))
+	default:
+		writeAgentError(w, http.StatusInternalServerError, "internal", err.Error(), "agent.internal")
+	}
+}
+
 // clientIP 提取请求方 IP（无 r.RemoteAddr 端口的纯地址部分）。
 // 优先 RealIP（chi 中间件已根据 X-Forwarded-For / X-Real-IP 修正），失败回退 RemoteAddr。
 func clientIP(r *http.Request) string {

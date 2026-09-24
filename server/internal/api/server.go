@@ -33,8 +33,9 @@ type Server struct {
 	limiter   *authLimiter
 
 	// agent* 阶段 6 字段：均为 nil 时 Agent 路由自动不挂载（保留向后兼容）。
-	agentRegistry *agent.Registry
-	agentProxy    *agent.Proxy
+	agentRegistry    *agent.Registry
+	agentProxy       *agent.Proxy
+	agentSession     *agent.SessionManager // 阶段 6 Task 4：解锁 token 签发 / 校验
 }
 
 // New 创建 API 服务器（不含 Agent；既有调用方行为完全保持）。
@@ -59,6 +60,16 @@ func New(cfg config.Config, database *sql.DB, authSvc *auth.Service, records *va
 func (s *Server) WithAgent(reg *agent.Registry, proxy *agent.Proxy) *Server {
 	s.agentRegistry = reg
 	s.agentProxy = proxy
+	return s
+}
+
+// WithAgentSession 注入 Agent 会话管理器（阶段 6 Task 4：解锁 token）。
+// 独立于 WithAgent，便于解锁 token 密钥派生与 auth JWT 解耦（密钥从
+// cfg.DataDir/agent_session.key 派生，不与 auth.Service.jwt.key 共用）。
+//
+// agentSession 为 nil 时 /agent/unlock /agent/refresh /agent/lock 路由自动不挂载。
+func (s *Server) WithAgentSession(mgr *agent.SessionManager) *Server {
+	s.agentSession = mgr
 	return s
 }
 
@@ -124,14 +135,23 @@ func (s *Server) Handler() http.Handler {
 
 			// 阶段 6 路由：AI Agent（仅 approved 设备可用）。
 			// 当 agentProxy==nil 时不挂载（保留旧版服务端继续运行）。
-			if s.agentProxy != nil {
+			if s.agentProxy != nil || s.agentSession != nil {
 				r.Group(func(r chi.Router) {
 					r.Use(s.requireScope(auth.ScopeApproved))
 					r.Route("/agent", func(r chi.Router) {
-						r.Post("/chat", s.agentChat)
-						r.Post("/tool-result", s.agentToolResult)
-						r.Post("/cancel", s.agentCancel)
-						r.Get("/sessions", s.agentListSessions)
+						// Task 4：解锁 token 路由（仅在 agentSession 非 nil 时挂载）。
+						if s.agentSession != nil {
+							r.Post("/unlock", s.agentUnlock)
+							r.Post("/refresh", s.agentRefresh)
+							r.Post("/lock", s.agentLock)
+						}
+						// Task 2：LLM 调用路由（仅在 agentProxy 非 nil 时挂载）。
+						if s.agentProxy != nil {
+							r.Post("/chat", s.agentChat)
+							r.Post("/tool-result", s.agentToolResult)
+							r.Post("/cancel", s.agentCancel)
+							r.Get("/sessions", s.agentListSessions)
+						}
 					})
 				})
 			}

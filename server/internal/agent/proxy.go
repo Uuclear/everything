@@ -50,8 +50,9 @@ type ChatTurnOutput struct {
 // 客户端必须先通过独立 unlock 流程（Task 4 实现）建立映射后，
 // 才能在 Proxy.Chat 中携带该 session_id 调用 LLM。
 type SessionState struct {
-	UserID    string
-	DeviceID  string
+	SessionID  string
+	UserID     string
+	DeviceID   string
 	UnlockedAt int64
 }
 
@@ -93,11 +94,25 @@ func (r *sessionRegistry) Unlock(sessionID, userID, deviceID string) {
 	defer r.mu.Unlock()
 	r.sessions[sessionID] = &sessionStateEntry{
 		state: SessionState{
+			SessionID:  sessionID,
 			UserID:     userID,
 			DeviceID:   deviceID,
 			UnlockedAt: r.now(),
 		},
 		expireAt: r.now() + r.ttlMs,
+	}
+}
+
+// Lock 主动删除一个 session。session_id 不存在时静默（幂等）。
+// 仅在 session_id 归属当前 userID 时删除，避免越权解锁他人会话。
+func (r *sessionRegistry) Lock(sessionID, userID string) {
+	if sessionID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.sessions[sessionID]; ok && e.state.UserID == userID {
+		delete(r.sessions, sessionID)
 	}
 }
 

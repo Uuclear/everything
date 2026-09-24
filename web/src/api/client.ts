@@ -264,6 +264,18 @@ export const api = {
   refresh: (refresh_token: string) =>
     request<TokenPair>('/auth/refresh', { method: 'POST', body: { refresh_token }, auth: false }),
 
+  // 阶段 6 Task 4：AI Agent 解锁 token 路由（服务端在 requireScope(ScopeApproved) 后签发）。
+  // 不在 body 传 user/device（服务端从 access_token 提取），防客户端伪造。
+  unlockAgent: () => request<{ token: string; session_id: string; expires_at: number }>(
+    '/agent/unlock', { method: 'POST' },
+  ),
+  refreshAgent: (token: string) => request<{ token: string; session_id: string; expires_at: number }>(
+    '/agent/refresh', { method: 'POST', body: { token } },
+  ),
+  lockAgent: (body: { session_id: string }) => request<{ ok: boolean }>(
+    '/agent/lock', { method: 'POST', body },
+  ),
+
   // 恢复与改密。
   recoveryStart: (username: string, recoveryVerifierB64: string) =>
     request<RecoverySession>('/auth/recovery/start', {
