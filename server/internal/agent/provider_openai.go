@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -187,6 +188,7 @@ func parseProviderError(status int, body []byte) error {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return NewError(CodeProviderError, "LLM 鉴权失败: "+msg, nil)
 	case http.StatusTooManyRequests:
+		// 优先用标准 Retry-After 头（由 caller 解析）；此处仅返回错误码 + 消息。
 		return NewError(CodeRateLimited, "LLM 速率限制: "+msg, nil)
 	case http.StatusRequestEntityTooLarge:
 		return NewError(CodeContextTooLong, "LLM 请求体过大: "+msg, nil)
@@ -199,6 +201,42 @@ func parseProviderError(status int, body []byte) error {
 	default:
 		return NewError(CodeProviderError, fmt.Sprintf("LLM 返回 %d: %s", status, msg), nil)
 	}
+}
+
+// ParseRetryAfter 解析 Provider 响应里的 Retry-After 头（OpenAI / Ollama 标准）。
+// 返回值单位 = 毫秒；解析失败时返回 0（由调用方使用默认退避）。
+//
+// 支持格式：
+//   - 整数秒： "120"  → 120000 ms；
+//   - HTTP 日期： "Wed, 21 Oct 2015 07:28:00 GMT" → 距 now 的差值。
+//
+// 注：仅当返回 4xx/5xx 且含 Retry-After 头时由 caller 调用，避免无谓解析。
+func ParseRetryAfter(headerVal string, now time.Time) int64 {
+	if headerVal == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(headerVal)); err == nil {
+		if n <= 0 {
+			return 0
+		}
+		return int64(n) * 1000
+	}
+	// 尝试 HTTP-date 格式（RFC1123 / RFC850 / ANSIC）。
+	for _, layout := range []string{
+		time.RFC1123,
+		time.RFC1123Z,
+		time.RFC850,
+		time.ANSIC,
+	} {
+		if t, err := time.Parse(layout, headerVal); err == nil {
+			d := t.Sub(now)
+			if d <= 0 {
+				return 0
+			}
+			return d.Milliseconds()
+		}
+	}
+	return 0
 }
 
 // isTimeoutErr 判断错误是否为网络层超时（http.Client 超时或 net.Error.Timeout）。

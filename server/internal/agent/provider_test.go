@@ -549,3 +549,156 @@ func TestValidateRequest_ContentTooLarge(t *testing.T) {
 		t.Fatal("期望 Content 超限错误")
 	}
 }
+
+// 用例 21：Ollama 模式（APIKey 为空）→ 不发送 Authorization 头。
+// Ollama OpenAI 兼容模式默认无鉴权；驱动必须正确处理空 APIKey 场景。
+func TestOpenAICompat_Ollama_NoAuthHeader(t *testing.T) {
+	gotAuth := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","model":"qwen2.5:7b","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"total_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompat("ollama", srv.URL, "") // Ollama 占位 / 空 Key
+	if _, err := p.ChatCompletion(context.Background(), validReq()); err != nil {
+		t.Fatalf("ChatCompletion 失败: %v", err)
+	}
+	if gotAuth != "" {
+		t.Errorf("空 APIKey 时不应发送 Authorization 头，实际=%q", gotAuth)
+	}
+}
+
+// 用例 22：HTTP 429 含 Retry-After 头（整数秒）→ ParseRetryAfter 返回正确毫秒数。
+func TestParseRetryAfter_Seconds(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	got := ParseRetryAfter("120", now)
+	if got != 120000 {
+		t.Errorf("ParseRetryAfter(\"120\")=%d 期望 120000", got)
+	}
+}
+
+// 用例 23：HTTP 429 含 Retry-After 头（HTTP-date）→ 解析为相对毫秒。
+func TestParseRetryAfter_HTTPDate(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	future := now.Add(60 * time.Second).Format(time.RFC1123)
+	got := ParseRetryAfter(future, now)
+	// 允许 ±1000 ms 抖动（HTTP-date 精度秒）。
+	if got < 59000 || got > 61000 {
+		t.Errorf("ParseRetryAfter(%q)=%d 期望 ~60000", future, got)
+	}
+}
+
+// 用例 24：ParseRetryAfter 空串 / 非法格式 → 返回 0。
+func TestParseRetryAfter_Invalid(t *testing.T) {
+	now := time.Now()
+	if got := ParseRetryAfter("", now); got != 0 {
+		t.Errorf("空串应返 0，实际=%d", got)
+	}
+	if got := ParseRetryAfter("not-a-number-or-date", now); got != 0 {
+		t.Errorf("非法格式应返 0，实际=%d", got)
+	}
+	if got := ParseRetryAfter("0", now); got != 0 {
+		t.Errorf("0 秒应返 0，实际=%d", got)
+	}
+}
+
+// 用例 25：HTTP 400 非 context_length → CodeProviderError。
+func TestOpenAICompat_ChatCompletion_BadRequestGeneric(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid parameter"}}`))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompat("openai", srv.URL, "key")
+	_, err := p.ChatCompletion(context.Background(), validReq())
+	if err == nil {
+		t.Fatal("期望返回错误")
+	}
+	if code := ErrorCodeOf(err); code != CodeProviderError {
+		t.Errorf("Code=%v 期望 CodeProviderError", code)
+	}
+}
+
+// 用例 26：ExtraHeaders 注入（Anthropic 兼容模式下的 anthropic-version）。
+func TestOpenAICompat_ExtraHeaders(t *testing.T) {
+	got := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Provider-Version")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"total_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompat("anthropic_compat", srv.URL, "key")
+	p.ExtraHeaders = map[string]string{"X-Provider-Version": "2023-06-01"}
+	if _, err := p.ChatCompletion(context.Background(), validReq()); err != nil {
+		t.Fatalf("ChatCompletion 失败: %v", err)
+	}
+	if got != "2023-06-01" {
+		t.Errorf("ExtraHeader 未透传，实际=%q 期望 2023-06-01", got)
+	}
+}
+
+// 用例 27：请求体序列化校验（验证 stream=false、model、messages 等字段）。
+func TestOpenAICompat_RequestBodyShape(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"total_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompat("openai", srv.URL, "key")
+	if _, err := p.ChatCompletion(context.Background(), validReq()); err != nil {
+		t.Fatalf("ChatCompletion 失败: %v", err)
+	}
+	if gotBody["stream"] != false {
+		t.Errorf("stream 字段=%v 期望 false", gotBody["stream"])
+	}
+	if gotBody["model"] != "gpt-4o-mini" {
+		t.Errorf("model=%v 期望 gpt-4o-mini", gotBody["model"])
+	}
+	msgs, ok := gotBody["messages"].([]any)
+	if !ok || len(msgs) != 2 {
+		t.Fatalf("messages 长度/类型异常: %+v", gotBody["messages"])
+	}
+	first, _ := msgs[0].(map[string]any)
+	if first["role"] != RoleSystem {
+		t.Errorf("messages[0].role=%v 期望 system", first["role"])
+	}
+}
+
+// 用例 28：tools / tool_choice 字段序列化校验。
+func TestOpenAICompat_RequestBodyTools(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"total_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompat("openai", srv.URL, "key")
+	req := validReq()
+	params := json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)
+	req.Tools = []ToolSpec{{Type: "function", Function: ToolFunction{
+		Name: "vault.search", Description: "搜索保险库", Parameters: params,
+	}}}
+	req.ToolChoice = "auto"
+	if _, err := p.ChatCompletion(context.Background(), req); err != nil {
+		t.Fatalf("ChatCompletion 失败: %v", err)
+	}
+	tools, ok := gotBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools 字段=%+v 期望 1 个工具", gotBody["tools"])
+	}
+	if gotBody["tool_choice"] != "auto" {
+		t.Errorf("tool_choice=%v 期望 auto", gotBody["tool_choice"])
+	}
+}
