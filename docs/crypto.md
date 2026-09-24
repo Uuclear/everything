@@ -1,4 +1,4 @@
-# 零知识加密信封规范（v1）
+# 零知识加密信封规范（v1 + 阶段 5 v2 增量）
 
 三端（Go / Web·libsodium-wrappers / Android·lazysodium）必须**逐字节一致**。
 任何一端改动原语或参数，都必须更新本文档并通过互通验证。
@@ -293,6 +293,143 @@ blockId = deviceId ‖ ":" ‖ startTs ‖ ":" ‖ endTs    # 时间均为 UTC �
   [`NextCardFiring.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/NextCardFiring.kt)），
   不上传展开点；服务端零改动（阶段 5 显式声明）。
 
+## 6.7 附件 envelope（阶段 5 v2 Task 3）
+
+阶段 5 v2 引入财务附件能力（保单 PDF / 合同扫描件 / 银行卡照片 / 票据截图），
+**完全复用** §5 记录 AAD 与第 1 节 XChaCha20-Poly1305 信封作为附件**元数据**的
+加密通道；附件**内容**则按 256 KiB 分片、每片走同一套 XChaCha20-Poly1305 IETF
+原语逐块密封，**不新造 envelope 参数、不新造 AAD 前缀**，与 6.5 event /
+6.6 finance 共享同一条 records 加密侧。
+
+### 6.7.1 设计边界
+
+- **挂载点**：`module="finance"` / `type="attachment"`，写入既有 `records` 表；
+  元数据加密 / 块密文索引完全沿用 records 通道。
+- **元数据明文 JSON**（`name / mime / size / sha256 / created_at`）走通用 envelope，
+  字段集见 §14.3；服务端不解密，仅看密文。
+- **AAD**：附件元数据沿用 §5 通用 AAD
+  `eve:v1:record:{attachment_id}:finance:{BE_UINT64(version)}`，
+  `module` 段文本取 `"finance"`，与 6.6 finance 三类同前缀；**不引入新前缀**。
+- **块密文 AAD**：每块使用 `eve:v1:attachment-block:{attachment_id}:{offset}`
+  专用前缀（与 §6 轨迹块平级），`offset` 为十进制文本字节偏移（从 0 起）。
+- **零知识**：附件内容服务端只见密文分片哈希，**绝不接触明文 byte**；
+  `name / mime / sha256` 仅用于反查 / 去重，sha256 由客户端在分片前对**原始字节**算。
+- **不直连云存储**：附件密文块走服务端自有对象存储（与 records 同账号、同鉴权）；
+  客户端直传**块密文 + 块 hash**，服务端不接触 MK。
+- **三端口径**：Go 服务端不参与密封、仅做密文存取与转发；Android
+  `Attachment.kt` `sealAttachmentBlock` ↔ Web `web/src/finance/attachment.ts`
+  `sealAttachmentBlock` 逐字节一致（与 §6 轨迹块同款跨端锚点）。
+
+### 6.7.2 块存储布局
+
+| 项 | 值 |
+|---|---|
+| 块大小 | **256 KiB = 262144 字节**（对齐分片避免 TLS 帧拆装抖动） |
+| 单文件总大小上限 | **≤ 50 MiB = 52428800 字节**（客户端校验，三端一致） |
+| 块 id | `{attachment_id}:{offset}`，UTF-8 文本 |
+| 块密文布局 | `nonce(24) ‖ ciphertext ‖ poly1305_tag(16)`，与第 1 节完全同款 |
+| 元数据明文 JSON | `{id, name, mime, size, sha256, created_at}`，元数据再走 §5 envelope 落 `records` |
+| 索引 | `attachment_blocks(attachment_id, offset, ciphertext_b64, plaintext_size)`，服务端**仅有索引**无原文 |
+| 去重 | 同 sha256 不去重（附件语义可重复同名文件；仅内容哈希客户端校验） |
+
+- **块切分**：客户端按 `offset = 0, 262144, 524288, …` 切到末尾；末块可小于 262144。
+- **块密文 size**：第 1 节 XChaCha20-Poly1305 IETF 不膨胀密文，密文 size = 明文 size + 16；
+  服务端存储的 `ciphertext_b64` 即 `nonce(24) ‖ ciphertext ‖ tag(16)` 的标准 Base64。
+- **服务端行为**：仅校验 `ciphertext_b64` 非空 / `plaintext_size ∈ [1, 262144]` /
+  `attachment_id` 归属当前用户 / `offset` 单调递增且首块从 0 起；不解密、不验证 tag。
+- **三端校验一致**：客户端写入前先算 `sha256(原始字节)` 与待写各块的 `plaintext_size`
+  总和（应等于 `size`），不一致直接拒写并清空临时块。
+
+### 6.7.3 元数据明文 JSON（附件层）
+
+附件元数据作为 `module="finance" / type="attachment"` 的记录条目写入既有
+`records` 表，明文 JSON 结构（**未加密前**）：
+
+```json
+{
+  "id": "string(uuid)",
+  "name": "string(≤ 255 字符 UTF-8)",
+  "mime": "string(application/pdf|image/jpeg|image/png|...)",
+  "size": "string(0 < size ≤ 52428800)",
+  "sha256": "string(64 个 hex 字符)",
+  "created_at": "int64(UTC 毫秒)"
+}
+```
+
+- 字段全部 decimal-as-string（`size`）或定长字符（`sha256`），无浮点字段；
+  `size` 与 `sha256` 由分片前对**原始字节**算出，**不依赖**密文倒推。
+- `id` 与 §5 记录 id 同款 UUID v4；不要求 URL-safe，纯 ASCII hex+`-`。
+- `name` 客户端需过滤路径分隔符（`/` `\\` `:` `*` `?` `"` `<` `>` `|`）后再加密入库。
+- `created_at` 取自客户端本地 UTC 毫秒；服务端不解密故不做二次校验。
+- 字段集详见 [module-schemas.md](module-schemas.md) §9.5.4 附件元数据子节
+  （含字段约束 / 反查索引 / 跨端产物清理）。
+
+### 6.7.4 元数据 envelope（与第 1 节同款）
+
+```
+AAD = "eve:v1:record:" ‖ attachment_id(UTF-8) ‖ ":finance:" ‖ BE_UINT64(version)
+nonce = random 24B（一次性）
+密文 = AEAD_Seal(MK, 元数据明文 JSON 字节, AAD)
+布局 = nonce(24) ‖ ciphertext ‖ tag(16)
+编码 = 标准 Base64（带填充，不换行）
+```
+
+- 加密原语 / 密钥 / 密文布局与第 1 节**完全同款**（XChaCha20-Poly1305 IETF，
+  32B MK，随机 24B nonce 前置，`nonce(24) ‖ ciphertext ‖ tag(16)`）。
+- 与 6.6 finance 三类条目共用同一 MK / 同一 envelope 入口，
+  `sealRecord(module="finance", type="attachment", …)` 一处实现。
+- AAD 校验由端侧 `openRecord` 完成；AAD 前缀不符 / 长度不符 / tag 校验失败
+  一律拒绝（落入 §5 同款错误码），不向上抛服务端。
+
+### 6.7.5 块密文 envelope（专用前缀）
+
+```
+AAD = "eve:v1:attachment-block:" ‖ attachment_id(UTF-8) ‖ ":" ‖ offset(UTF-8 十进制)
+nonce = random 24B（每块独立，禁止跨块复用）
+密文 = AEAD_Seal(MK, 块明文字节, AAD)
+布局 = nonce(24) ‖ ciphertext ‖ tag(16)
+编码 = 标准 Base64（带填充，不换行）
+```
+
+- **专用前缀** `eve:v1:attachment-block:` 与 §6 轨迹块前缀平级；
+  **不与** §5 records 通用的 `eve:v1:record:` 共用前缀——块密文不走 records 表。
+- `offset` 为块起点字节偏移（首块 `0`，第二块 `262144`，第三块 `524288`，依此类推）。
+- 每块 nonce 独立随机；同一 attachment 的不同块之间禁止复用 nonce（防相关密钥攻击）。
+- 跨端锚点：Android `Attachment.kt` `sealAttachmentBlock` / `openAttachmentBlock`
+  ↔ Web `web/src/finance/attachment.ts` `sealAttachmentBlock` / `openAttachmentBlock`
+  两端实现逐字节一致（AAD 前缀恰为 `eve:v1:attachment-block:`，末尾 `:offset` UTF-8 编码）。
+- Web decode 跨端自测锁定：固定 MK + `attachment_id="at-fixed-1"` +
+  `offset="262144"` 下，Android `sealAttachmentBlock` 真实产物 Web 端可 `openAttachmentBlock`
+  还原，并附 AAD 错 / 密文篡改 / MK 错 / offset 错四负例。
+
+### 6.7.6 与 v1 records envelope 的关系
+
+附件 envelope 在 v1 之上引入**两层**结构：
+
+| 层 | 用途 | envelope / AAD | 写入通道 |
+|---|---|---|---|
+| L1 元数据 | 反查 / 反向索引 / 去重 | §5 通用 records AAD | `records` 表 |
+| L2 块密文 | 真实附件内容 | `eve:v1:attachment-block:{id}:{offset}` 专用前缀 | `attachment_blocks` 表 |
+
+- L1 完全复用 §5 envelope，**零差异**——`module` 段取 `"finance"`、`type` 取 `"attachment"`，
+  加密原语 / 密钥 / 密文布局与 v1 records 完全同款；服务端零改动（沿用 records 通道）。
+- L2 是新增的**专用前缀**，与 §6 轨迹块平级；`attachment_blocks` 表是新增的密文索引表，
+  服务端只存取密文与索引，不接触 MK 与明文。
+- 两层结构对**服务端透明**：服务端只见密文 / 索引 / 元数据密文；明文永远不出客户端。
+- 触发流：上传 → 客户端分片 → 每块走 L2 envelope → 上传密文到 `attachment_blocks`；
+  → 元数据走 L1 envelope 写入 `records`（`type="attachment"`）。
+- 读取流：拉元数据密文 → `openRecord` 解 L1 → 按 `id` 拉所有块 → 每块 `openAttachmentBlock`
+  按 `offset` 顺序拼接 → 客户端用 L1 元数据的 `sha256` 校验还原字节。
+
+### 6.7.7 范围外
+
+- **聚合 / 反查 / 缩略图**：均在客户端纯函数（Web `attachments/aggregator.ts` +
+  Android `AttachmentAggregator.kt`），**不上行**服务端；服务端零改动。
+- **OCR / 语音**：附件被 OCR / 语音引擎消费后产出的扫描结果进入 `module="finance" /
+  type ∈ {"tx"}` 既有 records 通道（与 6.6 同款），不再走 attachment 信封。
+- **内容识别 / 分类映射**：服务端零改动；分类映射完全在客户端（详见 [finance.md](finance.md)
+  §6 与 [module-schemas.md](module-schemas.md) §9.5.3）。
+
 ## 7. 固定测试向量
 
 ### 7.1 主密码信封
@@ -377,8 +514,28 @@ ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmIWDn9l9j4ZLuseuCaVv4fttrfeQEX6yIjtKfYJ+tAQAXXyOj
   + [`NextCardFiring.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/NextCardFiring.kt)），
   见第 6.6 节。
 
+**已落地**（阶段 5 v2 扩展）：
+
+- **财务附件 envelope**：附件元数据作为 `module="finance" / type="attachment"`
+  记录沿用 §5 AAD 与第 1 节信封原语，**不新造 envelope 参数 / 不新造 AAD 前缀**；
+  附件内容按 256 KiB 分片、每块走专用前缀 `eve:v1:attachment-block:{id}:{offset}`
+  与 §6 轨迹块平级，XChaCha20-Poly1305 IETF 原语与第 1 节完全同款。服务端
+  仅存取密文与索引（新增 `attachment_blocks` 表，零接触 MK / 零接触明文）。
+  跨端锚点：Android `Attachment.kt` `sealAttachmentBlock` ↔ Web
+  `web/src/finance/attachment.ts` `sealAttachmentBlock` 逐字节一致，
+  单文件 ≤ 50 MiB（52428800 字节）、`sha256(原始字节)` 客户端校验；详见第 6.7 节。
+- **加密离线汇率包 envelope（v2 Task 5）**：汇率记录作为
+  `module="finance" / type="rate"` 沿用 §5 AAD 与第 1 节信封原语，**不新造 envelope
+  参数 / 不新造 AAD 前缀**；客户端派生 `Rate(from, to, ratePerUnit, ts)` 后密封，
+  服务端不解密、不做二次校验（详见 [finance.md](finance.md) §12.4 与
+  [module-schemas.md](module-schemas.md) §9.5.5）。
+- **手动行情 quote envelope（v2 Task 6）**：行情记录作为
+  `module="finance" / type="quote"` 沿用 §5 AAD 与第 1 节信封原语，**不新造 envelope
+  参数 / 不新造 AAD 前缀**；客户端 `Quote(symbol, priceMinor, currency, ts)` 密封，
+  服务端不解密、不做二次校验（详见 [finance.md](finance.md) §8.4 与
+  [module-schemas.md](module-schemas.md) §9.5.6）。
+
 **尚未实现**：
 
 - **服务端 AI 解锁会话**：用户主动解锁后 MK 仅驻留服务端内存（TTL、不进日志），锁屏即销毁。
-- 附件：明文分片 → XChaCha 密封 → 内容哈希去重。
 - 本地搜索索引（SQLite FTS over plaintext）只存在于客户端。

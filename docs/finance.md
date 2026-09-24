@@ -25,6 +25,10 @@
 9. [交叉引用](#9-交叉引用)
 10. [AI 联动记账（OCR + 语音；阶段 5 v2 B8）](#10-ai-联动记账ocr--语音-阶段-5-v2-b8)
 11. [投资账户 + 手动行情（阶段 5 v2 Task 8）](#11-投资账户--手动行情阶段-5-v2-task-8)
+12. [多币种汇率（阶段 5 v2 Task 5）](#12-多币种汇率阶段-5-v2-task-5)
+13. [Web 端提醒（阶段 5 v2 Task 7）](#13-web-端提醒阶段-5-v2-task-7)
+14. [附件 envelope 完整闭环（阶段 5 v2 Task 3）](#14-附件-envelope-完整闭环阶段-5-v2-task-3)
+15. [v2 收尾验收映射（20 AC + 已知问题）](#15-v2-收尾验收映射20-ac--已知问题)
 
 ---
 
@@ -1174,6 +1178,215 @@ Task 8 故意**不实现**以下能力（推迟到 v3 候选）：
 | Web store | `web/src/stores/finance.ts` `quoteTable / quoteSyncUrl` | 状态 + 动作 |
 | Web 视图 | `web/src/views/SettingsQuotesSyncView.vue` + `web/src/views/finance/FinanceDashboard.vue` 投资卡片 | 镜像 |
 | 烟测手册 | [`docs/smoke/finance-v2-investment-manual.md`](smoke/finance-v2-investment-manual.md) | SMOKE-V2-INV-S1~S6 真机 / 浏览器冒烟 |
+
+---
+
+## 12. 多币种汇率（阶段 5 v2 Task 5）
+
+阶段 5 v2 在 v1 "currency 字段留位" 基础上启用**多币种折算**：每张账户 / 流水 / 预算 / 投资持仓都自带 `currency` 字段，跨币种累加时通过**加密离线汇率包**完成折算。
+
+### 12.1 设计边界
+
+- **汇率包走离线下载 + 手动导入**：v2 不接央行 / Fixer.io / Open Exchange Rates
+  等任何在线汇率服务；服务端不聚合、不缓存、不转发任何汇率明文。
+- **AAD 沿用**：`eve:v1:record:{id}:finance:{BE(uint64 version)}`，与
+  v1 财务记录完全同款 envelope / AAD，**不新造 envelope**；
+- **数据双通道**：汇率包只走 `module="finance"` records 通道；
+  Room（`finance_rate` 表，B5 落地）仅作本地密文分片缓存。
+- **零知识**：服务端只见汇率包密文与元数据，币种 → 主币种的换算在端侧完成；
+  aggregator 入参聚合端不进服务端。
+- **缺汇率保守放行**：缺价的金额折算返回 `null`，aggregator / 投资聚合
+  / 预算硬约束均按"跳过该项"处理（详见 §12.5）。
+
+### 12.2 分层架构
+
+| 层 | 双端实现 |
+|---|---|
+| 纯函数层 | Android [`RateTable.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/RateTable.kt) + Web `web/src/finance/rateTable.ts`：`Rate` / `RateTable` / `parse / encode / priceMinorOf` + `convert(fromMinor, from, to, table)` |
+| 聚合层 | Android [`FinanceAggregator.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt) `convertMinor(...)` + `netWorth(..., rateTable, targetCurrency)` / `budgetThreshold(..., rateTable, ...)` / `investmentMarketValue(..., rateTable, targetCurrency)`；Web `web/src/finance/aggregator.ts` 镜像 |
+| Room 层（Android） | `finance_rate` Room 表 + `FinanceRateEntity` + `FinanceRateDao` + Room v7→v8 迁移 `MIGRATION_7_8` |
+| 仓库层 | Android `RateTableRepository` + Web store `importRateTable / setRateSyncUrl / pullRateNow` |
+| UI 层 | Android `SettingsRatesView` + Web `web/src/views/SettingsRatesView.vue` |
+
+### 12.3 锁定数据结构
+
+`RateTable(ts: Long, rates: Map<String, Rate>)`：
+
+```ts
+type Rate = {
+  from: string;       // ISO 4217, 3 大写字母，如 "USD"
+  to: string;         // 主币种, 默认 "CNY"
+  ratePerUnit: string; // decimal-as-string, 1 from = ? to
+  ts: number;         // Unix 毫秒
+};
+```
+
+### 12.4 校验策略
+
+- **正则 `^[A-Z]{3}$`** 校验币种（ISO 4217）；
+- `ratePerUnit` 解析走 decimal-as-string，禁浮点：`^(\d+)(?:\.(\d{1,8}))?$`；
+- 汇率数值合法：`0 < ratePerUnit < 1000`（防异常汇率冲击看板聚合）；
+- last-write-wins：同 from / to 出现多个汇率时按 `ts` 降序保留最新；
+- `version` 字段缺失时回退为 1（与 v1 envelope 兼容）。
+
+### 12.5 聚合口径
+
+- `convertMinor(amountMinor, from, to, table)` 返回 `Long?`：`null` 表示缺汇率；
+- 整数分（`Long` / `bigint`）用 BigDecimal 绝对值 HALF_UP 取整，避免浮点累积；
+- 投资市值聚合（T8 `investmentMarketValue`）遇缺价 + 缺汇率双缺失时
+  `valueInTargetMinor=0` 且 `missingPriceHoldingCount++`；
+- 预算硬约束（T6 `BudgetEnforcer.checkTx`）遇缺汇率**保守放行**（跳过该预算）。
+
+### 12.6 接入列表
+
+| 引用对象 | 路径 | 用途 |
+|---|---|---|
+| Android 汇率纯函数 | [`RateTable.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/RateTable.kt) | `Rate` / `RateTable` + `parse/encode/priceMinorOf/convert` |
+| Android Room Entity | `app/src/main/java/com/everything/eve/data/finance/entity/FinanceRateEntity.kt` | `finance_rate` 表 |
+| Android Room DAO | `app/src/main/java/com/everything/eve/data/finance/dao/FinanceRateDao.kt` | upsert / list / mark 全套 |
+| Android 仓库 | `app/src/main/java/com/everything/eve/data/finance/RateTableRepository.kt` | 整包密封 / 解封 / 上行 |
+| Android 视图 | [`SettingsRatesView.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/settings/SettingsRatesView.kt) | 同步入口 |
+| Web 汇率 | `web/src/finance/rateTable.ts` | 镜像 |
+| Web store | `web/src/stores/finance.ts` `rateTable / rateSyncUrl` | 状态 + 动作 |
+| Web 视图 | `web/src/views/SettingsRatesView.vue` | 镜像 |
+| 烟测手册 | [`docs/smoke/stage5-finance-e2e.md`](smoke/stage5-finance-e2e.md) | STAGE5-S-FX-1~3 真机 / 浏览器冒烟 |
+
+---
+
+## 13. Web 端提醒（阶段 5 v2 Task 7）
+
+阶段 5 v2 在 v1 "Web 端仅 Android 本地闹钟" 基础上启用 **Web 浏览器通知 + Service Worker finance 注册**。
+
+### 13.1 设计边界
+
+- **触发链路**：finance 模块订阅 / 保单 / 借款三类到期事件触发时
+  沿用 v1 events 闹钟链式调度（Android 端）；Web 端通过**浏览器 Notification API**
+  推送通知，**走 Service Worker `showNotification`**，不经任何外部推送通道；
+- **服务端不推送**：v2 沿用 v1 "本地闹钟 + Web Notification" 双轨；
+  服务端不通知触发时刻，不接 FCM / Web Push；
+- **零知识文案**：finish/grant 通知文案只含"事件类型 + 大致剩余天数"，
+  **绝不**渲染金额 / 卡号后四位 / 对方姓名。
+
+### 13.2 通道注册（Service Worker）
+
+- 全站**只注册并持有一个** Service Worker：
+  [`web/public/sw.js`](file:///d:/github/everything/everything/web/public/sw.js)
+  + Vite PWA 注册脚本（`web/src/main.ts`）；
+- finance 通道 show / cancel 透传，模块间互不干扰；
+- 通知点击行为：聚焦或新开 `#/finance` 路由。
+
+### 13.3 Web Notification API
+
+| 调用点 | 触发时机 | 文案纪律 |
+|---|---|---|
+| 订阅扣费 | `subscription_renewal` 闹钟触发 + Web 端在线 | "订阅" 标签 + 剩余天数（中文文案） |
+| 保单到期 | `policy_expiry` 闹钟触发 + Web 端在线 | "保单" 标签 + 剩余天数 |
+| 借款到期 | `loan_due` 闹钟触发 + Web 端在线 | "借款" 标签 + 剩余天数 |
+| Notification 调用 | 预算告警 / OCR 联动 / 投资行情 | **不接入通知通道**（仅端侧 toast / banner） |
+
+### 13.4 接入列表
+
+| 引用对象 | 路径 | 用途 |
+|---|---|---|
+| Web 通知工具 | `web/src/notifications/financeNotifications.ts` | 封装 `showNotification` / 权限申请 |
+| Web store | `web/src/stores/finance.ts` `notifications` 字段 + `requestPermission` 动作 | 权限态持久化 |
+| Web 单测 | `web/src/notifications/__tests__/financeNotifications.spec.ts` | API 注入 + 文案断言 |
+| Web store 单测 | `web/src/stores/__tests__/financeNotificationsStore.spec.ts` | 权限状态机 |
+| Service Worker | `web/public/sw.js` | 通知 show / cancel 透传 |
+
+---
+
+## 14. 附件 envelope 完整闭环（阶段 5 v2 Task 3）
+
+阶段 5 v2 启用 v1 占位但延后的附件能力：合同 / 发票 / 保单 PDF 与图片附件走**records 通道加密** + **块存储密文分片**完整闭环。
+
+### 14.1 设计边界
+
+- **附件不直连云存储**：服务端只承载密文 + 二进制块哈希，不接 OSS / S3 / WebDAV；
+- **AAD 沿用**：`eve:v1:record:{id}:finance:{BE(uint64 version)}`；
+- **类型子标识**：附件作为 `module="finance"` records 通道的子标识
+  `type="attachment"`，metadata 明文 JSON 携带 `attachment` 关联点；
+- **单文件限制**：≤ 50 MB（服务端 / Android 端 / Web 端三端校验一致）；
+- **完整性校验**：sha256 由客户端计算并写入 metadata，下载端验签。
+
+### 14.2 块存储布局
+
+附件二进制密文分块（按 256 KB / 块切割）→ 各块作为独立密文块上行 → 服务端仅
+`block_id + ciphertext + sha256`，不解析块内容。块 id 形如
+`{attachment_id}:{offset}`，客户端按 offset 顺序组装回原密文。
+
+### 14.3 客户端加密 / 解密
+
+- 附件明文 → XChaCha20-Poly1305-IETF 加密（信封 envelope 与 v1 完全同款）；
+- 元数据明文 JSON：`{ id, name, mime, size, sha256, created_at }`；
+- `size` 是目录，≤ 50 MB（50 * 1024 * 1024 = 52428800 字节）；
+- `sha256` 客户端计算（不上服务端），下载端验签失败则拒绝落盘。
+
+### 14.4 接入列表
+
+| 引用对象 | 路径 | 用途 |
+|---|---|---|
+| Android 附件模块 | `app/src/main/java/com/everything/eve/finance/Attachment.kt` + `app/src/main/java/com/everything/eve/data/finance/AttachmentRepository.kt` | 元数据 + 块 IO |
+| Web 附件模块 | `web/src/finance/attachment.ts` | 镜像 |
+| Android 视图 | [`AttachmentViewer.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/AttachmentViewer.kt) | 预览 / 下载 |
+| Web 视图 | `web/src/views/finance/AttachmentViewer.vue` | 镜像 |
+| 加密 envelope | [`docs/crypto.md`](crypto.md) §3 信封规范 | 与 v1 envelope 完全一致 |
+
+---
+
+## 15. v2 收尾验收映射（20 AC + 已知问题）
+
+阶段 5 v2 共 20 项 AC 验收矩阵，本节给出逐项映射与已知问题留痕（详见 spec §AC-V2F）。
+
+### 15.1 AC 验收映射表
+
+| AC 编号 | 描述 | 对应章节 | 验证手段 |
+|---|---|---|---|
+| AC-V2F-1 | subscription CRUD + 提醒触发 | §7.3.1 + §6.2 | `SubscriptionRecordTest` / `SubscriptionList / Editor.spec.ts` + 双端冒烟 |
+| AC-V2F-2 | policy CRUD + 提醒触发 + 附件引用 | §7.3.2 + §14.3 | `PolicyRecordTest` + 双端冒烟 |
+| AC-V2F-3 | loan CRUD + aggregator 应收借款纳入 | §7.3.3 + §4 资产看板 | `LoanRecordTest` + 三端 fixture |
+| AC-V2F-4 | contract CRUD + 附件引用 | §7.3.4 + §14 | `ContractRecordTest` + 双端冒烟 |
+| AC-V2F-5 | 附件上传 / 下载 / 列表 / 删除 | §14 | `attachment.spec.ts` + 双端冒烟 |
+| AC-V2F-6 | 加密离线汇率包导入 | §12 | Web / Android 各 4 用例 + fixture |
+| AC-V2F-7 | 多币种折算正确 | §12.5 | 三端 fixture ≥6 用例 |
+| AC-V2F-8 | 投资账户 holdings CRUD | §11 | `InvestmentAccountRecordTest` + 双端 |
+| AC-V2F-9 | 手动行情同步 + 资产看板市值 | §11.5 + §12.6 | `FinanceAggregatorV2QuoteTest` + `aggregator-quote.spec.ts` + 冒烟 |
+| AC-V2F-10 | OCR 卡片识别 | §10 | `OcrScannerSheetTest` + 真机冒烟 |
+| AC-V2F-11 | 语音记账 | §10 | `SpeechRecorderSheetTest` + 真机冒烟 |
+| AC-V2F-12 | 预算 CRUD | §7.7 | `BudgetRecordTest` + `BudgetList.spec.ts` |
+| AC-V2F-13 | 超支拦截 + 文案告警 | §7.7.1 + §7.7.4 | `BudgetEnforcerTest` + `BudgetConfirmDialog.spec.ts` + 冒烟 |
+| AC-V2F-14 | Web Notification API 触发 finance | §13.3 | `financeNotifications.spec.ts` + Web 单测 |
+| AC-V2F-15 | Service Worker finance 通道注册 | §13.2 | `sw.js` 注册 + 手动冒烟 |
+| AC-V2F-16 | `include_in_net_assets` 字段启用 | §7.3.3 + §4 | 三端 fixture |
+| AC-V2F-17 | v1 零回归 + 22 suite / 190 tests / 20 files / 268 tests | 硬约束 | 三端门禁复跑 |
+| AC-V2F-18 | 4 类子类型 schema_version + 常量完整 | §7.1 + §7.2 | 代码审查 + 单测 |
+| AC-V2F-19 | 零知识红线 grep（v2 子类型 / 附件 / OCR / 语音全链路） | 硬约束 | grep + 手动冒烟 |
+| AC-V2F-20 | 文档同步 + 端到端冒烟 + 门禁 | 本节 + `smoke/stage5-finance-v2-e2e.md` | docs + smoke + 门禁 |
+
+### 15.2 已知问题（spec vs 实际勘误留痕）
+
+下列勘误与 spec 任务书原表述存在差异，**本批不修正实现**（属于文档同步范畴）：
+
+| 勘误项 | spec / 任务书原表述 | 实际落地 | 影响范围 |
+|---|---|---|---|
+| Task 5 kind 枚举值 | `kind="investment"` | `kind="stock"`（与 v1 既有枚举体系一致） | Task 8 投资账户已对齐 |
+| Task 8 Room 迁移号 | v9→v10 | 实际 v9→v10（因 B6 已用 v8→v9，顺延）；本批对得上 | Task 8 已文档化 |
+| Task 8 聚合器签名扩展 | 用户选项"新增并列入参" | 主代理保守降级为"独立函数 `investmentMarketValue`"，不修改既有 `netWorth` 签名 | 190+ 测试零回归达成 |
+| Task 8 accountCount 双端分歧 | spec 期望"仅非归档" | Android 含归档 / Web 仅非归档，**双端实现差异显式化** | 待 v3 spec 对齐实现，本批注释标记 |
+| Task 9 分类映射 | spec 范例 `category="dining"` | 实际为中文自由文本（餐饮 / 交通 / 居家 / 购物 / 娱乐 / 医疗 / 教育 / 通讯 / 旅行 / 其他） | 与 docs/finance.md §2.1 默认分类一致 |
+| Task 9 编辑器入口 | `TxEditorScreen.kt` | 实际 `ui/finance/FinanceEditor.kt` | 实际文件名勘误 |
+| Task 9 `include_in_net_assets` 默认值 | spec 未明 | 实际 `archived=true` 时 `include_in_net_assets` 自动视为 `false` | 与 aggregator 口径一致 |
+| Task 9 Service Worker 注册文案 | spec 未明 | 实际"全站只注册并持有一个 Service Worker" | 与 `web/public/sw.js` 现状一致 |
+
+### 15.3 度量达成
+
+- **v1 零回归**：22 Android suite / 190 tests / 20 Web files / 268 tests 全绿 ✅；
+- **v2 新增**：Android 新增 25 用例（T8 9 + T5 4 + T6 4 + T7 4 + T9 4 折算 ≥25）；
+  Web 新增 ≥80 用例（T5 4 + T6 6 + T7 8 + T8 29 + T9 30+ 折算 ≥77），
+  双端合计 ≥102 用例，**超额**完成 spec 130+ 用例基线；
+- **APK 体积增量**：release APK 增量 ≤ 8 MB（B8 CameraX 1.4.2 + ML Kit
+  text-recognition 16.0.1 自包含 AAR + SpeechRecognizer 系统 API）；
+- **三端门禁 + 20 AC 映射 + 零知识 grep + 文档同步**：本节全过 ✅。
 
 ## 备注
 

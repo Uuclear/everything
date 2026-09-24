@@ -37,6 +37,7 @@ cd android
 - 位置轨迹（阶段 4a）：前台定位服务持续采集 → 本机缓冲封块加密 → 密文块经 `/api/v1/locations/batch` 上行（详见"位置轨迹采集（阶段 4a）"章）
 - 日程/日历（阶段 4b）：事件作为 `module="event"` 记录走既有 records 信封通道；月/周视图、本地 AlarmManager exact 闹钟（权限降级见下章）、RRULE B 档子集；详见"日程/日历（阶段 4b）"章
 - 财务 AI 联动记账（阶段 5 v2 B8）：OCR 小票扫描（CameraX 1.4.2 + ML Kit text-recognition 16.0.1 自包含 AAR）+ 语音记账（系统 `SpeechRecognizer` on-device），均**仅作为编辑器预填 hint**，用户手动确认才入既有加密链路；详见"AI 联动记账（OCR + 语音；阶段 5 v2 B8）"章
+- 财务 v2 全量场景（阶段 5 v2 T1-T9 + B1-B8）：订阅 / 保单 / 借款 / 合同四类记账 + 投资账户 + 手动行情同步 + 加密离线汇率包 + 多币种折算 + 预算阈值与超支拦截 + 附件 envelope；详见"财务 v2 增量（阶段 5 v2 T1-T9）"章
 
 ## 数据采集（阶段 3）
 
@@ -227,7 +228,7 @@ rrule_json / exdates_json / dirty / updated_ts`）+ 双索引
 
 `POST_NOTIFICATIONS` 在阶段 4a 已声明，4b 沿用不再重复登记。
 
-## 财务模块（阶段 5）
+## 财务模块（阶段 5 v1 + v2）
 
 阶段 5 财务 v1 在 Android 端落地"账户 / 银行卡 / 日常记账 + 账单日 / 还款日
 提醒"全链路。沿用 records 加密信封（同款 `sealRecord` / `openRecord`，
@@ -422,6 +423,353 @@ channelId = `"events"`（与事件共用，不新建 channel）。
 B8 沿用此纪律——OCR / 语音识别文案仅含金额 / 日期 / 商家（OCR）/ 分类（语音）
 四类字段，**绝不**扩散原文 / 识别结果到通知或日志。
 
+### v2 模块权限矩阵
+
+阶段 5 v2 在 Android 端**不再申请**任何新运行时权限；订阅 / 保单 / 借款 / 合同
+四类记账 + 投资账户 + 手动行情 + 加密离线汇率 + 预算 + 附件 envelope 全部复用
+v1 + B8 既有的权限矩阵。
+
+| v2 能力 | 沿用权限 | 备注 |
+|---|---|---|
+| 订阅扣费 / 保单到期 / 借款到期 通知 | `POST_NOTIFICATIONS`（v1 已声明） | 与 v1 卡账 / 还款共用 `events` channel，**不新建 channel**；沿用 v1 抽象文案纪律（不渲染金额 / 合同号 / 卡号后四位） |
+| 投资账户编辑 / 持仓录入 | 无新权限 | 与 v1 账户同款编辑器（11 字段新增 `kind ∈ {stock}` 与 `cost_kind ∈ {brokerage}`） |
+| 手动行情同步（CSV 导入） | 无新权限 | `SettingsQuotesSyncView` 走 `READ_EXTERNAL` 仅在 Android 13+ 通过 Photo Picker 隐式授予；本批不显式申请 |
+| 加密离线汇率包导入 | 无新权限 | 同上 Photo Picker 路径 |
+| 多币种折算 | 无新权限 | 纯客户端聚合，参见 [`FinanceAggregator.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt) `convertMinor` |
+| 预算阈值 / 超支拦截 | 无新权限 | `BudgetEnforcer` 纯函数 + WorkManager 周期评估，不申请任何权限 |
+| 附件 envelope | 无新权限 | `AttachmentViewer` 走 Photo Picker + 客户端分片密封，服务端零接触 |
+| OCR / 语音 hint（B8） | `CAMERA` + `RECORD_AUDIO`（B8 已声明） | 见 AI 联动记账章 |
+| v1 卡账 / 还款 | `POST_NOTIFICATIONS`（v1 已声明） | 同上 |
+| v1 财务三类（账户 / 卡 / 流水） | 无 | v1 即如此 |
+
+纪律：
+
+- **v2 不新声明**任何 `<uses-permission>` 标签；订阅 / 保单 / 借款三类通知 v2
+  与 v1 卡账 / 还款共用 `REMINDER_CHANNEL_ID = "events"`（参见上方 Scheduler
+  复用段），channel 重要性 / 文案模板见下文"v2 通知文案模板"小节。
+- **不引入 GMS / Firebase**：v2 手动行情同步与加密离线汇率包全程设备本地
+  解析，**不上传**任何明文到第三方服务；Photo Picker 拉文件流后立即分片
+  密封 / CSV 解析 / 落库。
+- **零知识纪律**：v2 通知文案**绝不**渲染金额 / 合同号 / 卡号后四位 /
+  具体日期数字（与 v1 同款 NFR-1 红线）；订阅扣费 / 保单到期 / 借款到期
+  三类通知均只渲染抽象描述。
+
+### v2 通知文案模板
+
+| `ref_kind` | 文案模板 | 触发条件 | 通道 |
+|---|---|---|---|
+| `subscription_renewal` | "📅 订阅即将扣费" | 订阅扣费日前 N 天 / 扣费当日 | `events`（共用） |
+| `policy_expiry` | "🛡️ 保单即将过期" | 保单到期日前 N 天 / 当日 | `events`（共用） |
+| `loan_due` | "💰 借款还款即将到期" | 借款到期日前 N 天 / 当日 | `events`（共用） |
+
+调度复用 v1 单闹钟链：`ReminderScheduler.rebuildChain` 内合并 event + finance
+两类触发（v1：card_statement_due / card_payment_due；v2 扩展：subscription_renewal
+/ policy_expiry / loan_due），全局最小 nextTrigger 写**单闹钟**；**严禁**新建
+第二条调度链路。
+
+`ReminderReceiver.onReceive` 按 `module="finance"` + `ref_kind` 二维路由：
+
+| `ref_kind` | DAO | 文案 |
+|---|---|---|
+| `card_statement_due`（v1） | `FinanceCardDao` | "💳 信用卡账单已生成" |
+| `card_payment_due`（v1） | `FinanceCardDao` | "💳 信用卡还款临近" |
+| `subscription_renewal`（v2） | `FinanceSubscriptionDao` | "📅 订阅即将扣费" |
+| `policy_expiry`（v2） | `FinancePolicyDao` | "🛡️ 保单即将过期" |
+| `loan_due`（v2） | `FinanceLoanDao` | "💰 借款还款即将到期" |
+
+零知识纪律与 v1 完全同款——文案不渲染金额 / 合同号 / 卡号后四位 / 具体日期数字。
+
+## 财务 v2 增量（阶段 5 v2 T1-T9）
+
+阶段 5 v2 在 Android 端落地八类扩展能力（订阅 / 保单 / 借款 / 合同 + 投资账户
++ 手动行情 + 加密离线汇率 + 预算 + 附件 envelope），全部沿用 v1 records 信封
+通道（`module="finance" / type ∈ {subscription, policy, loan, contract,
+investment_account, quote, rate, attachment}`），服务端零改动；Room 演进至
+v6→v7→v8。本节为阶段 5 v2 T1-T9 + B1-B8 实施落地说明，独立模块文档
+（聚合规则 / 多币种 / 预算拦截 / Web 端通知 / envelope 加密）见
+[`finance.md`](finance.md) / [`crypto.md`](crypto.md)。
+
+### v2-1 屏幕 / 页面清单
+
+- **FinanceScreen**（v1 既有，v2 扩展）：顶栏 4 Tab → 5 Tab，**新增**"投资 / 设置"；
+  仪表盘新增投资卡片（持仓成本 / 现价 / 盈亏，**不渲染**具体股票名称到通知）；
+  账户 / 卡 / 流水列表保留 v1 排序，新增订阅 / 保单 / 借款 / 合同四个二级列表。
+- **SubscriptionEditorDialog**（`ui/finance/SubscriptionEditorDialog.kt`）：
+  14 字段编辑器（name / amount / currency / billing_cycle / start_date /
+  next_renewal_at / note / icon / color / archived / created_at / updated_at
+  / category / auto_renew），与 Web `SubscriptionEditorDialog.vue` 逐字段一致；
+  `billing_cycle` 五选一（monthly / quarterly / yearly / weekly / custom_days）。
+- **PolicyEditorDialog**（`ui/finance/PolicyEditorDialog.kt`）：14 字段编辑器
+  （含 policy_number / policy_number_encrypted / insurer / coverage_amount /
+  premium / start_at / expiry_at / note / 等），`policy_number` 入 Room `policy_number`
+  列（≤100 字符）+ `policy_number_encrypted=true`（默认走密文通道）决定是否
+  走 records 密文信封（编辑期 Luhn 校验同款）；UI 列表 `last4()` 函数截取
+  末四位显示；保单 PDF 附件通过附件 envelope 接入。
+- **LoanEditorDialog**（`ui/finance/LoanEditorDialog.kt`）：16 字段编辑器
+  （lender / principal / interest_rate / term_months / start_at / next_due_at
+  / remaining_principal / note / 等），`interest_rate` decimal-as-string 字符串。
+- **ContractEditorDialog**（`ui/finance/ContractEditorDialog.kt`）：12 字段编辑器
+  （party_a / party_b / amount / signed_at / expires_at / note / 等），
+  合同 PDF / 扫描件走附件 envelope 接入，**不入**密文 payload 字段。
+- **InvestmentAccountEditor**（`ui/finance/InvestmentAccountEditor.kt`）：
+  v1 账户编辑器复用 + `kind ∈ {stock}` 单选 + `cost_kind ∈ {brokerage}` 兜底；
+  `include_in_net_assets` 复选框（默认 true；用户可单独关闭不计入净资产）。
+- **HoldingsEditor**（`ui/finance/HoldingsEditor.kt`）：持仓录入子页，字段
+  `symbol / quantity / cost_per_unit / currency / acquired_at`，按 `symbol` 聚合
+  计算平均成本；缺价时按 `cost_per_unit` 兜底显示。
+- **SettingsQuotesSyncView**（`ui/finance/SettingsQuotesSyncView.kt`）：手动
+  行情同步页，CSV 导入走 Photo Picker 拉流 → 客户端 `QuoteCsvParser` 解析 →
+  `QuoteTableRepository.upsert` 落 Room → `recordsRepo.upsertFinanceQuote`
+  密文上行。`quoteSyncUrl` 文本输入栏（v3 占位）。
+- **SettingsRatesView**（`ui/finance/SettingsRatesView.kt`）：加密离线汇率包
+  导入页，CSV 导入走 Photo Picker → `RateCsvParser` 解析 → `RateTableRepository.upsert`
+  落 Room → `recordsRepo.upsertFinanceRate` 密文上行；ISO 4217 三字校验，
+  `0 < ratePerUnit < 1000` 越界拒写。
+- **AttachmentViewer**（`ui/finance/AttachmentViewer.kt`）：附件查看器，
+  `LazyColumn` 列表 + `FilePreview`，从 `AttachmentRepository.observeByRecordId`
+  拉密文 → 客户端分片解密 → `sha256` 校验 → 缓存到本地加密 cache（不写入
+  MediaStore / 公共目录）；下载走 Photo Picker 反向拉源流。
+- **BudgetEditor**（`ui/finance/BudgetEditor.kt`）：预算编辑器，字段
+  `scope_kind / scope_id / amount / currency / period_kind / period_anchor / 
+  rollover`；scope `account` / `category` / `card` / `global` 四选一。
+- **BudgetGateBanner**（`ui/finance/BudgetGateBanner.kt`）：保存流水时的超支
+  拦截提示卡，命中 `BudgetEnforcer.shouldBlock` 时阻止保存并提示。
+
+### v2-2 Room v6→v7→v8 演进
+
+[`EveDatabase.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/EveDatabase.kt)
+`version = 8`，companion object 内嵌 `MIGRATION_5_6`（v1）/ `MIGRATION_6_7`（v2 T2 投资）/ `MIGRATION_7_8`（v2 T3 附件）三段显式迁移，全部沿用 4a v3→v4 / 4b v4→v5 / 5 v1 v5→v6 同款模式：仅 `CREATE TABLE IF NOT EXISTS` + 索引，**不 ALTER / DROP** 既有表。
+
+| 版本 | 阶段 | 新增表 | 不动的表 |
+|---|---|---|---|
+| v5 | 4b 收尾 | `event / event_reminder_log` | records / sync_state / collector_state / location_points / location_outbox |
+| v6 | 5 v1 | `finance_account / finance_card / finance_tx / finance_reminder_log` | + event / event_reminder_log 不动 |
+| v7 | 5 v2 T2 投资 + T7 预算 | `finance_investment_account / finance_holding / finance_quote / finance_rate / finance_budget` | + finance_account / finance_card / finance_tx / finance_reminder_log 不动 |
+| v8 | 5 v2 T3 附件 | `finance_attachment / attachment_block` | + v7 五表不动 |
+
+每段迁移两步走：①`CREATE TABLE IF NOT EXISTS` 新表；②`CREATE INDEX IF NOT 
+EXISTS index_xxx ON yyy(...)` 索引；v6/v7/v8 同模式。**严禁** `DROP / ALTER`
+既有表，否则会触发既有用户升级期数据丢失。
+
+### v2-3 投资账户 schema（16 列）
+
+- 主键：`id TEXT NOT NULL PRIMARY KEY`（UUID）；
+- 业务字段：`name TEXT NOT NULL` / `kind TEXT NOT NULL`（v1 五枚举 + v2 新增
+  `stock`）/ `currency TEXT NOT NULL` / `cost_kind TEXT NOT NULL DEFAULT 
+  'brokerage'`；
+- `balance TEXT NOT NULL`（decimal-as-string，兜底初始投入）/ `note TEXT` / 
+  `icon TEXT` / `color TEXT`；
+- `include_in_net_assets INTEGER NOT NULL DEFAULT 1`（NFR-V2-3 净资产纪律）；
+- `archived INTEGER NOT NULL DEFAULT 0`；
+- 时间戳：`created_at INTEGER NOT NULL` / `updated_at INTEGER NOT NULL`；
+- 系统字段：`schema_version INTEGER NOT NULL DEFAULT 2` / `module TEXT NOT 
+  NULL DEFAULT 'finance'` / `type TEXT NOT NULL DEFAULT 'investment_account'` /
+  `dirty INTEGER NOT NULL DEFAULT 1` / `deleted INTEGER NOT NULL DEFAULT 0`。
+- 索引：(updated_at) 服务增量同步游标；(kind) 服务按类型过滤； (dirty) 服务同步推送对账。
+
+注：实现 schema_version 在 spec 写 `2`，与 v1 三类（account=1 / card=1 / tx=1）
+一致表示「v2 默认启用项」，**仅 v2 引入的字段**保留默认值兜底，不影响 v1 三类
+schema（勘误留痕见 [`finance.md`](finance.md) §15.2 第 8 条）。
+
+### v2-4 持仓表（5 列 + 主键）
+
+- 主键：`id TEXT NOT NULL PRIMARY KEY`（UUID）；
+- `account_id TEXT NOT NULL`（外键到 finance_investment_account.id）；
+- `symbol TEXT NOT NULL`（股票代码 / 基金代码；不入枚举，全文本）；
+- `quantity TEXT NOT NULL`（decimal-as-string，正数）；
+- `cost_per_unit TEXT NOT NULL`（decimal-as-string，正数）；
+- `currency TEXT NOT NULL`（与 account.currency 同币种为兜底，可不同）；
+- `acquired_at INTEGER NOT NULL`（UTC 毫秒）；
+- 索引：(account_id) 服务按投资账户过滤；(symbol) 服务按代码聚合；
+  (acquired_at) 服务按时间排序。
+
+`FinanceAggregator.recomputeHoldings` 按 `symbol` 聚合求平均成本；缺价（无
+quote 命中）时按 `cost_per_unit` 兜底显示，**记 `missingPriceHoldingCount`**，
+不影响净资产聚合（与 v2 一致设计，详见 [`finance.md`](finance.md) §9.5）。
+
+### v2-5 附件元数据 schema + AttachmentRepository 双写
+
+附件 envelope 在 Android 端落地分两层：
+
+- **L1 元数据**：`finance_attachment` 表（`module="finance" / type="attachment"`
+  记录条目），schema 7 列：
+
+  | 列 | 类型 | 备注 |
+  |---|---|---|
+  | `id TEXT PRIMARY KEY` | UUID | 附件 id |
+  | `record_id TEXT` | UUID | 关联的财务条目（subscription / policy / loan / contract 任一） |
+  | `name TEXT NOT NULL` | ≤ 255 UTF-8 | 文件名（过滤路径分隔符） |
+  | `mime TEXT NOT NULL` | MIME | application/pdf / image/jpeg / image/png |
+  | `size TEXT NOT NULL` | decimal-as-string | 0 < size ≤ 52428800 |
+  | `sha256 TEXT NOT NULL` | 64 hex | sha256(原始字节) |
+  | `created_at INTEGER NOT NULL` | UTC 毫秒 | 元数据创建时刻 |
+  | `dirty INTEGER NOT NULL DEFAULT 1` | 0/1 | 同步推送对账 |
+  | `deleted INTEGER NOT NULL DEFAULT 0` | 0/1 | 墓碑删除 |
+
+  索引：(record_id) 服务按引用查询；(dirty) 服务同步推送。
+
+- **L2 块密文**：`attachment_block` 表（与 L1 元数据**分离**存储），schema 5 列：
+
+  | 列 | 类型 | 备注 |
+  |---|---|---|
+  | `id INTEGER PRIMARY KEY AUTOINCREMENT` | 自增 | 块序号 |
+  | `attachment_id TEXT NOT NULL` | UUID | 外键到 L1 |
+  | `offset INTEGER NOT NULL` | 字节偏移 | 0 / 262144 / 524288 / ... |
+  | `ciphertext_b64 TEXT NOT NULL` | 标准 Base64 | `nonce(24) ‖ ciphertext ‖ tag(16)` |
+  | `plaintext_size INTEGER NOT NULL` | 1 ≤ size ≤ 262144 | 块明文字节数 |
+
+  索引：(attachment_id, offset) 唯一约束保证块序号单调。
+
+[`AttachmentRepository.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/AttachmentRepository.kt)
+双写：① 写 L1 元数据明文 + `recordsRepo.upsertFinanceAttachment` 密文；
+② 客户端按 256 KiB 分片 → 每块走 `Attachment.kt` `sealAttachmentBlock` 走
+专用前缀 `eve:v1:attachment-block:{id}:{offset}`（详见 [`crypto.md`](crypto.md) §6.7）
+→ 落 `attachment_block` 表 → 上行 `/api/v1/finance/attachments/{id}/blocks`。
+
+读取流：`AttachmentViewer` → `AttachmentRepository.observeByRecordId(recordId)`
+→ 拉 L1 密文 → `openRecord` 解 L1 → 按 `id` 拉 L2 所有块 → 每块
+`openAttachmentBlock` 按 `offset` 顺序拼接 → 客户端用 L1 元数据 `sha256`
+校验还原字节。**零知识纪律**：附件内容不入日志 / 通知 / SharedPreferences /
+异常消息，仅元数据 `name / mime / size / sha256` 可入索引字段。
+
+### v2-6 加密离线汇率包 schema + RateTableRepository
+
+`finance_rate` 表（`module="finance" / type="rate"` 记录条目），schema 6 列：
+
+| 列 | 类型 | 备注 |
+|---|---|---|
+| `id TEXT PRIMARY KEY` | UUID | 汇率条目 id |
+| `from_currency TEXT NOT NULL` | ISO 4217 三字 | 源币种 |
+| `to_currency TEXT NOT NULL` | ISO 4217 三字 | 目标币种 |
+| `rate_per_unit TEXT NOT NULL` | decimal-as-string | 0 < rate < 1000 |
+| `ts INTEGER NOT NULL` | UTC 毫秒 | 汇率生效时刻（last-write-wins） |
+| `dirty INTEGER NOT NULL DEFAULT 1` | 0/1 | 同步推送对账 |
+| `version INTEGER NOT NULL DEFAULT 1` | int64 | envelope 版本号 |
+
+索引：(from_currency, to_currency, ts) 服务按 (from, to, time) 查询；
+(dirty) 服务同步推送。
+
+[`RateTableRepository.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/RateTableRepository.kt)
+导入流程：Photo Picker 拉流 → `RateCsvParser` 解析（行格式
+`from,to,ratePerUnit,ts`）→ ISO 4217 三字正则 + decimal-as-string 校验 →
+`upsert` 落 Room 明文 → `recordsRepo.upsertFinanceRate(id, plaintextJson)`
+走 §5 通用 envelope 密文上行（与 v1 finance 同款 module="finance"）。
+
+`FinanceAggregator.convertMinor` 按 (from, to, ts) 命中（缺汇率返回
+`null`，**记入 `missingRateTxCount`** 兜底），缺价 / 缺汇率双缺失下，预算
+触发 `conservativePass`（详见 [`finance.md`](finance.md) §12.5）。
+
+### v2-7 手动行情 quote schema + QuoteTableRepository
+
+`finance_quote` 表（`module="finance" / type="quote"` 记录条目），schema 6 列：
+
+| 列 | 类型 | 备注 |
+|---|---|---|
+| `id TEXT PRIMARY KEY` | UUID | 行情条目 id |
+| `symbol TEXT NOT NULL` | 股票 / 基金代码 | 全文本不入枚举 |
+| `price_per_unit TEXT NOT NULL` | decimal-as-string | 单价 |
+| `currency TEXT NOT NULL` | ISO 4217 | 报价币种 |
+| `ts INTEGER NOT NULL` | UTC 毫秒 | 报价时刻（last-write-wins） |
+| `dirty INTEGER NOT NULL DEFAULT 1` | 0/1 | 同步推送对账 |
+| `version INTEGER NOT NULL DEFAULT 1` | int64 | envelope 版本号 |
+
+索引：(symbol, ts) 服务按 (symbol, time) 查询；(dirty) 服务同步推送。
+
+[`QuoteTableRepository.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/QuoteTableRepository.kt)
+导入流程：Photo Picker 拉流 → `QuoteCsvParser` 解析（行格式
+`symbol,pricePerUnit,currency,ts`）→ 校验（currency ISO 4217 三字）→
+`upsert` 落 Room 明文 → `recordsRepo.upsertFinanceQuote(id, plaintextJson)`
+走 §5 通用 envelope 密文上行。
+
+`FinanceAggregator.recomputeQuoteInvestmentInternal` 在聚合阶段按 `symbol`
+命中 `quotes` 表最新 `ts` 价格；缺价时按 `cost_per_unit` 兜底显示，记
+`missingPriceHoldingCount`，不影响净资产聚合（设计边界见
+[`finance.md`](finance.md) §9.5）。
+
+### v2-8 预算表 schema + BudgetEnforcer
+
+`finance_budget` 表 schema 8 列：
+
+- 主键：`id TEXT NOT NULL PRIMARY KEY`（UUID）；
+- `scope_kind TEXT NOT NULL`（4 枚举：account / category / card / global）；
+- `scope_id TEXT`（scope_kind=global 时为 null）；
+- `amount TEXT NOT NULL`（decimal-as-string，预算金额）；
+- `currency TEXT NOT NULL`（ISO 4217）；
+- `period_kind TEXT NOT NULL`（4 枚举：monthly / weekly / yearly / custom_days）；
+- `period_anchor INTEGER NOT NULL`（周期起点 UTC 毫秒，monthly 取每月 1 日；
+-weekly 取周一；yearly 取 1 月 1 日）；
+- `rollover INTEGER NOT NULL DEFAULT 0`（0/1；超额是否滚存下期）；
+- 系统字段：`schema_version / module / type / created_at / updated_at / 
+  dirty / deleted`（与 v1 三类同款）。
+- 索引：(scope_kind, scope_id) 服务按范围查询；(period_kind, period_anchor) 
+  服务按周期查询；(dirty) 服务同步推送。
+
+[`BudgetEnforcer.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/BudgetEnforcer.kt)
+纯函数：
+`shouldBlock(budget, currentUsage, candidateAmount): BlockDecision` 返回
+`{allow, overBudget, conservativePass}`。命中 `overBudget=true` 且 budget 不允
+许超支时，`TxEditorDialog` `btn_save` 走 `BudgetGateBanner` 拦截提示。
+
+保守放行纪律：当 `currentUsage` 缺失（缺价 / 缺汇率）+ `conservativePass=true`
+时，`shouldBlock` 返回 `allow=true` 但 `conservativePass=true`（详见
+[`finance.md`](finance.md) §7.3）。**不阻断**核心记账。
+
+### v2-9 Worker / 后台任务清单
+
+- **CollectorWorker**（v1 + B8 既有，v2 扩展）：`doWork()` 末尾 v2 扩展追加
+  三段 `pullAndDecrypt(moduleRecords)`：
+  - finance 段（v1 既有）：处理 module="finance" 的 account/card/tx 三类；
+  - finance_v2 段（v2 T1/T2/T3/T7）：扩展 investment_account / quote / 
+    rate / budget / subscription / policy / loan / contract / attachment 五类；
+  - 4a / 4b 既有"采集 + recordsRepo.sync() + locationPackager + 
+    locationUploader"五段流程**一行未删**，本批仅末尾追加。
+  - 失败兜底 `try { ... } catch (t: Throwable) { Log.w(...) }` 与 4b 同款。
+- **ReminderReceiver**（4b 既有，5 v1 + v2 扩展）：按 `module="finance"` + 
+  `ref_kind` 二维路由（详见上文"v2 通知文案模板"小节），v2 三类（subscription_renewal
+  / policy_expiry / loan_due）与 v1 两类（card_statement_due / 
+  card_payment_due）共用**单闹钟链**与**单 channel**。
+- **BootReceiver**（4a / 4b 既有，v2 无新增改动）：开机广播后追加
+  `ReminderScheduler.rebuildChain(ctx)` 路径；`rebuildChain` 内已合并 event +
+  finance（含 v2 三类）两类；**v2 阶段无额外改动**。4a 既有 `BackgroundServiceStart
+  NotAllowedException / IllegalStateException` 两路异常只吞不抛约定一并沿用。
+- **BudgetEvaluatorWorker**（v2 新增）：WorkManager 周期任务，每 6 小时
+  评估一次预算使用率；MK 不可用时跳过评估（与轨迹采集同款 `mk_unavailable` 兜底）。
+  不申请任何权限。
+
+### v2-10 v2 测试覆盖
+
+| 文件 | 用例数 | 范围 |
+|---|---|---|
+| `InvestmentAccountRecordTest.kt` | 5 | 投资账户 CRUD + include_in_net_assets |
+| `QuoteTableTest.kt` | 5 | 手动行情 CSV 解析 + last-write-wins |
+| `RateTableTest.kt` | 4 | 加密离线汇率包 CSV 解析 + ISO 4217 校验 |
+| `FinanceAggregatorV2QuoteTest.kt` | 9 | 多币种折算 + 缺价 / 缺汇率兜底 |
+| `BudgetEnforcerTest.kt` | 4 | 预算拦截 + 保守放行 |
+| `AttachmentEnvelopeTest.kt` | 12 | 块分片密封 + sha256 验签 + 元数据 envelope |
+| `OcrParserTest.kt` | 10 | OCR 启发式（纯 JVM，B8） |
+| `SpeechParserTest.kt` | 10 | 语音解析（纯 JVM，B8） |
+| `OcrScannerSheetTest.kt` | 8 | OCR Sheet Robolectric（B8） |
+| `SpeechRecorderSheetTest.kt` | 11 | 语音 Sheet Robolectric（B8） |
+| `FinanceViewModelAiTest.kt` | 9 | ViewModel hint 流转（B8） |
+
+合计 v2 新增 **≥77 用例**；门禁 `./gradlew.bat :app:testDebugUnitTest`
+481 + ≥77 = **≥558/558 全量过**（v1 零回归 481 + v2 新增 ≥77）。
+
+### v2-11 真机冒烟指南索引
+
+v2 真机冒烟手册三类，**全部 ≥15 场景**总覆盖：
+
+- [`docs/smoke/finance-v2-investment-manual.md`](smoke/finance-v2-investment-manual.md)
+  SMOKE-V2-INV-S1~S9：投资账户 + 手动行情 + 多币种折算 + 加密离线汇率包 ≥9 场景；
+- [`docs/smoke/finance-v2-ai-manual.md`](smoke/finance-v2-ai-manual.md)
+  SMOKE-V2-AI-S1~S6：OCR + 语音记账 ≥6 场景；
+- [`docs/smoke/stage5-finance-v2-e2e.md`](smoke/stage5-finance-v2-e2e.md)
+  SMOKE-V2-E2E-S1~S15+：订阅 / 保单 / 借款 / 合同 / 预算 / 附件 envelope ≥15
+  场景**全集**冒烟（T10-7 待新建）。
+
+每条冒烟场景含「前置 / 步骤 / 预期 / 零知识核查 / 失败上报模板」五段；
+真机 / 模拟器统一执行；post-mkt 不可用字段标注 `-` 兜底。
+
 ## AI 联动记账（OCR + 语音；阶段 5 v2 B8）
 
 阶段 5 v2 B8 在 Android 端**新增** OCR 小票扫描 + 语音记账两条辅助录入
@@ -570,6 +918,14 @@ CameraX 1.4.x 中 `ImageProxy` 为**抽象类**（`Unsafe.allocateInstance` 对
 | 日程精确闹钟 | `SCHEDULE_EXACT_ALARM`（API 31+） + `USE_EXACT_ALARM`（API 33+）（均已声明，阶段 4b） | 4b ✅ | AlarmManager `setExactAndAllowWhileIdle`；用户拒绝 `SCHEDULE_EXACT_ALARM` 即降级 `setAndAllowWhileIdle` 并写 `event_reminder_log.kind="alarm_killed"`，doze + 厂商后台限制已记入 README 已知问题 |
 | OCR 相机 | `CAMERA` + `uses-feature camera.any`（均已声明，阶段 5 v2 B8） | B8 ✅ | CameraX 1.4.2 + ML Kit text-recognition 16.0.1 自包含 AAR；OCR Sheet 运行时申请；首次拒绝仅隐藏入口 |
 | 语音麦克风 | `RECORD_AUDIO`（已声明，阶段 5 v2 B8） | B8 ✅ | 系统 `SpeechRecognizer` on-device；语音 Sheet 进入时申请；未授权走 `permission_blocked` testTag |
+| 订阅扣费通知 | 沿用 `POST_NOTIFICATIONS`（v1 已声明） | 5 v2 T1 ✅ | 与 v1 卡账 / 还款共用 `events` channel，**不新建 channel**；抽象文案纪律（不渲染金额 / 合同号 / 卡号后四位） |
+| 保单到期通知 | 沿用 `POST_NOTIFICATIONS`（v1 已声明） | 5 v2 T1 ✅ | 同上 |
+| 借款到期通知 | 沿用 `POST_NOTIFICATIONS`（v1 已声明） | 5 v2 T1 ✅ | 同上 |
+| 投资账户编辑 | 无新权限（v1 账户编辑器复用） | 5 v2 T2 ✅ | `include_in_net_assets` 复选框默认 true；NFR-V2-3 净资产纪律 |
+| 手动行情 CSV 导入 | 无新权限（Photo Picker 隐式授予） | 5 v2 T6 ✅ | 客户端 `QuoteCsvParser` 解析；不上传任何明文到第三方服务 |
+| 加密离线汇率包导入 | 无新权限（Photo Picker 隐式授予） | 5 v2 T5 ✅ | ISO 4217 三字 + decimal-as-string 校验；客户端纯函数解析 |
+| 附件 envelope | 无新权限（Photo Picker 隐式授予） | 5 v2 T3 ✅ | 客户端分片密封；服务端零接触明文 |
+| 预算评估 | 无新权限（WorkManager 周期任务） | 5 v2 T7 ✅ | `BudgetEvaluatorWorker` 每 6 小时评估；MK 不可用时跳过 |
 
 ## 分发策略
 

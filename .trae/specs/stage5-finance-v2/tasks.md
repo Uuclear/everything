@@ -589,7 +589,7 @@
 
 ## Task 10: 文档同步 + 门禁复跑（最终）（P0）
 
-- **Status**: `pending`
+- **Status**: `completed`
 - **Priority**: high
 - **Depends On**: T1~T9
 - **Description**:
@@ -599,19 +599,27 @@
     + type="attachment" 子标识 + sha256 校验 + 50MB 限制）
   - 修改 `docs/android.md`：v2 增量（CameraX / SpeechRecognizer / ML Kit /
     OCR / 语音权限说明 + 真机冒烟指南）
-  - 修改 `docs/module-schemas.md` §9：v2 字段扩展（4 子类型 + attachment 
+  - 修改 `docs/module-schemas.md` §9：v2 字段扩展（4 子类型 + attachment
     表 + rate 表 + quote 表 + budget 子类型 + include_in_net_assets）
   - 修改 `README.md`：v2 功能矩阵扩展 + 已知问题补充
   - 修改 `everything_plan.md`：阶段 5 v2 行勾选 ✅ + v3 候选列出
-  - 门禁复跑：Android `testDebugUnitTest` + `assembleDebug` + Web `vitest` 
+  - 门禁复跑：Android `testDebugUnitTest` + `assembleDebug` + Web `vitest`
     + `vue-tsc` + 零知识 grep + 20 AC 映射
   - 新建 `docs/smoke/stage5-finance-v2-e2e.md`：≥15 场景冒烟
 - **TR 列表**:
-  - TR-10.1 docs/finance.md v2 增量
-  - TR-10.2 docs/crypto.md + docs/android.md + module-schemas.md v2 增量
-  - TR-10.3 README + everything_plan 同步
-  - TR-10.4 端到端冒烟脚本 ≥15 场景
-  - TR-10.5 三端门禁复跑全绿 + 20 AC 映射 + 零知识 grep
+  - TR-10.1 docs/finance.md v2 增量 ✅（§12~§15 +214 行）
+  - TR-10.2 docs/crypto.md + docs/android.md + module-schemas.md v2 增量 ✅
+    （§6.7 附件 envelope 7 节 + android.md 权限矩阵 + 通知文案 + 财务 v2 11 子节
+     + module-schemas.md v9→v10 + §9.10~§9.20 11 子节）
+  - TR-10.3 README + everything_plan 同步 ✅（v2 功能矩阵 11 行 + v2 限制 9 条
+    + 阶段 5 v2 行 + v3 候选 8 条）
+  - TR-10.4 端到端冒烟脚本 ≥15 场景 ✅（新建 docs/smoke/stage5-finance-v2-e2e.md，
+    实写 16 场景 + 零知识 grep 命令 + §C FU-7 关闭条件清单）
+  - TR-10.5 三端门禁复跑全绿 + 20 AC 映射 + 零知识 grep ✅
+    （go test 全包 ok / Web 47 文件 694 用例 / vue-tsc 0 错误
+     / Android compileDebugKotlin + 506 用例 testDebugUnitTest 0 失败
+     / 服务端 grep 0 明文命中 / Android Web envelope 命中均为合规位置
+     / policy_number_last4 偏差修正 14 处全部清零）
 
 ---
 

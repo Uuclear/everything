@@ -1,4 +1,4 @@
-# 记录模块与明文数据格式（v1）
+# 记录模块与明文数据格式（v1 + 阶段 5 v2 增量）
 
 本文档定义加密记录信封内**明文 JSON** 的字段约定。密文信封、AAD、Argon2id 参数见
 [crypto.md](crypto.md)。字段定义以 [vault.ts](../web/src/types/vault.ts)
@@ -42,6 +42,17 @@
    - [9.7 隐私字段标记与卡号后四位截取纪律](#97-隐私字段标记与卡号后四位截取纪律)
    - [9.8 跨端一致性要求](#98-跨端一致性要求)
    - [9.9 Android Room v6 schema 与 §9.3–9.5 字段映射](#99-android-room-v6-schema-与-93-95-字段映射)
+   - [9.10 finance 模块 v9→v10 演进总览（阶段 5 v2）](#910-finance-模块-v9v10-演进总览阶段-5-v2)
+   - [9.11 字段定义：type=subscription（阶段 5 v2）](#911-字段定义typesubscription阶段-5-v2)
+   - [9.12 字段定义：type=policy（阶段 5 v2）](#912-字段定义typepolicy阶段-5-v2)
+   - [9.13 字段定义：type=loan（阶段 5 v2）](#913-字段定义typeloan阶段-5-v2)
+   - [9.14 字段定义：type=contract（阶段 5 v2）](#914-字段定义typecontract阶段-5-v2)
+   - [9.15 字段定义：type=investment_account（阶段 5 v2）](#915-字段定义typeinvestment_account阶段-5-v2)
+   - [9.16 字段定义：type=quote（手动行情，阶段 5 v2）](#916-字段定义typequote手动行情阶段-5-v2)
+   - [9.17 字段定义：type=rate（加密离线汇率，阶段 5 v2）](#917-字段定义typerate加密离线汇率阶段-5-v2)
+   - [9.18 字段定义：type=attachment（附件元数据，阶段 5 v2）](#918-字段定义typeattachment附件元数据阶段-5-v2)
+   - [9.19 Android Room v10 schema 与 §9.10–9.18 字段映射](#919-android-room-v10-schema-与-910-918-字段映射)
+   - [9.20 v2 跨端一致性要求（财务模块扩展）](#920-v2-跨端一致性要求财务模块扩展)
 10. [Android 本期 UI 支持矩阵](#10-android-本期-ui-支持矩阵)
 
 ## 1. 总则
@@ -914,6 +925,488 @@ Room 表在业务字段之外**统一追加**以下 5 列系统字段，便于 r
 - **Room 缓存字段**（`brand` / `expiry_month` / `expiry_year` / `holder`
   四列）：仅 Room 持有、**不入明文 JSON**；录入时由前端从完整卡号解析，
   上行 records 时不带这四列；下载解密后回写 Room。
+
+### 9.10 finance 模块 v9→v10 演进总览（阶段 5 v2）
+
+阶段 5 v2 在 v1（账户/银行卡/日常记账 + budget）之上扩展为**八类子类型**：
+`account` / `card` / `tx` / `budget` / `subscription` / `policy` / `loan` /
+`contract` / `investment_account` / `quote` / `rate` / `attachment`。后六类
+（subscription / policy / loan / contract / investment_account / quote /
+rate / attachment）为 v2 新增子类型，明文统一 `schema_version = 2`，
+全部走 §5 records 密文通道（AAD 不变），其中 `investment_account` /
+`quote` / `rate` / `attachment` 落地为 Room 新增独立表以支持本地聚合与
+跨设备同步，`subscription` / `policy` / `loan` / `contract` 走 records
+通道明文 JSON 即可（聚合在端侧内存进行，Room 不为这四类建独立表）。
+
+#### 9.10.1 v2 子类型启用矩阵
+
+| `type` | 阶段 5 v1 | 阶段 5 v2 | Room 表 | 字段表 | 关键约束 |
+|---|---|---|---|---|---|
+| `account` | ✅ | ✅ | `finance_account` | §9.3（11 字段） | 不变 |
+| `card` | ✅ | ✅ | `finance_card` | §9.4（17 字段） | 不变 |
+| `tx` | ✅ | ✅ | `finance_tx` | §9.5（13 业务字段 + B6 审计列） | 不变 |
+| `budget` | ⏳ 占位 | ✅ | 无（records 通道） | §9.5.2（13 字段） | `schema_version=2` |
+| `subscription`（订阅） | ⏳ 占位 | ✅ | 无（records 通道） | §9.11（14 字段） | `schema_version=2` |
+| `policy`（保单） | ⏳ 占位 | ✅ | 无（records 通道） | §9.12（14 字段） | `last4` 截取纪律 |
+| `loan`（借款 / 应收） | ⏳ 占位 | ✅ | 无（records 通道） | §9.13（16 字段） | `direction` ∈ `lend_out` / `lend_in` |
+| `contract`（合同 / 发票） | ⏳ 占位 | ✅ | 无（records 通道） | §9.14（12 字段） | 到期提醒 |
+| `investment_account`（投资账户） | ❌ | ✅ | `finance_investment_account` | §9.15（11 字段） | `include_in_net_assets` |
+| `quote`（手动行情） | ❌ | ✅ | `finance_quote` | §9.16（5 字段） | v2 only |
+| `rate`（加密离线汇率） | ❌ | ✅ | `finance_rate` | §9.17（4 字段） | encrypted envelope |
+| `attachment`（附件元数据） | ❌ | ✅ | `finance_attachment` + `finance_attachment_block` | §9.18（6 字段） | L1 元数据 + L2 块密文 |
+
+#### 9.10.2 Room 版本演进 v6 → v10
+
+| 版本 | 变更 | 迁移名 | 不动表 |
+|---|---|---|---|
+| **v6** | 初版四表（finance_account / finance_card / finance_tx / finance_reminder_log） | `MIGRATION_5_6` | — |
+| **v7** | 四张子类型表（B4：subscription / policy / loan / contract） | `MIGRATION_6_7` | v6 四表 |
+| **v8** | `finance_rate`（B5 加密离线汇率包） | `MIGRATION_7_8` | v6+v7 表 |
+| **v9** | `finance_tx.overspend_acknowledged`（B6 预算硬约束审计列） | `MIGRATION_8_9` | v6+v7+v8 表 |
+| **v10** | `finance_investment_account` + `finance_investment_holding` + `finance_quote` + `finance_attachment` + `finance_attachment_block`（T1-T8 阶段 5 v2） | `MIGRATION_9_10` | v6-v9 表 |
+
+迁移纪律：所有 DDL 走 `MIGRATION_X_Y` 显式迁移，**严禁 `DROP` / `ALTER TABLE DROP COLUMN` / 重命名**；新增列一律 `ALTER TABLE ... ADD COLUMN ... NOT NULL DEFAULT ...`，旧数据按默认值兜底。新增表一律 `CREATE TABLE IF NOT EXISTS` + 同步索引。
+
+#### 9.10.3 字段命名规范（v2 新增子类型共性）
+
+- `id`：UUID v4 字符串；同时作为 records 主键 + 服务端投递主键 + Room 表主键。
+- `schema_version`：integer；v2 子类型一律固定 `2`（与 v1 子类型 `1` 区分，迁移时按版本分支处理）。
+- `created_at` / `updated_at`：int64，Unix 毫秒。
+- `archived`：boolean；归档不计入聚合（与 v1 一致）。
+- `color` / `icon`：可选 UI 资源键，与 v1 同款 8+8 调色板。
+- `note`：string ≤ 200 字符。
+- 金额字段一律 decimal-as-string，**正数**（方向由 `kind` / `direction` 决定）。
+
+### 9.11 字段定义：type=subscription（阶段 5 v2）
+
+订阅条目（type=subscription，14 字段，走 records 密文通道，Room 不建独立表），
+明文固定 `schema_version = 2`：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | 客户端生成（UUID v4）。 |
+| `schema_version` | integer | 是 | 固定 `2`。 |
+| `name` | string | 是 | 订阅名称（如"Netflix" / "阿里云盘"）；UTF-8；1–40 字符。 |
+| `provider` | string | 否 | 服务提供方；1–40 字符；可空。 |
+| `cost_minor` | string | 是 | decimal-as-string，订阅费用（**正数**），最多 2 位小数；精度单位由 `currency` 决定（CNY = 元、USD = 美元）。 |
+| `currency` | string | 是 | ISO 4217 三字母，默认 CNY。 |
+| `billing_cycle` | enum | 是 | 计费周期：`monthly` / `quarterly` / `yearly` / `weekly` / `one_shot`（5 档；`one_shot` 为一次性购买）。 |
+| `start_ts` | integer (int64) | 是 | 起始计费日，Unix 毫秒；下一次扣费按 `billing_cycle` 滚动计算。 |
+| `next_bill_ts` | integer (int64) | 否 | 下一次扣费日（Unix 毫秒）；可选；为空时由 `start_ts + cycle` 自动滚动。 |
+| `auto_renew` | boolean | 是 | 是否自动续费；默认 `true`。 |
+| `payment_method` | enum | 否 | 支付方式：`card` / `alipay` / `wechat` / `other`；为空时仅记账号关联。 |
+| `card_id` | string (UUID) | 否 | 关联 `card.id`；`payment_method="card"` 时建议填；外键可空。 |
+| `note` | string \| null | 否 | 纯文本备注；0–200 字符。 |
+| `created_at` / `updated_at` / `archived` / `color` / `icon` | — | 是 | 见 §9.10.3 共性字段。 |
+
+字段口径补充：
+
+- `cost_minor` **仅存数字**，业务方向（支出）由类型语义锁定（订阅一律视为支出项）。
+- `next_bill_ts` 与 `billing_cycle` 共同决定本地提醒（T-3 提醒 / T-1 兜底），文案仅渲染"X 天后"抽象话术，不渲染 `cost_minor` / `provider` / 账户名（见 finance.md §6.4）。
+- `billing_cycle = "one_shot"` 表示一次性购买，无下一次扣费；编辑器需在保存时禁推 `next_bill_ts`。
+- v2 不引入"按订阅聚合月支出"等服务端聚合，客户端按 `cost_minor × 月度折算` 内存计算。
+
+### 9.12 字段定义：type=policy（阶段 5 v2）
+
+保单条目（type=policy，14 字段，records 通道，`schema_version=2`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | UUID v4。 |
+| `schema_version` | integer | 是 | 固定 `2`。 |
+| `name` | string | 是 | 保单名称（如"平安车险" / "重疾险"）；1–40 字符。 |
+| `kind` | enum | 是 | 保单类型：`life` / `health` / `auto` / `property` / `travel` / `other`（6 档）。 |
+| `insurer` | string | 是 | 保险公司；1–40 字符。 |
+| `policy_number` | string | 是 | 保单号；1–100 字符（与 `card.number` 不同：完整保单号整体入密文，由 `policy_number_encrypted` 控制是否加密）。 |
+| `policy_number_encrypted` | boolean | 是 | 保单号是否加密：默认 `true`（与 v1 `card.number` 同款密文 envelope）；`false` 时明文入库（仅用于内部测试 / 公开保单号场景，**生产环境必须 true**）。 |
+| `coverage_minor` | string | 否 | decimal-as-string，保额（**正数**），最多 2 位小数。 |
+| `premium_minor` | string | 是 | decimal-as-string，每期保费（**正数**）。 |
+| `currency` | string | 是 | ISO 4217，默认 CNY。 |
+| `billing_cycle` | enum | 是 | 缴费周期：`monthly` / `quarterly` / `yearly` / `one_shot`（4 档）。 |
+| `start_ts` | integer (int64) | 是 | 起始保障日，Unix 毫秒。 |
+| `expires_ts` | integer (int64) | 是 | 保障到期日，Unix 毫秒；触发到期提醒（T-30 / T-7 两档）。 |
+| `auto_renew` | boolean | 是 | 是否自动续保；默认 `false`。 |
+| `note` / `color` / `icon` / `created_at` / `updated_at` / `archived` | — | — | 见 §9.10.3。 |
+
+字段口径补充：
+
+- **`policy_number` 加密纪律**：完整保单号入 `policy_number` 字段（≤100 字符），由 `policy_number_encrypted=true` 决定是否走 v1 `card.number` 同款密文 envelope；UI 列表用 `last4()` 函数显示后四位供识别同保单（识别依赖 `(insurer, name, last4)` 联合指纹），但**完整保单号仍存于明文 / 密文字段**，仅显示/通知时截取末 4 位（详见 §9.20.4 隐私字段纪律）。
+- 到期提醒档位（T-30 / T-7）：文案仅渲染"保单 X 天后到期"等抽象话术，**不渲染**保单号、保险公司、金额。
+- `coverage_minor` 与 `premium_minor` 精度单位由 `currency` 决定；CNY = 元。
+- `kind="other"` 仅作扩展位预留，未识别 kind 一律走 `other`。
+
+### 9.13 字段定义：type=loan（阶段 5 v2）
+
+借款 / 应收条目（type=loan，16 字段，records 通道，`schema_version=2`），
+支持双向记账（借出 / 借入）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | UUID v4。 |
+| `schema_version` | integer | 是 | 固定 `2`。 |
+| `name` | string | 是 | 借款条目名称（如"借给张三" / "向银行贷款"）；1–40 字符。 |
+| `direction` | enum | 是 | 方向：`lend_out`（借出，应收）/ `lend_in`（借入，应付）；决定金额符号语义。 |
+| `counterparty` | string | 是 | 交易对手（人名 / 机构）；1–40 字符。 |
+| `principal_minor` | string | 是 | decimal-as-string，本金（**正数**）。 |
+| `currency` | string | 是 | ISO 4217，默认 CNY。 |
+| `interest_rate_pct` | number | 否 | 年化利率百分比；如 `4.35` 表示 4.35%；可空（无息借款）。 |
+| `start_ts` | integer (int64) | 是 | 借出 / 借入起始日，Unix 毫秒。 |
+| `due_ts` | integer (int64) | 是 | 到期日，Unix 毫秒；触发到期提醒（T-7 / T-1）。 |
+| `repaid_ts` | integer (int64) | 否 | 已还清日；`null` 表示未结清；填入后归档自动建议 `archived=true`。 |
+| `repaid_minor` | string | 否 | decimal-as-string，已还金额（**正数**）；`null` 表示未还。 |
+| `payment_method` | enum | 否 | 还款方式：`card` / `cash` / `transfer` / `other`；`direction="lend_out"` 时为收到还款方式，`lend_in` 时为支付还款方式。 |
+| `card_id` / `account_id` | string (UUID) | 否 | 关联卡 / 账户；外键可空。 |
+| `note` / `color` / `icon` / `created_at` / `updated_at` / `archived` | — | — | 见 §9.10.3。 |
+
+字段口径补充：
+
+- `direction = "lend_out"` 时计入**应收**（净资产分母项、影响 `include_in_net_assets` 默认 `true`）；`lend_in` 计入**应付**（负债项）。
+- 文案纪律：到期提醒仅渲染"借款 X 天后到期"，不渲染 `counterparty`、利率、本金、已还金额。
+- `repaid_minor > principal_minor` 视为异常值，前端校验警告但不阻断保存；服务端不解密故无二次校验。
+- v2 不引入"按利率滚动重算剩余应付"等客户端聚合，剩余应付由 `principal_minor - repaid_minor` 客户端纯函数计算。
+
+### 9.14 字段定义：type=contract（阶段 5 v2）
+
+合同 / 发票条目（type=contract，12 字段，records 通道，`schema_version=2`），
+用于电子合同归档与发票留痕：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | UUID v4。 |
+| `schema_version` | integer | 是 | 固定 `2`。 |
+| `title` | string | 是 | 合同 / 发票标题；1–80 字符。 |
+| `kind` | enum | 是 | 类型：`rental`（租赁）/ `employment`（劳务）/ `sales`（销售）/ `service`（服务）/ `invoice`（发票）/ `other`（6 档）。 |
+| `counterparty` | string | 是 | 签约对方；1–40 字符。 |
+| `amount_minor` | string | 否 | decimal-as-string，合同金额 / 发票金额（**正数**）；可空（无金额合同）。 |
+| `currency` | string | 否 | ISO 4217；`amount_minor` 非空时必填，默认 CNY。 |
+| `signed_ts` | integer (int64) | 是 | 签订日，Unix 毫秒。 |
+| `expires_ts` | integer (int64) | 否 | 到期日，Unix 毫秒；触发到期提醒（T-30 / T-7）；可空（无固定到期日）。 |
+| `attachment_id` | string (UUID) | 否 | 关联附件 id（指向 §9.18 attachment 元数据）；电子合同 PDF / 发票扫描件经附件 envelope 加密封存。 |
+| `note` / `color` / `icon` / `created_at` / `updated_at` / `archived` | — | — | 见 §9.10.3。 |
+
+字段口径补充：
+
+- `attachment_id` 引用 §9.18 的 `finance_attachment.id`，不重复存附件元数据（避免双写出错）。
+- 文案纪律：到期提醒仅渲染"合同 X 天后到期"，不渲染对方、金额、附件 id。
+- `kind="invoice"` 与 `kind ∈ {rental, employment, sales, service}` 共用同一字段表，仅 `kind` 区分。
+
+### 9.15 字段定义：type=investment_account（阶段 5 v2）
+
+投资账户条目（type=investment_account，11 字段 + Room 缓存，
+`schema_version=2`），落地 Room 表 `finance_investment_account`：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | UUID v4。 |
+| `schema_version` | integer | 是 | 固定 `2`。 |
+| `name` | string | 是 | 投资账户名称（如"招行基金账户" / "A股-华泰"）；1–40 字符。 |
+| `broker` | string | 否 | 券商 / 平台名；1–40 字符。 |
+| `kind` | enum | 是 | 账户类型：`stock` / `fund` / `crypto` / `bond` / `cash_mgmt` / `other`（6 档；与 v1 `account.kind` 的 `stock` / `cash` 解耦，避免字段混淆）。 |
+| `currency` | string | 是 | ISO 4217，默认 CNY。 |
+| `principal_minor` | string | 否 | decimal-as-string，投入本金（**正数**），客户端聚合"累计收益"用；可空。 |
+| `include_in_net_assets` | boolean | 是 | 是否计入净资产看板；默认 `true`；归档自动视为 `false`。 |
+| `last_synced_ts` | integer (int64) | 否 | 最近一次手动行情同步时刻，Unix 毫秒；空表示从未同步。 |
+| `note` / `color` / `icon` / `created_at` / `updated_at` / `archived` | — | — | 见 §9.10.3。 |
+
+#### 9.15.1 持仓表（`finance_investment_holding`，7 列，不入明文 JSON）
+
+`holdings` 是**本地 Room 缓存**——用户通过"手动行情同步"流程录入每笔持仓的
+代码 / 份额 / 成本价，聚合出投资账户当前市值与盈亏。该缓存**不入明文 JSON**
+（避免 records 上行扩大密文），仅本地聚合使用；多设备同步由客户端按需重新录入。
+
+| Room 列 | 类型 | 说明 |
+|---|---|---|
+| `id` | TEXT PK | UUID v4（本地生成）。 |
+| `investment_account_id` | TEXT NOT NULL | 外键到 `finance_investment_account.id`。 |
+| `symbol` | TEXT NOT NULL | 代码（如 `"600519"` / `"AAPL"` / `"000001"`）。 |
+| `name` | TEXT | 持仓名称（如"贵州茅台"）。 |
+| `shares` | TEXT NOT NULL | decimal-as-string，份额（**正数**）。 |
+| `cost_price` | TEXT NOT NULL | decimal-as-string，成本价（**正数**）。 |
+| `updated_at` | INTEGER NOT NULL | Unix 毫秒。 |
+
+索引：`idx_finance_investment_holding_account (investment_account_id)`。
+
+### 9.16 字段定义：type=quote（手动行情，阶段 5 v2）
+
+手动行情快照（type=quote，5 字段，`schema_version=2`），落地 Room 表
+`finance_quote`，**不入 records 上行**（行情为本地缓存，非业务记录）：
+
+| Room 列 | 类型 | 说明 |
+|---|---|---|
+| `id` | TEXT PK | 形如 `{symbol}:{as_of_ts}`，确定性派生（同一代码同一时点重复录入幂等）。 |
+| `symbol` | TEXT NOT NULL | 代码（如 `"600519"` / `"AAPL"`）。 |
+| `name` | TEXT | 名称（可选，便于 UI 展示）。 |
+| `price` | TEXT NOT NULL | decimal-as-string，单价（**正数**）。 |
+| `currency` | TEXT NOT NULL | ISO 4217，默认 CNY。 |
+| `as_of_ts` | INTEGER NOT NULL | 行情快照时刻，Unix 毫秒。 |
+| `source` | TEXT | 来源标签：`manual`（手动录入）/ `csv_import`（CSV 导入）；默认 `manual`。 |
+
+> quote 仅本地 Room 缓存：**不入** records 密文通道（避免密文体积膨胀）；
+> 投资账户聚合（当前市值、累计盈亏）按 `(symbol, max(as_of_ts))` 取最新
+> 行情计算。
+
+### 9.17 字段定义：type=rate（加密离线汇率，阶段 5 v2）
+
+加密离线汇率包（type=rate，4 字段 + Room 元数据列，
+`schema_version=2`），落地 Room 表 `finance_rate`：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | UUID v4。 |
+| `schema_version` | integer | 是 | 固定 `2`。 |
+| `base_currency` | string | 是 | 基准币种（ISO 4217）。 |
+| `quote_currency` | string | 是 | 目标币种（ISO 4217）。 |
+| `effective_ts` | integer (int64) | 是 | 汇率生效时刻，Unix 毫秒。 |
+
+加密包字段（密文 envelope 内 payload，与 records 同款 AAD）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `rate_minor` | string | 是 | decimal-as-string，汇率（**正数**，科学计数法精度保留 6 位有效数字）。 |
+| `source` | string | 否 | 来源标签：`pboc`（人行中间价）/ `manual`（手动录入）/ `csv_import`。 |
+| `note` | string \| null | 否 | 纯文本备注，0–200 字符。 |
+
+Room 表 `finance_rate` 在加密包字段之外另存：
+
+| Room 列 | 类型 | 说明 |
+|---|---|---|
+| `id` | TEXT PK | UUID v4。 |
+| `base_currency` | TEXT NOT NULL | 同上。 |
+| `quote_currency` | TEXT NOT NULL | 同上。 |
+| `effective_ts` | INTEGER NOT NULL | 同上。 |
+| `cipher` | BLOB NOT NULL | envelope 密文（与 records 通道同款 AEAD_Seal，**唯一字段**承载 rate 详情）。 |
+| `module` / `type` / `schema_version` / `dirty` / `deleted` | — | 系统字段（5 列）。 |
+
+> 聚合查询：客户端按 `(base_currency, quote_currency, max(effective_ts))` 取
+> 最新有效汇率；缺汇率时保守放行（预算拦截不误拦、订阅聚合按原币种
+> 累加）。**服务端永不接触 rate 明文**（仅校验 envelope 字节存在）。
+
+### 9.18 字段定义：type=attachment（附件元数据，阶段 5 v2）
+
+附件元数据（type=attachment，6 字段，`schema_version=2`），落地 Room 表
+`finance_attachment` + 块密文表 `finance_attachment_block`：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | UUID v4；同时为块密文 envelope 前缀一部分。 |
+| `schema_version` | integer | 是 | 固定 `2`。 |
+| `name` | string | 是 | 原始文件名（如"合同扫描件.pdf"）；1–120 字符。 |
+| `mime` | string | 是 | MIME 类型（如 `"application/pdf"` / `"image/jpeg"`）。 |
+| `size` | integer (int64) | 是 | 文件总字节数，**≤ 50 MiB（52428800 字节）**；客户端校验拒绝更大文件。 |
+| `sha256` | string | 是 | 文件 SHA-256 哈希（hex 64 字符）；下载后客户端校验。 |
+| `parent_ref_id` | string (UUID) | 否 | 关联对象 id（如 `contract.attachment_id` / 交易附件的 `tx.id`）；可空。 |
+| `created_at` / `updated_at` / `archived` | — | — | 见 §9.10.3。 |
+
+#### 9.18.1 附件块存储（`finance_attachment_block`，5 列）
+
+附件内容**不存于元数据密文内**，按 256 KiB / 块切片后每块独立 envelope 加密：
+
+| Room 列 | 类型 | 说明 |
+|---|---|---|
+| `attachment_id` | TEXT NOT NULL | 外键到 `finance_attachment.id`。 |
+| `offset` | INTEGER NOT NULL | 块偏移（字节，0 / 262144 / 524288 …）。 |
+| `size` | INTEGER NOT NULL | 块字节数（最后一块可能 < 262144）。 |
+| `sha256` | TEXT NOT NULL | 单块 SHA-256（hex 64 字符），客户端拼接前逐块校验。 |
+| `cipher` | BLOB NOT NULL | 块 envelope 密文；AAD 前缀 `eve:v1:attachment-block:{attachment_id}:{offset}`。 |
+
+主键：`(attachment_id, offset)`；索引：`idx_finance_attachment_block_attachment (attachment_id)`。
+
+> 块 envelope 与 §6.7 通用 records envelope 同款 XChaCha20-Poly1305；**唯一差异**
+> 是 AAD 前缀专用（不复用通用 prefix）；密文经 records 通道上行（每块一行
+> `attachment_block` 独立子记录），密文不解不入日志 / 通知 / SharedPreferences。
+> 服务端可见字段仅限块 envelope 字节长度与 `attachment_id` 引用关系，不接触
+> 文件名 / MIME / SHA-256 / 偏移量。
+
+### 9.19 Android Room v10 schema 与 §9.10–9.18 字段映射
+
+Android 端在 `EveDatabase.kt` 中以 `version = 10` 与 `MIGRATION_9_10`
+（[`EveDatabase.kt`](../../android/app/src/main/java/com/everything/eve/data/EveDatabase.kt)）
+落地 v2 新增表。本节列出 v10 Room 实际列与 §9.10–9.18 的字段对照表，
+便于后续 Room schema 演进核对；明文 JSON 字段定义仍以 §9.11–9.18 为
+唯一准绳。
+
+#### 9.19.1 v2 子类型表清单（共 5 张新表 + 2 张缓存表）
+
+| 表名 | 用途 | 主键 | 索引 |
+|---|---|---|---|
+| `finance_investment_account` | 投资账户明文缓存（records 密文通道副本） | `id` | `(updated_at)` / `(dirty)` |
+| `finance_investment_holding` | 持仓本地缓存（**不入** records） | `id` | `(investment_account_id)` |
+| `finance_quote` | 手动行情快照（**不入** records） | `id` | `(symbol, as_of_ts)` |
+| `finance_rate` | 加密离线汇率包（密文通道） | `id` | `(base_currency, quote_currency, effective_ts)` / `(dirty)` |
+| `finance_attachment` | 附件元数据明文缓存（密文通道） | `id` | `(parent_ref_id)` / `(dirty)` |
+| `finance_attachment_block` | 附件块密文 | `(attachment_id, offset)` | `(attachment_id)` |
+
+> v6–v9 表（`finance_account` / `finance_card` / `finance_tx` /
+> `finance_reminder_log`）保持原状；`finance_rate` 在 B5 已存在，
+> v10 不再重建（仅核对列口径）。
+
+#### 9.19.2 finance_investment_account（16 列 = 11 业务字段 + 5 系统字段）
+
+业务字段与 §9.15 对应（11 字段），加 5 系统字段共 16 列：
+
+| Room 列 | 类型 | 对应 §9.15 字段 | 说明 |
+|---|---|---|---|
+| `id` | TEXT PK | `id` | UUID v4。 |
+| `schema_version` | INTEGER NOT NULL DEFAULT 2 | `schema_version` | v2 固定 `2`。 |
+| `name` | TEXT NOT NULL | `name` | 1–40 字符。 |
+| `broker` | TEXT | `broker` | 1–40 字符；可空。 |
+| `kind` | TEXT NOT NULL | `kind` | 6 档 enum。 |
+| `currency` | TEXT NOT NULL | `currency` | ISO 4217。 |
+| `principal_minor` | TEXT | `principal_minor` | decimal-as-string；可空。 |
+| `include_in_net_assets` | INTEGER NOT NULL DEFAULT 1 | `include_in_net_assets` | 0/1。 |
+| `last_synced_ts` | INTEGER | `last_synced_ts` | Unix 毫秒；可空。 |
+| `note` | TEXT | `note` | 0–200 字符；可空。 |
+| `color` | TEXT | `color` | 调色板 key；可空。 |
+| `icon` | TEXT | `icon` | 可空。 |
+| `archived` | INTEGER NOT NULL DEFAULT 0 | `archived` | 0/1。 |
+| `created_at` / `updated_at` | INTEGER NOT NULL | 共性 | Unix 毫秒。 |
+| `module` / `type` / `dirty` / `deleted` | — | 系统字段 | 见 §9.9.1。 |
+
+索引：`idx_finance_investment_account_updated_at (updated_at)` /
+`idx_finance_investment_account_dirty (dirty)`。
+
+#### 9.19.3 finance_rate（11 列 = 5 明文字段 + 1 密文 + 5 系统字段）
+
+业务字段与 §9.17 对应（4 字段 + envelope 1 列），加 5 系统字段共 11 列：
+
+| Room 列 | 类型 | 对应 §9.17 字段 | 说明 |
+|---|---|---|---|
+| `id` | TEXT PK | `id` | UUID v4。 |
+| `base_currency` | TEXT NOT NULL | `base_currency` | ISO 4217。 |
+| `quote_currency` | TEXT NOT NULL | `quote_currency` | ISO 4217。 |
+| `effective_ts` | INTEGER NOT NULL | `effective_ts` | Unix 毫秒。 |
+| `cipher` | BLOB NOT NULL | envelope 密文 | rate_minor / source / note 全部在 envelope 内。 |
+| `schema_version` | INTEGER NOT NULL DEFAULT 2 | 系统字段 | v2 固定 `2`。 |
+| `module` / `type` / `dirty` / `deleted` | — | 系统字段 | 见 §9.9.1。 |
+
+索引：`idx_finance_rate_pair_ts (base_currency, quote_currency, effective_ts)` /
+`idx_finance_rate_dirty (dirty)`。
+
+#### 9.19.4 finance_attachment（12 列 = 7 明文字段 + 5 系统字段）
+
+业务字段与 §9.18 对应（6 字段），加 5 系统字段共 12 列：
+
+| Room 列 | 类型 | 对应 §9.18 字段 | 说明 |
+|---|---|---|---|
+| `id` | TEXT PK | `id` | UUID v4。 |
+| `name` | TEXT NOT NULL | `name` | 1–120 字符。 |
+| `mime` | TEXT NOT NULL | `mime` | MIME 类型。 |
+| `size` | INTEGER NOT NULL | `size` | ≤ 50 MiB（52428800）。 |
+| `sha256` | TEXT NOT NULL | `sha256` | hex 64 字符。 |
+| `parent_ref_id` | TEXT | `parent_ref_id` | 外键引用（可空）。 |
+| `archived` | INTEGER NOT NULL DEFAULT 0 | `archived` | 0/1。 |
+| `created_at` / `updated_at` | INTEGER NOT NULL | 共性 | Unix 毫秒。 |
+| `schema_version` / `module` / `type` / `dirty` / `deleted` | — | 系统字段 | 见 §9.9.1。 |
+
+索引：`idx_finance_attachment_parent (parent_ref_id)` /
+`idx_finance_attachment_dirty (dirty)`。
+
+#### 9.19.5 finance_attachment_block（5 列 + 复合主键）
+
+业务字段与 §9.18.1 对应（5 字段）：
+
+| Room 列 | 类型 | 对应 §9.18.1 字段 | 说明 |
+|---|---|---|---|
+| `attachment_id` | TEXT NOT NULL | `attachment_id` | 外键到 `finance_attachment.id`。 |
+| `offset` | INTEGER NOT NULL | `offset` | 块偏移（字节）。 |
+| `size` | INTEGER NOT NULL | `size` | 块字节数。 |
+| `sha256` | TEXT NOT NULL | `sha256` | hex 64 字符。 |
+| `cipher` | BLOB NOT NULL | envelope 密文 | 块 envelope；AAD 前缀专用。 |
+
+主键：`(attachment_id, offset)`；索引：`idx_finance_attachment_block_attachment (attachment_id)`。
+
+#### 9.19.6 v2 字段数对账小结
+
+| 子类型 | §9.10–9.18 业务字段 | Room 业务列 | Room 系统列 | Room 总列 |
+|---|---|---|---|---|
+| `subscription` | 14 | 0（仅 records） | 0 | 0（无独立表） |
+| `policy` | 14 | 0（仅 records） | 0 | 0（无独立表） |
+| `loan` | 16 | 0（仅 records） | 0 | 0（无独立表） |
+| `contract` | 12 | 0（仅 records） | 0 | 0（无独立表） |
+| `investment_account` | 11 | 11 | 5 | 16 |
+| `quote` | 5 + 1 source | 7 | 0（不入 records） | 7 |
+| `rate` | 4 + 1 envelope | 5 | 5 | 10（B5 简版，v10 不改） |
+| `attachment` | 6 + 2 (parent_ref_id) | 9 | 5 | 14（12 元数据 + 5 块 - 3 共性） |
+| `attachment_block` | 5 | 5 | 0 | 5 |
+
+> 说明：`subscription` / `policy` / `loan` / `contract` 四类走 records 通道，
+> Room **不**为它们建独立表，聚合在端侧内存进行；服务端永不接触明文。
+
+#### 9.19.7 Room 迁移纪律（v9 → v10）
+
+- 所有 DDL 走 `MIGRATION_9_10` 显式迁移。
+- **新增表**一律 `CREATE TABLE IF NOT EXISTS` + 同步索引。
+- **新增列**一律 `ALTER TABLE ... ADD COLUMN ... NOT NULL DEFAULT ...`。
+- **严禁** `DROP` / `ALTER TABLE DROP COLUMN` / 重命名。
+- 旧数据按默认值兜底；迁移后必须跑 `MigrationTestHelper` 验证
+  （v9 fixture 升级 v10 后字段一致）。
+- 跨设备 records 同步过程中若发现某条记录 `schema_version=2` 但本地
+  Room 缺表 / 缺列，按"缺列默认 NULL / 缺表按业务规则新建"处理，绝不
+  抛错阻断同步。
+
+### 9.20 v2 跨端一致性要求（财务模块扩展）
+
+字段定义为**跨端契约**：Web `web/src/finance/types.ts`、Android
+`FinanceInvestmentAccountEntity.kt` / `FinanceQuoteEntity.kt` /
+`FinanceRateEntity.kt` / `FinanceAttachmentEntity.kt` /
+`FinanceAttachmentBlockEntity.kt` 与本节**逐字段一致**（命名 / 单位 /
+枚举完全相同），任何字段变更须三端同改 + 同步更新本文档 + 更新
+`docs/schemas/finance.schema.json` + 更新 fixture（保持 SHA-256 一致）。
+
+#### 9.20.1 单位约定
+
+- 所有金额字段（`cost_minor` / `premium_minor` / `coverage_minor` /
+  `principal_minor` / `repaid_minor` / `amount_minor` / `rate_minor` /
+  `principal_minor` / `shares` / `cost_price` / `price`）一律
+  **decimal-as-string**，避免浮点精度丢失；服务端不解密故无二次校验。
+- v2 引入 `_minor` 后缀字段名（与 v1 `balance` / `amount` 平铺命名
+  并存）：`_minor` 表示"以最小货币单位计量的金额字符串"，仅命名差异，
+  **数值语义不变**；详见 `docs/finance.md` §1.3。
+
+#### 9.20.2 时间戳约定
+
+- 所有时间戳字段（`start_ts` / `next_bill_ts` / `expires_ts` /
+  `signed_ts` / `due_ts` / `repaid_ts` / `last_synced_ts` /
+  `effective_ts` / `as_of_ts` / `created_at` / `updated_at`）一律
+  Unix 毫秒 `int64`，与既有 4a / 4b / 5v1 字段口径一致。
+
+#### 9.20.3 枚举约定
+
+- 所有 enum 字段（`billing_cycle` / `kind` / `direction` /
+  `payment_method` / `auto_renew`）的字符串值在 Web / Android /
+  JSON Schema / 本文档四处**逐字符一致**；任何枚举值新增必须三端
+  同改 + 同步更新本文档与 JSON Schema。
+
+#### 9.20.4 隐私字段纪律（v2 强化）
+
+| 字段 | 敏感度 | 持久化边界 |
+|---|---|---|
+| `policy.policy_number` | 高 | **加密入密文**（`policy_number_encrypted=true`）；UI 显示截末 4 位，识别同保单依赖 `(insurer, name, last4)` 联合指纹 |
+| `loan.counterparty` | 中 | 仅 Room + Web 内存 |
+| `loan.interest_rate_pct` | 中 | 仅 Room + Web 内存 |
+| `contract.counterparty` | 中 | 仅 Room + Web 内存 |
+| `contract.amount_minor` | 高 | 仅 Room + Web 内存；不写日志 |
+| `subscription.cost_minor` | 高 | 仅 Room + Web 内存；不写日志 |
+| `policy.premium_minor` | 高 | 仅 Room + Web 内存；不写日志 |
+| `investment_account.principal_minor` | 中 | 仅 Room + Web 内存 |
+| `quote.price` | 中 | 仅 Room；不入 records |
+| `rate.cipher` 内 `rate_minor` | 高 | 仅 envelope 密文（服务端不可见） |
+| `attachment.name` / `mime` / `sha256` / `size` | 中 | 仅 envelope 内明文 + Room |
+| `attachment_block.cipher` | 高 | 仅 envelope 密文（服务端不可见） |
+
+通知文案零知识纪律（继承 §9.7）：到期 / 扣费 / 还款 / 投资汇总文案**不渲染金额
+数字 / 卡号后四位 / 保单号后四位 / 具体日期数字**，仅渲染抽象话术（如"💳
+信用卡账单日 3 天后"）+ 跳转路由 id。
+
+#### 9.20.5 测试 fixture 与铁律
+
+- **测试 fixture**：`web/src/finance/__fixtures__/{subscription,policy,
+  loan,contract,investment_account,quote,rate,attachment}-cases.json`
+  （与 Android 镜像加载，SHA-256 一致）所有用例的字段名按本节文档。
+- **字段变更流程**：Web types.ts、Android 对应 Entity、本文档三端**必须**
+  同改 + 同步更新本节字段表与目录入口，并更新 fixture（保持 SHA-256 一致
+  仍由 fixture 派生）。
+- **零知识 grep 必查项**：v2 子类型字段名（`policy_number` / `principal_minor` / `repaid_minor` / `coverage_minor` / `premium_minor`）不出现保单号完整字符串 / `principal_minor` / 实际金额数字在 Android `Log.*` / `println` / `System.out` / 通知文案模板 / SharedPreferences key 命名中（`policy_number` 字段名本身允许出现，**保单号完整值与金额数字不允许**）。
 
 ---
 

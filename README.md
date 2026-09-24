@@ -18,7 +18,12 @@
 > **阶段 4b 日程/日历已落地**（双端事件 + 重复规则 + 本地闹钟；沿用 records 加密通道，
 > 服务端零改动；详见下文"日历（阶段 4b）"小节），
 > **阶段 5 财务 v1 已落地**（账户/银行卡/记账 + 月报预算 + 资产看板 + 账单/还款提醒；
-> 沿用 records 加密通道 + 单闹钟链式调度复用；详见下文"财务（阶段 5）"小节）。
+> 沿用 records 加密通道 + 单闹钟链式调度复用；详见下文"财务（阶段 5）"小节），
+> **阶段 5 v2 已落地**（订阅 / 保单 / 借款 / 合同 / 投资账户 / 手动行情 /
+> 加密离线汇率包 / 附件 envelope + 预算硬约束 + OCR / 语音记账；
+> Room v6→v10 五段迁移，字段表见 [docs/module-schemas.md](docs/module-schemas.md)
+> §9.10–9.20，文档见下文"财务（阶段 5）"小节与
+> [docs/finance.md](docs/finance.md) §12–§15）。
 > 完整路线与模块全景见 [.trae/documents/everything_plan.md](.trae/documents/everything_plan.md)。
 
 ## 快速开始
@@ -112,15 +117,20 @@ Android 开启方式见 [docs/android.md](docs/android.md) "日程/日历（阶�
   通知文案仅渲染抽象描述（"即将开始" / "N 分钟后开始"），不渲染 start_ts
   原文。
 
-## 财务（阶段 5）
+## 财务（阶段 5 v1 + v2）
 
 阶段 5 在 Web 与 Android 双端落地零知识个人财务管理——账户 / 银行卡 / 日常记账
 三类条目，月报预算阈值与资产看板聚合，账单日 / 还款日本地提醒。
+**v2 在 v1 之上扩展 8 类子类型**（订阅 / 保单 / 借款 / 合同 / 投资账户 /
+手动行情 / 加密离线汇率包 / 附件）+ 预算硬约束（B6）+ OCR / 语音记账。
 条目作为 `module="finance"` 记录走既有 records 加密信道（**服务端零改动**，
 无新表、无新接口、无 AAD 前缀），复用 `sealRecord` ↔ `openRecord`；
+v2 新增表（`finance_investment_account` / `finance_investment_holding` /
+`finance_quote` / `finance_attachment` / `finance_attachment_block`）同样
+走 records 通道副本 + Room 本地缓存双轨。
 聚合与月报阈值**全部在端侧纯函数计算**，**不上行服务端**。
 字段定义见 [docs/finance.md](docs/finance.md)；Room 落地详见
-[docs/android.md](docs/android.md) "财务模块（阶段 5）"章。
+[docs/android.md](docs/android.md) "财务模块（阶段 5 v1 + v2）"章。
 
 - **账户**：现金 / 存款 / 股票 / 钱包 / 其他 5 类；余额 decimal-as-string 非负；
   归档后不计入资产看板。资产 / 负债分别聚合：
@@ -162,7 +172,70 @@ Android 开启方式见 [docs/android.md](docs/android.md) "日程/日历（阶�
   （"💳 信用卡账单已生成" / "💳 信用卡还款临近"），**绝不渲染**金额、
   卡号后四位、具体日期数字；服务端不解密、不聚合、不缓存。
 
-## 功能矩阵（阶段 4b / 阶段 5 关键能力）
+### 财务 v2 增量（订阅 / 保单 / 借款 / 合同 / 投资账户 / 手动行情 / 汇率 / 附件）
+
+阶段 5 v2 在 v1 三类条目之上扩展为**十二类子类型**（account / card / tx /
+budget / subscription / policy / loan / contract / investment_account /
+quote / rate / attachment），全部走 §5 records 加密通道、AAD 不变；
+明文统一 `schema_version=2`，聚合在端侧内存计算、**不新增**任何服务端接口。
+字段表与 Room 映射见 [docs/module-schemas.md](docs/module-schemas.md)
+§9.10–9.20；envelope 协议见 [docs/crypto.md](docs/crypto.md) §6.7。
+
+- **订阅（subscription）**：5 档 billing_cycle（monthly / quarterly /
+  yearly / weekly / one_shot）+ `cost_minor` + `provider` + `next_bill_ts`；
+  T-3 提醒 / T-1 兜底（与 v1 账单/还款提醒同款单闹钟链）。
+- **保单（policy）**：6 档 kind（life / health / auto / property /
+  travel / other）+ `policy_number`（≤100 字符，完整保单号入密文；
+  `policy_number_encrypted` 默认 `true`；UI 列表按末 4 位 + `(insurer, name, last4)`
+  联合指纹识别同保单）+ `coverage_minor` /
+  `premium_minor`；到期日触发 T-30 / T-7 两档提醒。
+- **借款（loan）**：`direction` ∈ `lend_out` / `lend_in` 双向记账；
+  `principal_minor` / `interest_rate_pct` / `repaid_minor` 客户端纯函数计算
+  剩余应付；到期提醒 T-7 / T-1。
+- **合同（contract）**：`rental` / `employment` / `sales` / `service` /
+  `invoice` / `other` 6 档；`attachment_id` 引用 §9.18 attachment
+  元数据，电子合同 PDF / 发票扫描件经附件 envelope 加密封存；到期提醒
+  T-30 / T-7。
+- **投资账户（investment_account）**：6 档 kind（stock / fund / crypto /
+  bond / cash_mgmt / other）+ `principal_minor` + `include_in_net_assets`
+  boolean（`archived=true` 自动视为 `false`）；持仓表
+  `finance_investment_holding`（symbol / shares / cost_price）**仅 Room
+  缓存、不入** records；聚合"当前市值 / 累计收益"按 `quote` 表最新价计算。
+- **手动行情（quote）**：单字段 `price` decimal-as-string + `as_of_ts` +
+  `source`（`manual` / `csv_import`）；**仅 Room 缓存**（不入 records）；
+  投资账户聚合按 `(symbol, max(as_of_ts))` 取最新价。
+- **加密离线汇率包（rate）**：`base_currency` / `quote_currency` /
+  `effective_ts` 索引列 + 单 `cipher` BLOB 列（`rate_minor` / `source` /
+  `note` 全部在 envelope 内）；服务端永不可见明文；缺汇率时**保守放行**
+  （预算拦截不误拦、订阅聚合按原币种累加）。
+- **附件 envelope（attachment）**：256 KiB / 块切片，≤ 50 MiB
+  （52428800 字节）；每块独立 envelope 加密（AAD 前缀
+  `eve:v1:attachment-block:{attachment_id}:{offset}`，与 §6.7 records
+  envelope 共用 XChaCha20-Poly1305）；元数据 `name` / `mime` / `size` /
+  `sha256` / `parent_ref_id` 入明文 + Room；下载后客户端逐块 sha256 验签；
+  文件名 / MIME / SHA-256 / 块偏移**不入日志 / 通知 / SharedPreferences**。
+- **预算硬约束（B6）**：分类预算 `scope` / `category` / `amount_minor` /
+  `warning_threshold_pct` / `block_threshold_pct`；`BudgetEnforcer`
+  在保存流水时按 CST 月度桶聚合，命中 block 阈值弹"超支确认"对话框；
+  `finance_tx.overspend_acknowledged` 审计列留痕；异币支出经 §9.17
+  rate 表折算到预算币种。
+- **OCR / 语音记账（v2 AI 联动）**：Android 端相机截图或语音输入 →
+  端侧 ML Kit / 平台离线 ASR 识别金额 / 分类 / 时间 → 弹"导入为流水"
+  对话框 → 用户确认后入 `finance_tx`；**服务端不接触图像 / 音频**，
+  模型不接触原始数据；详见 [docs/finance.md](docs/finance.md) §10。
+- **Web 端提醒（v2）**：Service Worker + Notification API（路由 `/finance`）
+  支持订阅扣费 / 保单到期 / 借款到期的浏览器通知；触发文案**不渲染**
+  金额 / 卡号后四位 / 保单号后四位 / 具体日期数字。
+- **Room 演进（v6 → v10）**：`MIGRATION_5_6` / `6_7` / `7_8` / `8_9` /
+  `9_10` 五段显式迁移；新增表一律 `CREATE TABLE IF NOT EXISTS` +
+  同步索引；新增列一律 `ALTER TABLE ... ADD COLUMN ... NOT NULL DEFAULT ...`；
+  **严禁** DROP / DROP COLUMN / 重命名（详见 module-schemas.md §9.19.7）。
+- **零知识纪律（v2 强化）**：`policy.policy_number` 加密入密文（与 `card.number`
+  同款 envelope），UI 仅显示末 4 位；通知文案零渲染（金额 / 卡号后四位 /
+  保单号后四位 / 合同号后四位 / 具体日期数字）；服务端仅校验 envelope 字节
+  存在，不接触任何明文（详见 module-schemas.md §9.20.4）。
+
+## 功能矩阵（阶段 4b / 阶段 5 v1 + v2 关键能力）
 
 | 能力 | Android | Web | Go（服务端） |
 |---|---|---|---|
@@ -173,6 +246,17 @@ Android 开启方式见 [docs/android.md](docs/android.md) "日程/日历（阶�
 | 财务（账户 / 银行卡 / 记账 + 月报预算 + 资产看板） | ✅（`FinanceScreen` + Account/Card/Tx Editor + Room v6 + FinanceRepository 双写） | ✅（`/finance` + Pinia store `stores/finance.ts` + 编辑器） | N/A（服务端零改动，复用 records 通道透传密文；聚合 / 月报阈值全部端侧纯函数计算） |
 | Luhn 卡号校验 + 仅后四位入库 | ✅（`Luhn.kt` + Room `finance_card.last4`） | ✅（`luhn.ts` + Web 内存 `last4`） | N/A（完整卡号不入密文、不入 Room、不入日志） |
 | 账单日 / 还款日本地提醒 | ✅（`NextCardFiring.kt` + `ReminderScheduler.rebuildChain` 单闹钟链式 + `ReminderReceiver` module 路由） | N/A（仅 Android 端本地提醒） | N/A |
+| 订阅扣费提醒（v2） | ✅（订阅编辑器 + `next_bill_ts` + 同款单闹钟链路由） | ✅（`/finance` 订阅页 + T-3 提醒） | N/A |
+| 保单到期提醒（v2） | ✅（T-30 / T-7 两档 + `policy.policy_number` 加密入密文 + UI 末 4 位） | ✅（`/finance` 保单页 + 浏览器通知） | N/A |
+| 借款到期提醒（v2） | ✅（`direction` 双向记账 + T-7 / T-1 + `principal_minor - repaid_minor` 客户端纯函数） | ✅（`/finance` 借款页） | N/A |
+| 合同 / 发票到期 + 附件 envelope（v2） | ✅（合同编辑器 + 256 KiB 块 envelope + `finance_attachment` + `finance_attachment_block`） | ✅（合同页 + 附件上传/下载 sha256 验签） | N/A（块密文经 records 通道上行；服务端仅校验 envelope 字节存在） |
+| 投资账户 + 手动行情（v2） | ✅（`finance_investment_account` + `finance_investment_holding` + `finance_quote` + CSV 导入） | ✅（`/finance/investments` + 当前市值 / 累计收益聚合） | N/A（投资账户 records 通道；quote 仅 Room 缓存，不入 records） |
+| 加密离线汇率包（v2） | ✅（`finance_rate` 表 + envelope 密文 + 客户端纯函数聚合；缺汇率保守放行） | ✅（`/finance/rates` + CSV 导入） | N/A（rate 明文仅 envelope 内，服务端永不可见） |
+| 附件 envelope（v2） | ✅（256 KiB / 块 + ≤50 MiB + sha256 + `eve:v1:attachment-block:{id}:{offset}` 前缀） | ✅（上传 / 下载 / sha256 验签） | N/A（服务端零接触） |
+| 预算硬约束（v2，B6） | ✅（`BudgetEnforcer` + `finance_tx.overspend_acknowledged` 审计列 + CST 月度桶聚合） | ✅（预算页 + 超支确认弹窗） | N/A（阈值与判定全部端侧） |
+| OCR / 语音记账（v2） | ✅（`OcrCaptureSheet` + `VoiceCaptureSheet` + 端侧 ML Kit / 离线 ASR） | ✅（粘贴截图 OCR + 浏览器 Web Speech API） | N/A（图像 / 音频不离开端侧） |
+| Web 端 Notification API（v2） | N/A | ✅（Service Worker + Notification API + 订阅扣费 / 保单到期 / 借款到期） | N/A |
+| Room v6 → v10 五段迁移（v2） | ✅（`MIGRATION_5_6` / `6_7` / `7_8` / `8_9` / `9_10`；新增表 + 新增列；严禁 DROP / 重命名） | N/A（Web 仅消费 records 密文） | N/A（服务端零接触） |
 
 ## 已知问题
 
@@ -217,6 +301,44 @@ Android 开启方式见 [docs/android.md](docs/android.md) "日程/日历（阶�
   FinanceRepository 双写、`ReminderReceiver` module 路由等已并
   FU-7 关闭条件清单（无设备/CI 环境暂不强制；详见
   `.trae/specs/stage5-finance/tasks.md`）。
+
+### 阶段 5 v2 限制
+
+- **投资账户聚合仅端侧**：当前市值 / 累计收益 / 收益率按
+  `finance_quote` 表最新价 × `finance_investment_holding.quantity`
+  客户端纯函数计算；quote 不入 records 密文通道，**多设备需各自重新
+  录入行情**才能看到聚合（详见 module-schemas.md §9.15.1 / §9.16）。
+- **手动行情仅 Room 缓存**：`finance_quote` 表仅 Room 缓存、不上行
+  records、不入 envelope；卸载 / 重装 / 跨设备同步后行情丢失需重新
+  录入；CSV 导入走 `QuoteImporter`，单次 ≤10000 行 + 去重（同
+  `(symbol, as_of_ts)` 仅保留最高价源）。
+- **加密离线汇率包缺汇率保守放行**：`finance_rate` 表缺对应
+  `(base_currency, quote_currency, effective_ts)` 汇率时，订阅聚合按
+  原币种累加、预算超支拦截不误拦、多币种折算跳过折算（详见
+  module-schemas.md §9.17 + finance.md §13）。
+- **附件 ≤50 MiB**：客户端校验 `attachment.size` 超过 52428800 字节
+  直接拒绝；超大文件未来考虑分卷（v3 候选）；sha256 客户端验签失败
+  阻断落库并提示用户重传（详见 module-schemas.md §9.18 + crypto.md
+  §6.7）。
+- **附件块 envelope 错位容错**：缺块时 UI 标红（"附件不完整"）但不抛
+  异常、不阻断其他功能；服务端密文对账走 records 通道（块缺失会被
+  records 校验发现并提示重传；本端仅做"打开失败"友好提示）。
+- **`policy.policy_number` 加密入密文铁律**：完整保单号入
+  `policy.policy_number`（≤100 字符）+ `policy_number_encrypted=true`
+  走 v1 `card.number` 同款密文 envelope；UI 显示末 4 位 + 通知文案不
+  渲染；识别同保单依赖 `(insurer, name, last4)` 联合指纹（与 `card.last4`
+  识别款铁律类比，详见 module-schemas.md §9.20.4 隐私字段纪律 12 行）。
+- **Web Notification API 需 HTTPS + Service Worker**：浏览器通知必须
+  HTTPS（或 localhost）+ Service Worker 注册；权限拒绝时降级为站内
+  横幅（不阻断功能）；Safari iOS 限制较多，本阶段 5 v2 仅在 Chrome /
+  Edge / Firefox 桌面验证。
+- **OCR / 语音记账端侧识别有限**：Android 走 ML Kit Text Recognition
+  v2（端侧）+ 离线 ASR（vosk）；Web 走浏览器 Web Speech API；识别
+  错误需用户校对后落库（金额 / 商家 / 日期字段均可手动改）；图像 /
+  音频不离开端侧，**不上行服务端**。
+- **Room v9 → v10 迁移容错**：缺列默认 NULL、缺表按业务规则
+  `CREATE TABLE IF NOT EXISTS`；迁移失败不抛错阻断同步；UI 在下次
+  启动自动重试（详见 module-schemas.md §9.19.7 Room 迁移纪律）。
 
 ## 文档
 
