@@ -57,6 +57,8 @@ import com.everything.eve.finance.FinanceAggregator
 import com.everything.eve.finance.FinanceRecords
 import com.everything.eve.finance.LoanRecord
 import com.everything.eve.finance.PolicyRecord
+import com.everything.eve.finance.ReceiptHint
+import com.everything.eve.finance.SpeechHint
 import com.everything.eve.finance.SubscriptionRecord
 import com.everything.eve.finance.ValidationResult
 import com.everything.eve.finance.NextCardFiring
@@ -142,6 +144,22 @@ data class FinanceEditorBuffer(
     val holder: String = "",
     /** 发卡行（卡片专用）。 */
     val issuer: String = "",
+)
+
+/**
+ * B8 AI 联动记账提示状态（小票 OCR / 语音记账）。
+ *
+ * 零知识约定：
+ *   - 仅承载纯函数层解析出的【限定要素】（小票：金额 / 日期 / 商家；
+ *     语音：金额 / 分类），识别原文从不出现在此；
+ *   - 纯内存态：不进主 UiState、不进 persistV2 / saveBuffer，应用到
+ *     编辑器 buffer 后对应字段立即清空。
+ */
+data class AiHintState(
+    /** 小票三要素；null 表示当前没有待应用的小票提示。 */
+    val receipt: ReceiptHint? = null,
+    /** 语音金额与分类；null 表示当前没有待应用的语音提示。 */
+    val speech: SpeechHint? = null,
 )
 
 // =============================================================================
@@ -366,6 +384,94 @@ open class FinanceViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 默认折算目标币只读流（Dashboard 入口与设置屏订阅）。 */
     val defaultCurrencyState = defaultCurrencyFlow.asStateFlow()
+
+    // =============================================================================
+    // B8 AI 联动记账提示（小票 OCR / 语音记账）—— 纯内存、零持久化
+    // ============================================================================
+    // 关键红线：
+    //   1. hint 走【独立 StateFlow】，绝不接进 14 路 combine 主 state
+    //      （主 state 的任何变化都可能被下游误当作业务数据；且必须保证
+    //      hint 不参与任何持久化编排，不会触发 persistV2 / saveBuffer）；
+    //   2. hint 只在用户点「使用该结果」时做一次纯映射写入编辑器 buffer，
+    //      映射完成后立即清空对应字段；原文（OCR / 语音文本）从不进入 VM；
+    //   3. 本文件不打任何日志；即使 VM 销毁 hint 也只是随内存消失，不落盘。
+    // ============================================================================
+
+    private val _aiHint = MutableStateFlow(AiHintState())
+
+    /** AI 提示只读流（编辑器订阅；Sheet 关闭 / 应用后即清空）。 */
+    val aiHint: kotlinx.coroutines.flow.StateFlow<AiHintState> = _aiHint.asStateFlow()
+
+    /** 暂存小票三要素（来自 Sheet 回调；未点使用前只在内存等待）。 */
+    fun setReceiptHint(hint: ReceiptHint?) {
+        _aiHint.value = _aiHint.value.copy(receipt = hint)
+    }
+
+    /** 暂存语音金额与分类（来自 Sheet 回调；未点使用前只在内存等待）。 */
+    fun setSpeechHint(hint: SpeechHint?) {
+        _aiHint.value = _aiHint.value.copy(speech = hint)
+    }
+
+    /**
+     * 把小票 hint 纯映射到编辑器 buffer，并清空 receipt 字段。
+     *
+     * 映射规则（仅覆盖非空要素）：
+     *  - amountMinor：分转元（BigDecimal.movePointLeft(2) 去尾零）→ balance，
+     *    例：3500 得「35」、3550 得「35.5」、10005 得「100.05」；
+     *  - ts：小票日期 → occurredAtMs；
+     *  - merchant：商家名 → note，【仅当备注为空时才覆盖】，避免冲掉用户已填备注。
+     *
+     * @return 映射后的 buffer；没有小票 hint 时原样返回。
+     */
+    fun applyReceiptHintToBuffer(buffer: FinanceEditorBuffer): FinanceEditorBuffer {
+        val hint = _aiHint.value.receipt ?: return buffer
+
+        var result = buffer
+        hint.amountMinor?.let { minor ->
+            // 精确十进制换算，禁止 Double；与 Sheet 预览共用同一换算函数。
+            result = result.copy(balance = financeMinorToYuan(minor))
+        }
+        hint.ts?.let { ts ->
+            result = result.copy(occurredAtMs = ts)
+        }
+        hint.merchant?.takeIf { it.isNotBlank() && result.note.isBlank() }?.let { merchant ->
+            // 空备注才覆盖：用户已填的备注优先。
+            result = result.copy(note = merchant)
+        }
+
+        // 映射完成即清空：hint 不做任何停留，绝不进入后续保存链路的其他通道。
+        _aiHint.value = _aiHint.value.copy(receipt = null)
+        return result
+    }
+
+    /**
+     * 把语音 hint 纯映射到编辑器 buffer，并清空 speech 字段。
+     *
+     * 映射规则（仅覆盖非空要素）：
+     *  - amountMinor：分转元（BigDecimal.movePointLeft(2) 去尾零）→ balance；
+     *  - category：分类标签 → category；
+     *  - ts：语音语义时间（昨天 / 前天已在纯函数层处理）→ occurredAtMs。
+     *
+     * @return 映射后的 buffer；没有语音 hint 时原样返回。
+     */
+    fun applySpeechHintToBuffer(buffer: FinanceEditorBuffer): FinanceEditorBuffer {
+        val hint = _aiHint.value.speech ?: return buffer
+
+        var result = buffer
+        hint.amountMinor?.let { minor ->
+            result = result.copy(balance = financeMinorToYuan(minor))
+        }
+        hint.category?.takeIf { it.isNotBlank() }?.let { category ->
+            result = result.copy(category = category)
+        }
+        hint.ts.let { ts ->
+            result = result.copy(occurredAtMs = ts)
+        }
+
+        // 映射完成即清空，绝不持久化。
+        _aiHint.value = _aiHint.value.copy(speech = null)
+        return result
+    }
 
     /**
      * VM 创建即从 records 通道回填 v2 四类记录，并回填 B5 汇率表与默认币种。

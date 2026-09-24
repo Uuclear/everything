@@ -30,6 +30,16 @@
          alarm clock 类应用）；显式声明以向用户明示意图。 -->
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
+    <!-- ================= B8：AI 联动记账（小票 OCR / 语音记账） =================
+         两项权限均为「运行时申请」：用户点对应入口时才弹系统授权框。
+         用户拒绝授权时仅隐藏对应能力入口、显示说明文案，绝不阻断核心手工记账。
+         OCR 与语音识别全程在设备本地完成（CameraX + ML Kit 自包含模型 +
+         系统离线 SpeechRecognizer），照片、语音与识别原文均不上传、不落库。
+         camera.any 声明 required=false：无摄像头设备（如部分平板）仍可安装本应用。 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+
     <application
         android:name=".EveApplication"
         android:allowBackup="false"

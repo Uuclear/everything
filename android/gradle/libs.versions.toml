@@ -22,6 +22,10 @@ androidxTestExtJunit = "1.2.1"
 androidxTestCore = "1.6.1"
 json = "20240303"
 coroutinesTest = "1.9.0"
+# B8：CameraX 相机预览/取帧、ML Kit 端侧文字识别、Robolectric 本地单测
+camerax = "1.4.2"
+mlkitTextRecognition = "16.0.1"
+robolectric = "4.14.1"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -66,6 +70,19 @@ json = { module = "org.json:json", version.ref = "json" }
 # 协程测试：Dispatchers.setMain(UnconfinedTestDispatcher()) 让 viewModelScope.launch
 # 在 JVM 单测（无 Android main looper）下可立即执行（B3 附件 VM 测试必需）
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutinesTest" }
+
+# ===== B8：相机预览/取帧（CameraX 四件套） =====
+camerax-core = { module = "androidx.camera:camera-core", version.ref = "camerax" }
+camerax-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camerax" }
+camerax-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camerax" }
+camerax-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
+# ML Kit 文字识别（自包含 AAR：模型随包下发、全程 on-device、无 GMS 云依赖）
+mlkit-text-recognition = { module = "com.google.mlkit:text-recognition", version.ref = "mlkitTextRecognition" }
+# ML Kit 中文文字识别模型构件：text-recognition 16.0.1 仅为 Latin 门面薄壳，
+# ChineseTextRecognizerOptions 位于本独立构件（同为 16.0.1，全程端侧、无云依赖）
+mlkit-text-recognition-chinese = { module = "com.google.mlkit:text-recognition-chinese", version.ref = "mlkitTextRecognition" }
+# Robolectric：JVM 内模拟 Android 运行环境（B8 Compose Sheet 本地单测）
+robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

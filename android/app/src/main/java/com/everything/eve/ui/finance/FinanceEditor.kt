@@ -95,6 +95,10 @@ fun FinanceEditor(
     var pendingBlock by remember { mutableStateOf<com.everything.eve.finance.BudgetCheckResult?>(null) }
     val context = LocalContext.current
 
+    // B8 AI 联动 Sheet 可见性：互斥弹一个；false 时不挂载任何 Sheet。
+    var showOcrSheet by remember { mutableStateOf(false) }
+    var showSpeechSheet by remember { mutableStateOf(false) }
+
     /**
      * B6 统一保存入口：
      *  - 非流水（账户 / 卡片）：保持原行为，直接保存退出；
@@ -172,6 +176,8 @@ fun FinanceEditor(
                     buffer = buffer,
                     accounts = vm.state.collectAsState().value.accounts,
                     onChange = { buffer = it },
+                    onOcrEntry = { showOcrSheet = true },
+                    onSpeechEntry = { showSpeechSheet = true },
                 )
             }
 
@@ -196,6 +202,31 @@ fun FinanceEditor(
                 onDone()
             },
             onDismiss = { pendingBlock = null },
+        )
+    }
+
+    // B8 小票扫描 Sheet：用户点「使用该结果」后，先暂存 hint，再立即
+    // 纯映射写入当前 buffer，随后关闭 Sheet；hint 应用后即从 VM 清空。
+    if (showOcrSheet) {
+        OcrScannerSheet(
+            onHint = { hint ->
+                vm.setReceiptHint(hint)
+                buffer = vm.applyReceiptHintToBuffer(buffer)
+                showOcrSheet = false
+            },
+            onDismiss = { showOcrSheet = false },
+        )
+    }
+
+    // B8 语音记账 Sheet：同上，映射金额 / 分类 / 时间后关闭，hint 不留存。
+    if (showSpeechSheet) {
+        SpeechRecorderSheet(
+            onHint = { hint ->
+                vm.setSpeechHint(hint)
+                buffer = vm.applySpeechHintToBuffer(buffer)
+                showSpeechSheet = false
+            },
+            onDismiss = { showSpeechSheet = false },
         )
     }
 }
@@ -551,7 +582,26 @@ private fun TxFields(
     buffer: FinanceEditorBuffer,
     accounts: List<com.everything.eve.data.finance.entity.FinanceAccountEntity>,
     onChange: (FinanceEditorBuffer) -> Unit,
+    onOcrEntry: () -> Unit,
+    onSpeechEntry: () -> Unit,
 ) {
+    // B8 AI 联动入口（仅流水 kind 挂载；账户 / 卡片编辑器不显示）：
+    // 点击分别弹出小票扫描 / 语音记账 Sheet；权限拒绝不影响本行与手工记账。
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = onOcrEntry,
+            modifier = Modifier.semantics { testTag = "tx_editor_ocr_entry" },
+        ) {
+            Text(stringResource(R.string.finance_ai_ocr_entry))
+        }
+        OutlinedButton(
+            onClick = onSpeechEntry,
+            modifier = Modifier.semantics { testTag = "tx_editor_speech_entry" },
+        ) {
+            Text(stringResource(R.string.finance_ai_speech_entry))
+        }
+    }
+
     // 类型 chip
     Text(stringResource(R.string.finance_tx_field_kind), style = MaterialTheme.typography.labelMedium)
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {

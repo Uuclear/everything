@@ -82,6 +82,15 @@ dependencies {
     implementation(libs.lazysodium)
     implementation(libs.jna)
 
+    // B8：小票 OCR —— CameraX 预览/取帧 + ML Kit 端侧中文文字识别（自包含 AAR，无云依赖）
+    implementation(libs.camerax.core)
+    implementation(libs.camerax.camera2)
+    implementation(libs.camerax.lifecycle)
+    implementation(libs.camerax.view)
+    implementation(libs.mlkit.text.recognition)
+    // 中文识别模型构件：提供 ChineseTextRecognizerOptions（text-recognition 本体仅含 Latin 壳）
+    implementation(libs.mlkit.text.recognition.chinese)
+
     // JVM 单测：Crockford 向量等不依赖 native 的纯算法
     testImplementation(libs.junit)
     // 真实 org.json 实现：覆盖 android.jar stub 让 JSONObject.put / .toString 工作
@@ -91,6 +100,11 @@ dependencies {
     // JVM 单测锚点向量：lazysodium-java 自带桌面 libsodium（win64/linux64/mac），
     // 与 lazysodium-android 同版本同原语，仅测试类路径可见（阶段 4a Task 5）
     testImplementation(libs.lazysodium.java)
+    // B8：Robolectric 在 JVM 内模拟 Android 运行环境，支撑 Compose Sheet 本地单测
+    testImplementation(libs.robolectric)
+    // B8：createComposeRule 驱动 Sheet 组合与节点断言（构件复用 androidTest
+    // 同款 ui-test-junit4，版本随 compose BOM；不开启 includeAndroidResources）
+    testImplementation(libs.androidx.ui.test.junit4)
 
     // Instrumented：Room v1→v2 迁移（需连接设备/模拟器）
     androidTestImplementation(libs.junit)
