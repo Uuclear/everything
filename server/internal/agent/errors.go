@@ -81,3 +81,17 @@ func ErrorCodeOf(err error) ErrorCode {
 	// 兜底：未知错误归类为 CodeInternal。
 	return CodeInternal
 }
+
+// ErrorCodeName 返回 ErrorCode 的简短字符串（去掉 "agent." 前缀），
+// 便于写库（如 agent_audit_logs.error_code 列）与前端展示。
+// 未知 / 空值返回 "unknown"。
+func ErrorCodeName(c ErrorCode) string {
+	if c == "" {
+		return ""
+	}
+	s := string(c)
+	if len(s) > 6 && s[:6] == "agent." {
+		s = s[6:]
+	}
+	return s
+}

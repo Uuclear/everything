@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/everything-personal/eve/internal/agent"
 	"github.com/everything-personal/eve/internal/auth"
 	"github.com/everything-personal/eve/internal/config"
 	"github.com/everything-personal/eve/internal/sync"
@@ -30,9 +31,13 @@ type Server struct {
 	locations *vault.LocationStore // 阶段 4a 轨迹块月表存储（与 records 同库注入）
 	hub       *sync.Hub
 	limiter   *authLimiter
+
+	// agent* 阶段 6 字段：均为 nil 时 Agent 路由自动不挂载（保留向后兼容）。
+	agentRegistry *agent.Registry
+	agentProxy    *agent.Proxy
 }
 
-// New 创建 API 服务器。
+// New 创建 API 服务器（不含 Agent；既有调用方行为完全保持）。
 func New(cfg config.Config, database *sql.DB, authSvc *auth.Service, records *vault.Store, hub *sync.Hub) *Server {
 	return &Server{
 		cfg:       cfg,
@@ -43,6 +48,18 @@ func New(cfg config.Config, database *sql.DB, authSvc *auth.Service, records *va
 		hub:       hub,
 		limiter:   newAuthLimiter(),
 	}
+}
+
+// WithAgent 注入 Agent 依赖，返回 Server 自身便于链式调用。
+//
+// 调用时机：主入口（main.go）在调用 New() 后再 WithAgent(...)；不在 New 入参列表
+// 增加字段，避免阶段 6 之前的调用方（含测试 harness）需要改动。
+//
+// agentProxy 为 nil 时调用方需自行构造；传入 nil Registry 则视为禁用 Agent。
+func (s *Server) WithAgent(reg *agent.Registry, proxy *agent.Proxy) *Server {
+	s.agentRegistry = reg
+	s.agentProxy = proxy
+	return s
 }
 
 // Handler 返回完整路由。
@@ -104,6 +121,20 @@ func (s *Server) Handler() http.Handler {
 					r.Get("/auth/pairing/status", s.pairingStatus)
 				})
 			})
+
+			// 阶段 6 路由：AI Agent（仅 approved 设备可用）。
+			// 当 agentProxy==nil 时不挂载（保留旧版服务端继续运行）。
+			if s.agentProxy != nil {
+				r.Group(func(r chi.Router) {
+					r.Use(s.requireScope(auth.ScopeApproved))
+					r.Route("/agent", func(r chi.Router) {
+						r.Post("/chat", s.agentChat)
+						r.Post("/tool-result", s.agentToolResult)
+						r.Post("/cancel", s.agentCancel)
+						r.Get("/sessions", s.agentListSessions)
+					})
+				})
+			}
 		})
 	})
 

@@ -71,8 +71,8 @@ func TestFreshMigrate(t *testing.T) {
 	if err := database.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 {
-		t.Errorf("迁移版本应为 4，实际 %d", version)
+	if version != 5 {
+		t.Errorf("迁移版本应为 5，实际 %d", version)
 	}
 }
 
