@@ -23,6 +23,7 @@
 7. [v2 钩子说明](#7-v2-钩子说明)
 8. [跨端共享 fixture 命名规范](#8-跨端共享-fixture-命名规范)
 9. [交叉引用](#9-交叉引用)
+10. [AI 联动记账（OCR + 语音；阶段 5 v2 B8）](#10-ai-联动记账ocr--语音-阶段-5-v2-b8)
 
 ---
 
@@ -755,10 +756,137 @@ Web 与 Android 端对应 fixture 文件 SHA-256 **逐字节一致**，由 Task 
 | Web 通知基础层（B7） | [`financeNotifications.ts`](file:///d:/github/everything/everything/web/src/notifications/financeNotifications.ts) | 权限 / 调度 / IndexedDB / SW 下发（见 §6.9） |
 | Web 全站唯一 SW（B7） | [`web/public/sw.js`](file:///d:/github/everything/everything/web/public/sw.js) | finance 通道透传 + 通知点击路由（events 通道预留） |
 | Android Room v6 | [`EveDatabase.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/EveDatabase.kt) | MIGRATION_5_6 + 四表 schema |
+| Android B8 AI 联动记账 | [`OcrParser.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/OcrParser.kt) / [`SpeechParser.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/SpeechParser.kt) / [`OcrScannerSheet.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/OcrScannerSheet.kt) / [`SpeechRecorderSheet.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/SpeechRecorderSheet.kt) | OCR + 语音记账四层架构（纯函数 / 引擎 / Sheet / VM），仅编辑器预填 hint（详见 §10） |
+| Android B8 真机冒烟 | [`docs/smoke/finance-v2-ai-manual.md`](smoke/finance-v2-ai-manual.md) | SMOKE-V2-AI-S1~S6 真机冒烟场景 + 零知识核查 |
 | FR-1 字段详细定义 | `.trae/specs/stage5-finance/spec.md` §FR-1 | account / card / tx 三类字段源 |
 | 实施任务分解 | `.trae/specs/stage5-finance/tasks.md` Task 1 ~ Task 13 | 批派发序列与子任务 |
 | 4a 轨迹 place 模块 | [`module-schemas.md`](module-schemas.md) 第 7 章 | module=place 链路参考 |
 | 4b 日程 event 模块 | [`module-schemas.md`](module-schemas.md) 第 8 章 | module=event 链路参考 |
+
+---
+
+## 10. AI 联动记账（OCR + 语音；阶段 5 v2 B8）
+
+阶段 5 v2 B8 在 Android 端**新增** OCR 小票扫描 + 语音记账两条辅助录入
+路径，**仅作为编辑器预填 hint**，用户**必须**在 `FinanceEditor` 中手动确认
+才落入既有加密链路。Web 端**明确不做** OCR / 语音联动（保持纯文本 / 选
+项编辑器形态不变）。
+
+### 10.1 设计边界
+
+- **能力定位**：辅助录入 hint，非自动落库；hint 不参与 `persistV2` /
+  `saveBuffer` 主流程；
+- **零知识红线**：OCR 原文、语音原文、识别结果**不写入** Room /
+  SharedPreferences / records / 日志 / 通知文案；预览 UI 仅渲染金额 /
+  日期 / 商家三类字段；
+- **本地优先**：OCR 用 ML Kit 自包含 AAR（`com.google.mlkit:text-recognition`
+  16.0.1），语音用系统 `android.speech.SpeechRecognizer` on-device；**不引入**
+  GMS / Firebase / 第三方云 SDK；
+- **范围**：仅 `kind="expense"` / `kind="income"` 的 `tx` 编辑器入口（TX kind
+  才显示 OCR / 语音按钮；`account` / `card` / v2 子类型编辑页**不**显示）；
+- **分类存储口径**：仓库历史分类均为**中文自由文本**（与 §2.1 默认分类
+  一致：餐饮 / 交通 / 居家 / 购物 / 娱乐 / 医疗 / 教育 / 通讯 / 旅行 / 其他
+  等），spec 范例 `category="dining"` 与之不符，实现已按中文标签落地；
+- **勘误**：任务书原写 `TxEditorScreen.kt`，实际为
+  [`FinanceEditor.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/FinanceEditor.kt)
+  （位于 `android/app/src/main/java/com/everything/eve/ui/finance/`，非
+  `screen/` 子包）。
+
+### 10.2 分层架构（四层）
+
+| 层 | 组成 | 职责 |
+|---|---|---|
+| ① 纯函数层 | [`OcrParser.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/OcrParser.kt) / [`SpeechParser.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/SpeechParser.kt) | 文本 → 结构化 hint（金额 / 日期 / 商家 / 分类），纯函数零依赖，JUnit 直接覆盖 |
+| ② 引擎层 | [`OcrScannerEngine.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/OcrScannerEngine.kt) / [`SpeechRecorderEngine.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/SpeechRecorderEngine.kt) | 硬件 / 系统能力封装：CameraX + ML Kit、SpeechRecognizer lifecycle |
+| ③ Compose Sheet | [`OcrScannerSheet.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/OcrScannerSheet.kt) / [`SpeechRecorderSheet.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/SpeechRecorderSheet.kt) | ModalBottomSheet 状态机：`Idle / Recognizing / Result / NoResult / Error` |
+| ④ ViewModel | [`FinanceViewModel.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/FinanceViewModel.kt) | 独立 `AiHintState` StateFlow（**不进** 14 路 combine 主 state），`applyReceiptHintToBuffer` / `applySpeechHintToBuffer` 两 action；apply 后立即清空对应 hint |
+
+### 10.3 锁定数据结构
+
+```
+data class ReceiptHint(
+    val amountMinor: Long?,     // 单位：分；null 表示识别失败 / 未识别
+    val ts: Long?,              // Unix 毫秒；多格式日期启发式
+    val merchant: String?       // 顶部非金额 / 非日期行首
+)
+
+data class SpeechHint(
+    val amountMinor: Long?,     // 单位：分
+    val category: String?,      // 中文标签自由文本
+    val ts: Long = System.currentTimeMillis()  // 默认当下
+)
+
+fun parseReceiptText(text: String): ReceiptHint?   // 纯函数
+fun parseSpeechText(text: String): SpeechHint?      // 纯函数
+```
+
+**VM 映射规则**（与 B6 预算整数分对齐）：
+
+- `ReceiptHint.amountMinor`（分）→ `tx.amountMinor`（元字符串）经
+  `BigDecimal.movePointLeft(2).stripTrailingZeros()` 反推（3500 → "35"、
+  3550 → "35.5"、10005 → "100.05"）；
+- `ReceiptHint.ts` → `tx.occurredAtMs`；
+- `ReceiptHint.merchant` **仅在** `tx.note` 为空时写入；
+- `SpeechHint.category` → `tx.category`（中文标签自然扩展，§2.2）；
+- `SpeechHint.ts` → `tx.occurredAtMs`；
+- apply 后立即清空对应 hint；`aiHint` 不进 14 路 combine 主 state，不参与
+  `persistV2` / `saveBuffer`。
+
+### 10.4 权限合规（运行时申请 + UI 化说明）
+
+| 权限 | 用途 | 申请时机 | 拒绝行为 |
+|---|---|---|---|
+| `CAMERA` | OCR 预览取流 | OCR Sheet `LaunchedEffect` 自动申请；首次拒绝仅隐藏入口 + 引导文案 | 隐藏 OCR 入口，显示「相机权限不足，请在系统设置中开启后重试」 |
+| `RECORD_AUDIO` | 语音识别 | 语音 Sheet 进入时申请；未授权显示 `permission_blocked` testTag | 隐藏语音入口，错误码 9 走「麦克风权限不足」文案 |
+
+**Manifest 声明**：`android/app/src/main/AndroidManifest.xml` 追加两条
+`<uses-permission>` + `<uses-feature android:name="android.hardware.camera.any"
+android:required="false" />`（无相机设备仍可安装，仅 OCR 入口不可用）。
+
+**权限说明 UI 化**：OCR / 语音 Sheet 各自持有「权限说明」引导文案
+（[strings.xml](file:///d:/github/everything/everything/android/app/src/main/res/values/strings.xml)
+中 `finance_ai_*` 前缀条目，共 24 条），用户拒绝仅隐藏入口，**不阻断**
+核心记账流程。
+
+### 10.5 端侧识别启发式（纯函数层细则）
+
+**OCR 启发式**：
+
+- 金额行优先匹配含「金额 / 应收 / 合计 / 总计 / 总额 / 人民币 / ¥ / ￥ /
+  RMB / 合计金额」关键词之一，否则取最长数字行；
+- `BigDecimal` 转分，千分位剥离，电话号（10~13 位连续数字）排除；
+- 日期接受 `yyyy-MM-dd` / `yyyy/MM/dd` / `yyyy年MM月dd日` / `MM-dd` /
+  `MM/dd` / `MM月dd日` 六种格式；
+- 商家取首行非空、非数字、非纯符号、非关键词行的字符串，长度 ≤ 50。
+
+**语音启发式**：
+
+- `chineseNumberToBigDecimal` 解析「三十五 / 三块五 / 一百零五 / 三百」等
+  中文金额；
+- 中文分类映射到 §2.1 默认分类列表（餐饮 / 交通 / 居家 / 购物 / 娱乐 /
+  医疗 / 教育 / 通讯 / 旅行 / 其他），未命中则保留用户原话作为自定义分类
+  （§2.2 自然扩展）；
+- 时间语义「今天 / 昨天 / 前天」映射为对应 CST 日零点；「现在」取
+  `System.currentTimeMillis()`。
+
+### 10.6 单元测试覆盖（481 用例中的 48 条新增）
+
+| 文件 | 用例数 | 覆盖 |
+|---|---|---|
+| `OcrParserTest.kt` | 10 | 多格式金额 / 日期 / 商家启发式 |
+| `SpeechParserTest.kt` | 10 | 中文金额解析 / 分类映射 / 时间语义 |
+| `OcrScannerSheetTest.kt` | 8 | Robolectric 下权限申请 / 拍照识别 / 重试 / 预填 / 关闭 |
+| `SpeechRecorderSheetTest.kt` | 11 | Robolectric 下设备能力 / 权限 / 识别 / 重试 / 预填 / 错误码 |
+| `FinanceViewModelAiTest.kt` | 9 | 纯 JVM；amountMinor ↔ 元映射、merchant 仅空 note 时写入、apply 后清空 hint |
+
+### 10.7 跨端对齐说明
+
+- **Web 端**：本期**明确不做** OCR / 语音联动；`FinanceView.vue` /
+  `finance.ts` 不引入任何识别 / 录音 API；
+- **跨端共享 fixture**：本节未引入新的跨端 fixture（hint 是设备本地能力，
+  无 Web 镜像）；
+- **真机冒烟手册**：[`docs/smoke/finance-v2-ai-manual.md`](smoke/finance-v2-ai-manual.md)
+  提供 ≥6 真机冒烟场景（SMOKE-V2-AI-S1~S6），含零知识核查与失败上报模板。
 
 ---
 

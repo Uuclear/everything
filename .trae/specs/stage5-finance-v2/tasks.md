@@ -442,9 +442,41 @@
 
 ## Task 9: AI 联动记账（OCR + 语音）（P2）
 
-- **Status**: `pending`
-- **Priority**: medium
-- **Depends On**: v1 tx 编辑器
+- **Completion Evidence**:
+  - **Pass Condition**: 纯函数 OcrParser / SpeechParser + 引擎层 OcrScannerEngine（CameraX + ML Kit 自包含 AAR）/ SpeechRecorderEngine（android.speech.SpeechRecognizer on-device）+ Sheet 层 OcrScannerSheet / SpeechRecorderSheet（ModalBottomSheet）+ FinanceEditor 入口预填 + FinanceViewModel `aiHint` state + actions + Manifest 权限 + strings + 单测 48 用例（OcrParser 10 / SpeechParser 10 / OcrScannerSheet 8 / SpeechRecorderSheet 11 / FinanceViewModelAi 9）；Android 端门禁全绿（gradlew testDebugUnitTest 481/481 + compileDebugKotlin 0 error）；零知识红线核查通过（OCR / 语音原文不入库、不打日志、不随任何状态持久化）。
+  - **Status**: `completed`（2026-09-24 提交 `01d9aaa`，commit 链 `7f8483c..01d9aaa` 推送 main 成功）。
+  - **Completion Evidence**:
+    - 纯函数层：
+      - `android/app/src/main/java/com/everything/.../finance/OcrParser.kt`：`data class ReceiptHint(val amountMinor: Long?, val ts: Long?, val merchant: String?)` + `parseReceiptText(text): ReceiptHint?`（金额启发式：关键词行优先、BigDecimal 转分、千分位、电话排除；日期：多格式启发 + 年份 2000~当前+1 + setLenient(false)；商家：前 10 行 CJK / 字母行、噪声过滤）。
+      - `android/app/src/main/java/com/everything/.../finance/SpeechParser.kt`：`data class SpeechHint(val amountMinor: Long?, val category: String?, val ts: Long = System.currentTimeMillis())` + `parseSpeechText(text): SpeechHint?`（中文大写数字转换：十百千万亿、口语省读"一百二"→120、"点"小数 + 中文分类映射 + 昨天/前天时间语义）。
+      - **勘误（与任务书原表述差异）**：spec 范例 `category = "dining"` 与仓库分类体系不符——仓库分类存储为中文自由文本（`docs/finance.md` §2.1 默认分类：餐饮 / 交通 / 居家 / 购物 / 娱乐 / 医疗 / 教育 / 通讯 / 旅行 / 其他），实现已按中文标签落地。
+    - 引擎层：
+      - `OcrScannerEngine.kt`：CameraX `Preview` + `ImageAnalysis`（STRATEGY_KEEP_ONLY_LATEST）+ ML Kit `com.google.mlkit:text-recognition:16.0.1` 中文识别器；on-device 自包含 AAR，零网络依赖；识别失败以 `null` 文本回调，禁止 Log 打印。
+      - `SpeechRecorderEngine.kt`：`android.speech.SpeechRecognizer` on-device，能力检查（`RecognitionService` 是否可用）放在构造期；`onFinal / onError / onUnsupported` 回调，错误码 9（INSUFFICIENT_PERMISSIONS）单独走权限引导。
+    - Sheet 层：
+      - `OcrScannerSheet.kt`：状态机 `Idle / Recognizing / Result / NoResult`；CAMERA 运行时权限（rememberLauncherForActivityResult + LaunchedEffect 自动申请）；PreviewView + ImageAnalysis 用 `AtomicBoolean compareAndSet` 做单帧握手；预览仅渲染金额、日期（yyyy-MM-dd）、商家三项限定要素；DisposableEffect 中解绑并 `engine.close()`。
+      - `SpeechRecorderSheet.kt`：状态机 `Idle / Listening / Result / NoResult / Error(code)`；!capable → `unsupported`；未授权 → `permission_blocked`；onError 9 → 权限引导文案；聆听态不渲染部分识别原文（零知识）；DisposableEffect destroy 引擎。
+    - 编辑器接线：
+      - `FinanceEditor.kt`：新增 OCR / 语音入口按钮（testTag `tx_editor_ocr_entry` / `tx_editor_speech_entry`，仅 TX kind 显示）；两 Sheet 挂载，onHint 内 `vm.setReceiptHint(hint); buffer = vm.applyReceiptHintToBuffer(buffer); showOcrSheet = false`（语音同理）。**勘误（与任务书原表述差异）**：任务书所写 `TxEditorScreen.kt` 文件不存在，实际为 `ui/finance/FinanceEditor.kt`（单一编辑器组件）。
+      - `FinanceViewModel.kt`：新增 `AiHintState(receipt: ReceiptHint?, speech: SpeechHint?)` + `MutableStateFlow<AiHintState>`（不参与 14 路 combine 主 state，不参与 persistV2 / saveBuffer，独立 hint 流）；`setReceiptHint / setSpeechHint / applyReceiptHintToBuffer / applySpeechHintToBuffer` 四个 action；amountMinor 分→元（`BigDecimal.movePointLeft(2).stripTrailingZeros()`，3500→"35"、3550→"35.5"、10005→"100.05"）；ReceiptHint.ts→occurredAtMs、merchant 仅空 note 时写入；SpeechHint.category→category、ts→occurredAtMs；apply 后立即 copy(字段=null) 清空对应 hint。
+    - Manifest / strings：
+      - `AndroidManifest.xml`：追加 `android.permission.CAMERA` + `android.permission.RECORD_AUDIO` + `uses-feature android.hardware.camera.any required="false"`；中文注释说明运行时申请、拒绝不阻断、本地不上传。
+      - `res/values/strings.xml`：新增 `finance_ai_ocr_entry / speech_entry / ocr_sheet_title / speech_sheet_title / capture / recognizing / use_hint / retry / close / camera_permission_text / mic_permission_text / ocr_no_result / speech_no_result / speech_unsupported / speech_start / stop / listening / speech_error_permission / speech_error_format / preview_amount / preview_category / preview_date / preview_merchant / uncategorized` 等 24 条（`finance_ai_` 前缀）。
+    - 依赖：
+      - `android/gradle/libs.versions.toml` + `android/app/build.gradle.kts`：新增 `camerax 1.4.2`（core / camera2 / lifecycle / view 四件）+ `mlkit-text-recognition 16.0.1` implementation + `robolectric 4.14.1` testImplementation；未开 `includeAndroidResources`。
+    - 单测（48 用例）：
+      - `OcrParserTest.kt`（10 用例）：金额（"合计 ¥35.00" / "应付 35.5 元" / "TOTAL:1,200"）、日期（"2026-09-24" / "24/09/2026" / "2026年9月24日"）、商家（"晨星便利店"）、空文本、噪声过滤、电话排除。
+      - `SpeechParserTest.kt`（10 用例）：中文大写数字（一百二十 / 一百二 / 三千五百）、口语小数（三十五点五）、分类映射（餐饮 / 交通 / 居家 / 购物 / 娱乐 / 医疗 / 教育 / 通讯 / 旅行 / 其他）、昨天/前天时间语义。
+      - `OcrScannerSheetTest.kt`（8 用例 / Robolectric + ComposeTestRule）：未授权显示权限说明且关闭可触发 onDismiss；已授权显示拍照按钮；拍照→泵帧→成功预览三要素（金额"35"、日期"2026-09-24"、商家"晨星便利店"）；识别 null → NoResult；重试后再识别成功；使用该结果 → onHint 回调 amountMinor=3500L、merchant="晨星便利店"；关闭结果页 → onDismiss；离开组合 → engine.close。
+      - `SpeechRecorderSheetTest.kt`（11 用例 / Robolectric + ComposeTestRule）：unsupported / permission_blocked / toggle / listening 旋转 / onFinal 成功 / NoResult / Error 7 / Error 9 权限错误 / use_hint / close / dispose。
+      - `FinanceViewModelAiTest.kt`（9 用例 / 纯 JVM）：amountMinor→元显示（3500/3550/10005）；merchant 不覆盖非空 note；receipt/speech apply 后清空；无 hint 时 buffer 全等返回；category null 不改分类；aiHint 流取值。
+    - Robolectric 落地三大关键经验（已沉淀于测试骨架）：
+      1. 工程未开 `includeAndroidResources`，所有 Robolectric 测试类统一 `@RunWith(RobolectricTestRunner::class)` + `@Config(sdk = [33], manifest = Config.NONE)`；
+      2. 必须在 `@Config` 用 `application = TestOnlyApplication::class` 覆盖空 Application（不重写 onCreate），否则 Robolectric 按合并清单创建真实 `EveApplication`，其 onCreate 初始化 ServiceLocator / AndroidKeyStore，JVM 沙箱无该 Provider 抛 KeyStoreException；
+      3. ModalBottomSheet 内容在独立 Dialog 窗口，Robolectric 下 `performClick()` 的真实触摸注入无法分发（节点已显示但 onClick 不触发），改用扩展 `performSemanticsAction(SemanticsActions.OnClick)` 触发真实 onClick；同时节点布局边界在沙箱下可能始终位于可视区域外，组件可见性断言改用 `assertExists()`（已发现并剔除 `assertIsDisplayed` 偶发失败）。
+    - 关于 `android/app/src/test/resources/com/android/tools/test_config.properties`：含本机绝对路径（`android_merged_manifest` / `android_resource_apk`），提交会造成其它机器 / CI 上 Robolectric 资源解析失败。**决策：不提交**，运行时改用 mock SDK 路径即可通过；本地手工调试如需真实资源解析请按 build/intermediates 实际路径自建该文件。
+    - 门禁：`gradlew testDebugUnitTest 481/481`（0 failure / 0 error，48 新增：10 + 10 + 8 + 11 + 9 = 48；上批基线 433 → 当前 481 净增 48）+ `compileDebugKotlin 0 error`。
+    - Diff：commit `01d9aaa` 17 files / +3658 / -0（11 个 Android 新增文件 + 6 个修改文件；临时脚本 `.trae/parse-junit.ps1`、`tmp_calculate_times.ps1`、`android/.kotlin/` 明确排除未提交；`test_config.properties` 含本机绝对路径不提交）。
 - **Description**:
   - 新建 `android/app/src/main/java/com/everything/eve/finance/OcrParser.kt`：
     纯函数层（on-device ML Kit Text Recognition 调用方 → 输入文本 →

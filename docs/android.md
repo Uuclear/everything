@@ -36,6 +36,7 @@ cd android
 - 数据采集（阶段 3）：通讯录/短信/通话记录只读采集——复合游标增量、结构比对变化检测（version+1 重封）、采集页权限向导与五态状态行（详见下章）
 - 位置轨迹（阶段 4a）：前台定位服务持续采集 → 本机缓冲封块加密 → 密文块经 `/api/v1/locations/batch` 上行（详见"位置轨迹采集（阶段 4a）"章）
 - 日程/日历（阶段 4b）：事件作为 `module="event"` 记录走既有 records 信封通道；月/周视图、本地 AlarmManager exact 闹钟（权限降级见下章）、RRULE B 档子集；详见"日程/日历（阶段 4b）"章
+- 财务 AI 联动记账（阶段 5 v2 B8）：OCR 小票扫描（CameraX 1.4.2 + ML Kit text-recognition 16.0.1 自包含 AAR）+ 语音记账（系统 `SpeechRecognizer` on-device），均**仅作为编辑器预填 hint**，用户手动确认才入既有加密链路；详见"AI 联动记账（OCR + 语音；阶段 5 v2 B8）"章
 
 ## 数据采集（阶段 3）
 
@@ -406,14 +407,148 @@ channelId = `"events"`（与事件共用，不新建 channel）。
   NotAllowedException / IllegalStateException 两路异常只吞不抛"约定与 4b
   既有 try-catch 降级一并沿用。
 
-### 权限（阶段 5 沿用既有）
+### 权限（阶段 5 沿用既有 + 阶段 5 v2 B8 扩展）
 
 | 权限 | 用途 | 申请时机 |
 |---|---|---|
 | `POST_NOTIFICATIONS` | Android 13+（API 33+）通知可见性（已声明，4a 沿用） | 运行时申请；被拒时仅写 `finance_reminder_log.delivered = 0`，不弹横幅 |
+| `CAMERA`（B8 新增） | OCR 小票扫描取流（CameraX + ML Kit text-recognition） | OCR Sheet `LaunchedEffect` 自动申请；首次拒绝隐藏入口 + 引导文案，不阻断核心记账 |
+| `RECORD_AUDIO`（B8 新增） | 语音记账本地识别（系统 `SpeechRecognizer` on-device） | 语音 Sheet 进入时申请；未授权显示 `permission_blocked` testTag + 「麦克风权限不足」文案 |
+| `android.hardware.camera.any`（feature，B8 新增） | 声明可选硬件能力 | `required=false`，无相机设备仍可安装，仅 OCR 入口不可用 |
 
 阶段 5 **不新申请**任何运行时权限；账单 / 还款日通知文案仅含抽象描述，
 不暴露金额 / 卡号后四位 / 具体日期数字。
+
+B8 沿用此纪律——OCR / 语音识别文案仅含金额 / 日期 / 商家（OCR）/ 分类（语音）
+四类字段，**绝不**扩散原文 / 识别结果到通知或日志。
+
+## AI 联动记账（OCR + 语音；阶段 5 v2 B8）
+
+阶段 5 v2 B8 在 Android 端**新增** OCR 小票扫描 + 语音记账两条辅助录入
+路径，**仅作为编辑器预填 hint**，用户**必须**在 `FinanceEditor` 中手动
+确认才落入既有加密链路。Web 端**明确不做** OCR / 语音联动，本节为
+Android-only 描述。
+
+### 架构四层
+
+| 层 | 组成 | 职责 |
+|---|---|---|
+| ① 纯函数层 | [`OcrParser.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/OcrParser.kt) / [`SpeechParser.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/SpeechParser.kt) | 文本 → 结构化 hint（金额 / 日期 / 商家 / 分类），纯函数零依赖，JUnit 直接覆盖 |
+| ② 引擎层 | [`OcrScannerEngine.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/OcrScannerEngine.kt) / [`SpeechRecorderEngine.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/SpeechRecorderEngine.kt) | 硬件 / 系统能力封装：CameraX + ML Kit、SpeechRecognizer lifecycle |
+| ③ Compose Sheet | [`OcrScannerSheet.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/OcrScannerSheet.kt) / [`SpeechRecorderSheet.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/SpeechRecorderSheet.kt) | ModalBottomSheet 状态机：`Idle / Recognizing / Result / NoResult / Error` |
+| ④ ViewModel | [`FinanceViewModel.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/FinanceViewModel.kt) | 独立 `AiHintState` StateFlow（**不进** 14 路 combine 主 state），`applyReceiptHintToBuffer` / `applySpeechHintToBuffer` 两 action |
+
+### 新增依赖（libs.versions.toml + build.gradle.kts）
+
+| 依赖 | 版本 | 用途 | 范围 |
+|---|---|---|---|
+| `androidx.camera:camera-core` | 1.4.2 | CameraX 核心 | implementation |
+| `androidx.camera:camera-camera2` | 1.4.2 | CameraX Camera2 后端 | implementation |
+| `androidx.camera:camera-lifecycle` | 1.4.2 | CameraX 生命周期绑定 | implementation |
+| `androidx.camera:camera-view` | 1.4.2 | `PreviewView` Compose 适配 | implementation |
+| `com.google.mlkit:text-recognition` | 16.0.1 | ML Kit 中文识别器（自包含 AAR） | implementation |
+| `org.robolectric:robolectric` | 4.14.1 | JVM Compose 测试 | testImplementation |
+
+**纪律**：ML Kit **不引入** GMS / Firebase / 第三方云 SDK；SpeechRecognizer
+**不引入** Google 应用内语音服务；OCR / 语音识别全程设备本地。
+
+### AndroidManifest 变更
+
+`android/app/src/main/AndroidManifest.xml` 追加：
+
+```xml
+<!-- B8 AI 联动记账：OCR + 语音 -->
+<uses-permission android:name="android.permission.CAMERA" />
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
+<uses-feature
+    android:name="android.hardware.camera.any"
+    android:required="false" />
+```
+
+**权限合规**：CAMERA / RECORD_AUDIO 走 Compose
+`rememberLauncherForActivityResult` + `LaunchedEffect` 运行时申请；用户
+拒绝仅隐藏入口 / 显示说明，**不阻断**核心记账（仍可手动录入）。
+
+### Robolectric 落地关键经验
+
+B8 在测试基建层沉淀了四条关键经验，已作为后续 Android UI 测试模板：
+
+1. **不开 `includeAndroidResources`**：工程默认未启用；测试类统一
+   `@RunWith(RobolectricTestRunner::class)` + `@Config(sdk = [33], manifest = Config.NONE)`；
+2. **必须覆盖空 Application**：在 `@Config(application = TestOnlyApplication::class)`
+   指定 `class TestOnlyApplication : Application()`（**不重写 onCreate**）；
+   否则 Robolectric 按合并清单创建真实 `EveApplication`，其 onCreate 初始化
+   `ServiceLocator` / `AndroidKeyStore`，JVM 沙箱无该 Provider 抛 `KeyStoreException`；
+3. **ModalBottomSheet 触摸注入**：Robolectric 下 `performClick()` 的真实
+   触摸注入无法分发到独立 Dialog 窗口（节点显示但 onClick 不触发）；
+   改用扩展 `performSemanticsAction(SemanticsActions.OnClick)` 触发真实
+   onClick；
+4. **节点可见性断言改 `assertExists()`**：Robolectric 下节点布局边界可能
+   始终位于可视区域外（与第 3 条相伴），组件可见性断言统一改用
+   `assertExists()`，放弃 `assertIsDisplayed()`（节点已存在于语义树即视为
+   可访问）。
+
+### ImageProxy / ImageInfo 桩要点（CameraX 1.4.x）
+
+CameraX 1.4.x 中 `ImageProxy` 为**抽象类**（`Unsafe.allocateInstance` 对
+抽象类抛 `InstantiationException`），单元测试必须实现全部抽象方法：
+
+- `ImageProxy` 抽象成员：`close / getWidth / getHeight / getCropRect /
+  setCropRect / getImageInfo / getImage / getFormat / getPlanes`；
+- `ImageInfo` 抽象成员：`getRotationDegrees / getTimestamp(Long) /
+  getTagBundle / populateExifData(ExifData.Builder)`；
+- `PlaneProxy` 是嵌套类型 `ImageProxy.PlaneProxy`（**不能**从顶层包 import）。
+
+源码参考：
+[`OcrScannerSheetTest.kt`](file:///d:/github/everything/everything/android/app/src/test/java/com/everything/eve/ui/finance/OcrScannerSheetTest.kt)
+的 `fakeImageProxy()` 私有方法。
+
+### 关键源文件清单
+
+| 文件 | 行数 | 备注 |
+|---|---|---|
+| `android/app/src/main/java/com/everything/eve/finance/OcrParser.kt` | — | 金额启发式（关键词行优先、BigDecimal 转分、千分位、电话排除）、多格式日期、商家 |
+| `android/app/src/main/java/com/everything/eve/finance/SpeechParser.kt` | — | 中文金额 `chineseNumberToBigDecimal`、中文分类映射、昨天 / 前天时间语义 |
+| `android/app/src/main/java/com/everything/eve/finance/OcrScannerEngine.kt` | — | ML Kit `TextRecognizer`（中文）生命周期 |
+| `android/app/src/main/java/com/everything/eve/finance/SpeechRecorderEngine.kt` | — | `SpeechRecognizer` lifecycle + `RecognitionListener` 包装 |
+| `android/app/src/main/java/com/everything/eve/ui/finance/OcrScannerSheet.kt` | ~410 | 状态机 `Idle / Recognizing / Result / NoResult`、CAMERA 运行时权限、`runCatching` 兜底无日志 |
+| `android/app/src/main/java/com/everything/eve/ui/finance/SpeechRecorderSheet.kt` | ~330 | 状态机 `Idle / Listening / Result / NoResult / Error(code)`、`!capable→unsupported`、`onError` code 9 → 权限引导 |
+| `android/app/src/main/java/com/everything/eve/ui/finance/FinanceEditor.kt` | — | 仅 TX kind 显示 OCR / 语音按钮（testTag `tx_editor_ocr_entry` / `tx_editor_speech_entry`） |
+| `android/app/src/main/java/com/everything/eve/ui/finance/FinanceViewModel.kt` | — | `AiHintState` 独立 StateFlow；`applyReceiptHintToBuffer` / `applySpeechHintToBuffer`；apply 后立即清空 hint |
+| `android/app/src/main/res/values/strings.xml` | — | 追加 24 条 `finance_ai_` 前缀 string resource |
+
+### 测试覆盖（48 条新增）
+
+| 文件 | 用例数 | 范围 |
+|---|---|---|
+| `OcrParserTest.kt` | 10 | 多格式金额 / 日期 / 商家启发式（纯 JVM） |
+| `SpeechParserTest.kt` | 10 | 中文金额解析 / 分类映射 / 时间语义（纯 JVM） |
+| `OcrScannerSheetTest.kt` | 8 | Robolectric 下权限 / 拍照识别 / 重试 / 预填 / 关闭 |
+| `SpeechRecorderSheetTest.kt` | 11 | Robolectric 下设备能力 / 权限 / 识别 / 重试 / 预填 / 错误码 |
+| `FinanceViewModelAiTest.kt` | 9 | 纯 JVM；amountMinor ↔ 元映射、merchant 仅空 note 时写入、apply 后清空 hint |
+
+**最终门禁**：`./gradlew.bat :app:testDebugUnitTest` 全量 **481/481 通过**
+（0 failure / 0 error；含 B8 新增 48 条用例与既有 433 条），其中
+`compileDebugKotlin` 0 error。
+
+### 决策与纪律记录
+
+- **不提交 `test_config.properties`**：Robolectric 沙箱资源解析需
+  `android_merged_manifest` / `android_resource_apk` 等本机绝对路径，提交会
+  致其它机器 / CI 上资源解析失败；主代理已 `DeleteFile` 不提交，本纪律在
+  `.trae/specs/stage5-finance-v2/tasks.md` Completion Evidence 与本节同步
+  记录；
+- **不引入 GMS / Firebase**：OCR / 语音全程设备本地；不接入任何云 SDK；
+- **零知识文案**：UI 预览仅渲染金额 / 日期 / 商家（OCR）或金额 / 分类
+  （语音）四类字段，**绝不**扩散原文 / 识别结果到通知 / 日志 / 通知文案
+  （AC-V2F-19）；
+- **临时调试脚本**：`tmp_calculate_times.ps1`、`.trae/parse-junit.ps1`、
+  `android/.kotlin/` **永不提交**。
+
+### 真机冒烟
+
+详见 [`docs/smoke/finance-v2-ai-manual.md`](smoke/finance-v2-ai-manual.md)
+（SMOKE-V2-AI-S1~S6 ≥6 真机冒烟场景，含零知识核查与失败上报模板）。
 
 ## 测试
 
@@ -433,6 +568,8 @@ channelId = `"events"`（与事件共用，不新建 channel）。
 | 通知 | `POST_NOTIFICATIONS`（已声明，阶段 4a） | 4a ✅ | Android 13+ 运行时申请 |
 | 开机自启 | `RECEIVE_BOOT_COMPLETED`（已声明） | 4a ✅ | 轨迹分支经 BootReceiver 拉起前台服务；周期任务由 WorkManager 自动恢复 |
 | 日程精确闹钟 | `SCHEDULE_EXACT_ALARM`（API 31+） + `USE_EXACT_ALARM`（API 33+）（均已声明，阶段 4b） | 4b ✅ | AlarmManager `setExactAndAllowWhileIdle`；用户拒绝 `SCHEDULE_EXACT_ALARM` 即降级 `setAndAllowWhileIdle` 并写 `event_reminder_log.kind="alarm_killed"`，doze + 厂商后台限制已记入 README 已知问题 |
+| OCR 相机 | `CAMERA` + `uses-feature camera.any`（均已声明，阶段 5 v2 B8） | B8 ✅ | CameraX 1.4.2 + ML Kit text-recognition 16.0.1 自包含 AAR；OCR Sheet 运行时申请；首次拒绝仅隐藏入口 |
+| 语音麦克风 | `RECORD_AUDIO`（已声明，阶段 5 v2 B8） | B8 ✅ | 系统 `SpeechRecognizer` on-device；语音 Sheet 进入时申请；未授权走 `permission_blocked` testTag |
 
 ## 分发策略
 
