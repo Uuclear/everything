@@ -138,8 +138,9 @@ bbff7ee  chore(gitignore): 排除 chat/ 临时目录与 *.log 构建日志
 ## 八、下一步建议（顺序）
 
 1. ✅ **本轮**：H-1 真机冒烟 + H-7 Go CI —— 立即处理
-2. 阶段 5 启动前：附件块存储（idea #5）
-3. 阶段 5 启动：财务模块（idea #1）
-4. 阶段 6 启动：AI Agent 抽象层（idea #2）
-5. 阶段 7 启动：Web 路由插件化（idea #3）+ Android 组件复用（idea #4）
-6. 阶段 8 启动：分发与运维 + gate.sh 自动化（idea #7）
+2. ✅ 阶段 5 启动前：附件块存储（idea #5）
+3. ✅ 阶段 5 启动：财务模块（idea #1）
+4. ✅ 阶段 6 启动：**调研稿完成**（`docs/ai-agent*.md` × 4 + `.trae/specs/stage6-ai-agent/{spec,tasks}.md` + `everything_plan.md` 阶段 6 行升级）；
+   **代码落地**待 Task 1~12（Provider 抽象层 → 服务端路由 → Provider 驱动 → 解锁会话 → Web Chat Panel → 二次确认 → 读工具 → 写工具 → Android stub → 门禁复跑 → 文档同步 → 异常检测）
+5. ⏳ 阶段 7 启动：Web 路由插件化（idea #3）+ Android 组件复用（idea #4）+ 健康/物品/知识图谱（阶段 7 主轴）
+6. ⏳ 阶段 8 启动：分发与运维 + gate.sh 自动化（idea #7）+ 全平台安装包 + 加密备份
