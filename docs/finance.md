@@ -24,6 +24,7 @@
 8. [跨端共享 fixture 命名规范](#8-跨端共享-fixture-命名规范)
 9. [交叉引用](#9-交叉引用)
 10. [AI 联动记账（OCR + 语音；阶段 5 v2 B8）](#10-ai-联动记账ocr--语音-阶段-5-v2-b8)
+11. [投资账户 + 手动行情（阶段 5 v2 Task 8）](#11-投资账户--手动行情阶段-5-v2-task-8)
 
 ---
 
@@ -889,6 +890,290 @@ android:required="false" />`（无相机设备仍可安装，仅 OCR 入口不�
   提供 ≥6 真机冒烟场景（SMOKE-V2-AI-S1~S6），含零知识核查与失败上报模板。
 
 ---
+
+## 11. 投资账户 + 手动行情（阶段 5 v2 Task 8）
+
+阶段 5 v2 Task 8 在 v1 账户体系基础上**新增**两个独立维度：① 投资账户
+的 `holdings` 持仓字段；② 手动行情包（用户离线配置的 JSON 行情快照）。两者
+解耦，**投资账户先于行情上线**：缺价时只把持仓计入 `missingPriceHoldingCount`
+而不丢弃，保证用户**先有账户再有报价**的录入顺序。同时本章节在 Dashboard
+新增"投资账户市值"卡片 + 月报行"投资账户市值变化"占位，零知识红线与 v1 同
+款（行情包密文以 records 通道为唯一真理源）。
+
+### 11.1 设计边界
+
+- **kind 枚举勘误**：spec FR-V2-D.1 文本写 `kind="investment"`，但
+  `FinanceAccountEntity.kind` / Web `FinanceAccountList.vue` 实际枚举为
+  `stock`（"投资"），与既有 FinanceAccountList `KIND_LABEL` 锁口径一致，
+  本批次保持 **`stock` 不变**（避免回归 + 编辑器侧 label 已落地）；
+- **数据库版本勘误**：任务书原文写 "v8→v9 加 finance_quote 表"，但 B6 已用
+  `v8→v9` 加 `overspend_acknowledged` 列；本批次实际为 **v9→v10**：`ALTER
+  TABLE` 不做（无新增列），新建 `finance_quote` 表（含 `symbol` / `ts` /
+  `dirty` 三个索引）即为 Room v10 升级；
+- **聚合函数扩展策略**：tasks.md 描述改 `netWorth(...)` 签名追加
+  `quoteTable` 入参。考虑到 B1~B7 共 190+ 测试 fixture 已绑定既有 5 参签
+  名，本批次**不修改既有函数签名**，改为**新增独立函数**
+  `investmentMarketValue(...)`，UI 层显式调用，与 `netWorth` / `monthlyReport`
+  互不影响（零回归）；
+- **行情包双写纪律**：与 B5 汇率包完全同款——一行 `records` 通道 `id="quote@
+  ${ts}"` 的整包密文 + 本地表 `finance_quote` 按 symbol 拆行的若干条
+  `id="${symbol}@${ts}"`；本地导入路径 `encryptedPayload = ""` 占位；
+- **share × price 精度**：`shares` 是 `Double`、价格是 `Long` 分——乘法走
+  `BigDecimal.multiply(...).setScale(0, RoundingMode.HALF_UP).abs()` 绝对值
+  向上取整，再恢复符号（与 RateTable 折算同舍入口径，避免浮点累积误差）；
+- **缺价 vs 0 价**：缺价（`quoteTable` 未提供该 symbol）计入
+  `missingPriceHoldingCount`；命中报价恰好为 `0` 是合法情形，**不视为缺价**；
+- **行情同步上下行**：复用 B5 同步契约——`pullAndDecrypt(records)` 过滤
+  `module="finance"` + `type="quote"` 的密文记录批量解密成 `QuoteTable`；
+  `pushChanges()` 把 `dirty=true` 行按 ts 分组重封装成整包上行；通道不新造。
+
+### 11.2 分层架构（四层）
+
+| 层 | 组成 | 职责 |
+|---|---|---|
+| ① 纯函数层 | [`InvestmentAccountRecord.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/InvestmentAccountRecord.kt) / [`QuoteTable.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/QuoteTable.kt) | 数据类 `HoldingLike` / `InvestmentAccountRecord` / `Quote` / `QuoteTable` + 校验 / 编解码；Web 镜像 `web/src/finance/investmentAccountRecord.ts` + `quoteTable.ts`；JUnit ≥10 + Vitest ≥21 用例 |
+| ② 聚合层 | [`FinanceAggregator.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt) 新增 `investmentMarketValue(...)` | 独立函数，**不修改** `netWorth` / `monthlyReport` 既有签名；输出 `InvestmentMarketValueSnapshot`（含 `totalValue / currency / accountCount / missingPriceHoldingCount / topHoldings / effectiveTs`）；JUnit 9 用例 |
+| ③ Room 层 | [`QuoteTableEntity.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/entity/QuoteTableEntity.kt) + [`QuoteTableDao.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/dao/QuoteTableDao.kt) + `MIGRATION_9_10` | 表 `finance_quote`，索引 `symbol / ts / dirty`；DAO 含 upsert / latestTs / listByTs / dirtyList / mark* 全套 |
+| ④ 仓库 + UI | [`QuoteTableRepository.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/QuoteTableRepository.kt) + [`QuotesImportScreen.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/settings/QuotesImportScreen.kt) + [`FinanceDashboard.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/FinanceDashboard.kt) 投资卡片 | 行情包整包密封 / 解封 / 上行；同步设置页 + Dashboard 卡片 + 月报行；Web 镜像 `web/src/views/SettingsQuotesSyncView.vue` + `FinanceDashboard.vue` 投资卡片 + 路由 `/finance/settings/quotes` |
+
+### 11.3 锁定数据结构
+
+```
+// ----- 纯函数层（双端镜像）-----
+data class HoldingLike(
+    val symbol: String,           // 1..32 字符，大写无分隔符
+    val shares: Double,           // 有限正数
+    val costBasisMinor: Long,     // 非负整数（成本基础分）
+    val currency: String          // ISO 4217 三位大写字母
+)
+
+data class InvestmentAccountRecord(
+    val id: String,
+    val kind: String,             // 固定 "stock"（与 FinanceAccountEntity 一致）
+    val currency: String,
+    val holdings: List<HoldingLike>,
+    val archived: Boolean
+)
+
+data class Quote(
+    val symbol: String,
+    val priceMinor: Long,         // 单位：分；0 合法（不视为缺价）
+    val currency: String,
+    val ts: Long                  // Unix 毫秒，与包 ts 一致
+)
+
+data class QuoteTable(
+    val ts: Long,                 // 整包时间戳（一次报价批次的瞬时态）
+    val quotes: Map<String, Quote>,
+    val base: String? = null      // 可选基准币种
+)
+
+// ----- 聚合层输出-----
+data class InvestmentHoldingValue(
+    val symbol: String,
+    val currency: String,         // 持仓原币种（折算前）
+    val shares: Double,
+    val priceMinor: Long,
+    val valueInTargetMinor: Long  // 已折算到目标币种（分）
+)
+
+data class InvestmentMarketValueSnapshot(
+    val totalValue: String,                    // decimal-as-string，单位：元
+    val currency: String,                      // 目标币种
+    val accountCount: Int,                     // Android 含归档，Web 仅非归档（详见 §11.6）
+    val missingPriceHoldingCount: Int,
+    val topHoldings: List<InvestmentHoldingValue>,  // 按 valueInTargetMinor 降序，前 N=5
+    val effectiveTs: Long                      // 透传 quoteTable.ts（无报价时 = 0L）
+)
+```
+
+### 11.4 校验与编解码策略
+
+**`InvestmentAccountRecords.parseHoldings(json)`**：
+- 缺失 `holdings` → 空仓 `List`（不抛错，账户照常创建）；
+- 元素非对象 / 缺字段 → 该元素剔除，其余正常解析；
+- `symbol` 长度 1..32 字符；非法字符（非大小写字母 / 数字 / `.` / `-`）剔除；
+- `shares` 需为有限正数（NaN / Infinity / ≤0 剔除）；
+- `cost_basis_minor` 非负整数（负数 / NaN 剔除）；
+- `currency` 严格 `^[A-Z]{3}$`，失败剔除；
+- 同 symbol 多次出现**不去重**，按序保留（与编辑器"逐笔录入"语义一致）。
+
+**`QuoteTables.parse(json)`**：
+- 顶层必须为 JSON 对象；
+- `version` 缺失按 `1` 接受（向后兼容）；
+- `ts` 必填整数（毫秒），非整数 / 缺失 → 整包拒收；
+- `base` 可选，缺省 `null`；
+- `quotes` 必填数组，至少 1 条；空数组整包拒收；
+- 同 symbol 多次取**最后一条**覆盖（last-write-wins）；
+- 单元素 `symbol` / `price_minor` / `currency` / `ts` 字段非法 → 该元素剔除，
+  其余正常解析。
+
+### 11.5 聚合口径与缺价降级
+
+**`FinanceAggregator.investmentMarketValue(investmentAccounts, quoteTable, rateTable, targetCurrency, topN=5)`**：
+
+1. **早退守卫**：`investmentAccounts` 为空 → 返回 `totalValue="0.00"`、
+   `accountCount=0`、其余 0；
+2. **遍历账户**：对每个 `account`：
+   - Android 实现先 `accountCount++` 再 `if (acc.archived) continue` —— 即
+     `accountCount` **含归档**条目；
+   - Web 实现先 `if (acc.archived) continue` 再 `accountCount++` —— 即
+     `accountCount` **仅非归档**条目；
+   - 当前实现与 **spec FR-V2-D.3 "仅非归档"** 存在偏差，详见 §11.6 待对齐
+     笔记；
+   - 未归档账户：遍历 `holdings`，逐笔折算；
+3. **份额 × 价格**：`valueMinor = abs(shares * price_minor)` 用 BigDecimal
+   `setScale(0, HALF_UP)` 取整再恢复符号（负数 = 做空占位）；
+4. **缺价**：在 `quoteTable` 找不到 `symbol` 时，`missingPriceHoldingCount++`
+   且该持仓**不计入** `totalValue`（不抛错）；
+5. **0 价边界**：命中报价恰好为 `0`，`missingPriceHoldingCount` **不**递增，
+   `valueInTargetMinor` 以 `0` 折算（合规的折算输入）；
+6. **异币种折算**：若 `holding.currency != targetCurrency`，缺汇率时该持仓降级
+   为 `valueInTargetMinor=0`、`missingPriceHoldingCount++`（与 B5 汇率缺降级
+   口径锁一致）；
+7. **topN 取降序前 N**：按 `valueInTargetMinor` 降序，`topN` 默认 5，**仅含
+   命中有价**的持仓（缺价不参与排名）；
+8. **effectiveTs 透传**：命中至少 1 笔 `quoteTable` 时透传 `quoteTable.ts`，
+   否则 `effectiveTs = 0L`；
+9. **totalValue 封装**：累加 `valueInTargetMinor` → `BigDecimal.movePointLeft(2)
+   .stripTrailingZeros()`（与 B5 / B6 整数分对齐）。
+
+### 11.6 双端 accountCount 实现分歧（待对齐）
+
+spec FR-V2-D.3 描述 `accountCount` 仅统计非归档条目；当前两端实现存在分歧：
+
+| 端 | 实现 | 行为 | 测试断言 |
+|---|---|---|---|
+| Android | `acc.archived` 之前 `accountCount++` | **含归档** | `InvestmentMarketValueSnapshot.accountCount = 2` |
+| Web | `acc.archived` 之后 `accountCount++` | **仅非归档** | `snap.accountCount = 1` |
+
+**该分歧待 spec 端确认后修正**：本批次在测试用例中**严格匹配各自当
+前真实行为**，并于代码注释与三端测试 fixture 中显式说明，待后续批次统一
+为 spec FR-V2-D.3 "仅非归档" 后回测。修正范围只影响实现**一行**，无需
+改数据契约与 Schema。
+
+### 11.7 Room 迁移 `MIGRATION_9_10`
+
+```
+CREATE TABLE IF NOT EXISTS finance_quote (
+    id TEXT NOT NULL PRIMARY KEY,           -- "${symbol}@${ts}"
+    symbol TEXT NOT NULL,                   -- 冗余存储便于索引
+    priceMinor INTEGER NOT NULL,            -- 分
+    currency TEXT NOT NULL,                 -- ISO 4217
+    ts INTEGER NOT NULL,                    -- 整包 unix 毫秒
+    encryptedPayload TEXT NOT NULL DEFAULT '',  -- 本地导入路径 = ''；pull 下行 = 密文
+    schemaVersion INTEGER NOT NULL DEFAULT 1,
+    module TEXT NOT NULL DEFAULT 'finance',
+    createdAt INTEGER NOT NULL,             -- 设备本地 unix 毫秒
+    updatedAt INTEGER NOT NULL,
+    dirty INTEGER NOT NULL DEFAULT 0,       -- 0 = 已同步上行；1 = 待上行
+    deleted INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS index_finance_quote_symbol ON finance_quote(symbol);
+CREATE INDEX IF NOT EXISTS index_finance_quote_ts ON finance_quote(ts);
+CREATE INDEX IF NOT EXISTS index_finance_quote_dirty ON finance_quote(dirty);
+```
+
+**降级路径**（`MIGRATION_10_9`，仅供开发期）：
+- 删 `idx_finance_quote_dirty` → `idx_finance_quote_ts` → `idx_finance_quote_symbol`；
+- `DROP TABLE finance_quote`；
+- `version = 9` 还原。
+
+### 11.8 同步通道（与 B5 RateTable 同款）
+
+**`QuoteTableRepository`** 是 `RateTableRepository` 1:1 镜像：
+
+```
+class QuoteTableRepository(
+    private val quoteDao: QuoteTableDao,
+    private val records: RecordsRepository,
+    private val auth: AuthManager
+) {
+    suspend fun importPackage(plaintextJson: String): Result<QuoteTable>
+    fun latest(): QuoteTable?
+    fun observeLatestTable(): Flow<QuoteTable?>
+    suspend fun pullAndDecrypt(records: List<RecordEntity>): Int
+    suspend fun pushChanges(): Int
+}
+```
+
+- **整包密封**：解析→`records.upsertFinanceV2("quote", "quote@${ts}", plaintextJson)`
+  → 按 symbol 逐行 `quoteDao.upsertAll(entities)`；
+- **整包解密**：`pullAndDecrypt` 过滤 `module="finance"` + `type="quote"` +
+  非墓碑记录，调 `records.decryptFinanceV2(rec)` 得到 `QuoteTable`，本地
+  `upsertAll`；单条解密失败 runCatching 跳过，不阻断其他记录；
+- **整包上行**：`pushChanges()` 取 `dirtyList()` → 按 `ts` 分组，对每个 ts 用
+  `rowsToTable(...)` 重建 `QuoteTable` → 重新密封一条密文 → 上行；
+- **quoteDao.markClean(...)** 仅在 push 成功后调，未成功的保留 dirty 等下批；
+- **零知识纪律**：行情**原文不入日志**，错误信息只用字段名（`symbol` /
+  `ts` 等），不打印具体报价数字。
+
+### 11.9 接入点（Web / Android 双端镜像）
+
+| 接入点 | Android | Web |
+|---|---|---|
+| 视图入口 | `FinanceDashboard` 顶部"投资行情"按钮 | `FinanceDashboard.vue` `rate-tools` 区"投资行情设置"按钮 |
+| 设置页 | `QuotesImportScreen`（`ui/settings/`，全屏） | `SettingsQuotesSyncView.vue`（路由 `/finance/settings/quotes`） |
+| Dashboard 卡片 | `InvestmentDashboardCard(snapshot, onOpenQuotes)` | `v2-section "投资账户市值"` + 3 张数字卡 |
+| 月报行 | `FinanceDashboard` 月报卡追加"投资账户市值"占位行 | 同左 |
+| store/VM | `FinanceViewModel` `quoteInvestmentState`（独立 StateFlow，**不进** 14 路 combine 主 state） | `useFinanceStore().quoteTable` + `investmentSnapshot` computed |
+| HTTP 同步 URL | `quoteTableSyncUrl`（Android DataStore 中持久化） | `quoteSyncUrl`（Web finance store 持久化） |
+
+### 11.10 端侧识别 / 输入启发式（本批次**禁用**）
+
+Task 8 故意**不实现**以下能力（推迟到 v3 候选）：
+
+- **券商 API 直连**：spec FR-V2-D.2 描述"通过 HTTP 拉取"，本批用用户**离线**
+  配置 JSON + `RecorderWorker` 整包上行（与 B5 汇率包同款）替代；
+- **自动再平衡**：本期不实现；
+- **市场情绪 / 同业比较**：本期不实现；
+- **行情推送 / WebSocket**：本期不实现。
+
+用户手动 `importPackage(plaintextJson)` 是唯一行情录入入口。
+
+### 11.11 单元测试覆盖（≥25 用例，期中 Android ≥12 + Web ≥10）
+
+| 文件 | 用例数 | 覆盖 |
+|---|---|---|
+| Android `InvestmentAccountRecordTest.kt` | 5 | `parseHoldings` 合法 / 缺失 / 字段非法 / `encodeHoldings` 往返 / `build` 工厂 |
+| Android `QuoteTableTest.kt` | 5 | `parse` 合法 / `version` 缺失 / last-write-wins / 字段非法 / `priceMinorOf` 命中与缺价 |
+| Android `QuoteTableRepositoryTest.kt` | 6 | `importPackage` / `latest` / `pullAndDecrypt` 4 类 / `pushChanges` 重建 |
+| Android `FinanceAggregatorV2QuoteTest.kt` | 9 | 空账户 / 单笔 USD 持仓 / 缺价 / 多币种折算 / 0 价边界 / 归档（含 accountCount 行为）/ topHoldings 降序 / 部分缺价 / effectiveTs 透传 |
+| Web `investmentAccountRecord.spec.ts` | 10+ | parse/encode/build + 8 种字段非法 + 边界（symbol 长度 / costBasis / currency 大小写） |
+| Web `quoteTable.spec.ts` | 11+ | parse + version / last-write-wins / 8 种非法 / priceMinorOf 3 边界 / encode 往返 |
+| Web `aggregator-quote.spec.ts` | 8 | 镜像 Android 9 用例（含 Web accountCount 仅非归档断言） |
+
+### 11.12 跨端对齐说明
+
+- **`accountCount` 分歧**：详见 §11.6，本批不修正，实现互不回归；
+- **货币符号 / 数字接口**：所有金额字段统一 `decimal-as-string` 元字符
+  串 + `Long` 整数分，与 B5 / B6 锁口径一致；
+- **跨端共享 fixture**：本批新增投资账户 fixture 镜像 `web/src/finance/
+  __fixtures__/investment-account-cases.json` 与 Android `android/app/src/
+  test/resources/finance/__fixtures__/investment-account-cases.json` 走同
+  SHA-256；行情包 fixture 镜像同款；
+- **Web 端 stock 枚举**：`web/src/views/finance/FinanceAccountList.vue`
+  `KIND_LABEL` 已含 `stock: '投资'`，本批无改动；
+- **`FinanceAccount.holdings` 字段**：Dashboard 投资卡片渲染时
+  `investmentAccounts` computed 当前返回**空数组**（骨架先行），待 B9+ 编
+  辑器扩 `holdings` 字段后注入真实数据。
+
+### 11.13 接入列表（文档交叉引用）
+
+| 引用对象 | 路径 | 用途 |
+|---|---|---|
+| Android 投资账户纯函数 | [`InvestmentAccountRecord.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/InvestmentAccountRecord.kt) | `HoldingLike` / `InvestmentAccountRecord` + `parse/encode/build` |
+| Android 行情包纯函数 | [`QuoteTable.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/finance/QuoteTable.kt) | `Quote` / `QuoteTable` + `parse/encode/priceMinorOf` |
+| Android Room Entity | [`QuoteTableEntity.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/entity/QuoteTableEntity.kt) | `finance_quote` 表 |
+| Android Room DAO | [`QuoteTableDao.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/dao/QuoteTableDao.kt) | upsert / list / mark 全套 |
+| Android 仓库 | [`QuoteTableRepository.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/data/finance/QuoteTableRepository.kt) | 整包密封 / 解封 / 上行 |
+| Android 视图 | [`QuotesImportScreen.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/settings/QuotesImportScreen.kt) / [`FinanceDashboard.kt`](file:///d:/github/everything/everything/android/app/src/main/java/com/everything/eve/ui/finance/FinanceDashboard.kt) 投资卡片 | 同步入口 + Dashboard |
+| Web 投资账户 | `web/src/finance/investmentAccountRecord.ts` | 镜像 |
+| Web 行情包 | `web/src/finance/quoteTable.ts` | 镜像 |
+| Web 聚合 | `web/src/finance/aggregator.ts` `investmentMarketValue(...)` | 独立函数 |
+| Web store | `web/src/stores/finance.ts` `quoteTable / quoteSyncUrl` | 状态 + 动作 |
+| Web 视图 | `web/src/views/SettingsQuotesSyncView.vue` + `web/src/views/finance/FinanceDashboard.vue` 投资卡片 | 镜像 |
+| 烟测手册 | [`docs/smoke/finance-v2-investment-manual.md`](smoke/finance-v2-investment-manual.md) | SMOKE-V2-INV-S1~S6 真机 / 浏览器冒烟 |
 
 ## 备注
 

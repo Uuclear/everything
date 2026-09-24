@@ -23,7 +23,10 @@ import android.content.Context
 import com.everything.eve.finance.FinanceRecords
 
 /**
- * 财务模块非敏感偏好（B5：默认折算目标币种）。
+ * 财务模块非敏感偏好。
+ *
+ * B5（FR-V2-C.3）：默认折算目标币种；
+ * Task 8（FR-V2-D.2 / FR-V2-D.3）：手动行情同步端点 URL。
  */
 object FinanceSettings {
 
@@ -33,8 +36,20 @@ object FinanceSettings {
     /** 默认折算目标币种键。 */
     private const val KEY_DEFAULT_CURRENCY = "default_currency"
 
+    /** 行情同步端点 URL 键（Task 8）。 */
+    private const val KEY_QUOTE_SYNC_URL = "quote_sync_url"
+
     /** 默认币种（未设置 / 键缺失时回退）。 */
     const val DEFAULT_CURRENCY: String = "CNY"
+
+    /**
+     * 默认行情同步端点 URL（Task 8）。
+     *
+     * 仅在用户未自定义时生效；服务端可托管一份手维护的 JSON 行情包。
+     * 该 URL 本身是公开端点（不涉及鉴权），HTTP GET 拉取 → 解密 →
+     * 导入本地 finance_quote 表。
+     */
+    const val DEFAULT_QUOTE_SYNC_URL: String = "https://example.invalid/quotes/latest.json"
 
     /**
      * 预设币种列表（RatesImportScreen 的 FilterChip 候选）。
@@ -64,6 +79,24 @@ object FinanceSettings {
     fun setDefaultCurrency(context: Context, code: String) {
         if (!isValidCurrencyCode(code)) return
         prefs(context).edit().putString(KEY_DEFAULT_CURRENCY, code).apply()
+    }
+
+    /**
+     * 读行情同步端点 URL（Task 8）；未设置时返回 [DEFAULT_QUOTE_SYNC_URL]。
+     */
+    fun getQuoteSyncUrl(context: Context): String =
+        prefs(context).getString(KEY_QUOTE_SYNC_URL, null)
+            ?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_QUOTE_SYNC_URL
+
+    /**
+     * 写行情同步端点 URL（Task 8）。
+     *
+     * 防御性兜底：空白值直接忽略不写。
+     */
+    fun setQuoteSyncUrl(context: Context, url: String) {
+        if (url.isBlank()) return
+        prefs(context).edit().putString(KEY_QUOTE_SYNC_URL, url).apply()
     }
 
     /**

@@ -8,6 +8,7 @@ import com.everything.eve.data.RecordsRepository
 import com.everything.eve.data.event.EventsRepository
 import com.everything.eve.data.finance.AttachmentRepository
 import com.everything.eve.data.finance.FinanceRepository
+import com.everything.eve.data.finance.QuoteTableRepository
 import com.everything.eve.data.finance.RateTableRepository
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
@@ -44,6 +45,9 @@ object ServiceLocator {
         private set
     // 阶段 5 v2 / B5：离线汇率包仓库（finance_rate 本地拆行表 + records.type="rate" 通道）。
     lateinit var rateTableRepository: RateTableRepository
+        private set
+    // 阶段 5 v2 / Task 8：投资行情包仓库（finance_quote 本地拆行表 + records.type="quote" 通道）。
+    lateinit var quoteTableRepository: QuoteTableRepository
         private set
     lateinit var db: EveDatabase
         private set
@@ -96,6 +100,13 @@ object ServiceLocator {
         // CollectorWorker 末尾调 pullAndDecrypt + pushChanges 对账。
         rateTableRepository = RateTableRepository(
             rateDao = db.financeRateDao(),
+            recordsRepository = repo,
+            auth = auth,
+        )
+        // 阶段 5 v2 / Task 8：投资行情包仓库（QuoteTableDao 拆行表 + records.type="quote" 通道）；
+        // CollectorWorker 末尾同样调 pullAndDecrypt + pushChanges 对账。
+        quoteTableRepository = QuoteTableRepository(
+            quoteDao = db.quoteTableDao(),
             recordsRepository = repo,
             auth = auth,
         )

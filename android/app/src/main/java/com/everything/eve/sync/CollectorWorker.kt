@@ -115,6 +115,18 @@ class CollectorWorker(appContext: Context, params: WorkerParameters) :
                         }
                     )
                     ServiceLocator.rateTableRepository.pushChanges()
+                    // ---- 阶段 5 v2 / Task 8 挂载点：投资行情包 pull + push 对账 ----
+                    // 复用同一份 financeRecords 过滤 type="quote"；QuoteTableRepository
+                    // 内部按 module + type 双键兜底过滤。pull 解密下行包并按 symbol
+                    // 拆行入库（dirty=0）；pushChanges 兜底重建 records 包并把本地行翻
+                    // 干净，records 行的服务端推送仍由 RecordsRepository.sync 承接。
+                    ServiceLocator.quoteTableRepository.pullAndDecrypt(
+                        financeRecords.filter {
+                            it.module == com.everything.eve.data.finance.FinanceModule.MODULE &&
+                                it.type == com.everything.eve.data.finance.FinanceModule.TYPE_QUOTE
+                        }
+                    )
+                    ServiceLocator.quoteTableRepository.pushChanges()
                     ReminderScheduler.rebuildChain(ctx)
                 }
             } catch (t: Throwable) {

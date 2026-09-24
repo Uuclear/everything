@@ -53,6 +53,19 @@
 //   - tasks.md TR-4.6（v2 aggregator fixture 双端 SHA-256 一致性核验）
 //   - web/src/finance/aggregator.ts（Web 镜像版本，本期 T5 子代理同步创建）
 //   - docs/schemas/finance.schema.json（字段口径真理源）
+//
+// v2 Task 8 投资账户 + 手动行情（stage5-finance-v2 / Task 8 / FR-V2-D.2、FR-V2-D.3）:
+//   投资账户市值聚合以**独立函数**形式提供（不进 netWorth / monthlyReport 内部,
+//   避免破坏既有签名与 190+ 测试 fixture）:
+//     - investmentMarketValue: 投资账户市值聚合（minor = 分, 折算到目标币）;
+//       算法骨架: value_minor = sum(holding.shares * quote.price_minor), 逐持仓
+//       按其 currency 先经 RateTable 折算到 targetCurrency; 缺价 / 缺汇率一律
+//       按 0 / 面值降级（同缺汇率语义）;
+//     - investmentTopHoldings: 持仓 top N（市值排序, 跨账户聚合, 同 symbol 跨账户
+//       累加; 返回 List<InvestmentHoldingValue>）。
+//   UI 集成: FinanceDashboard 投资账户卡片调用 investmentMarketValue + top 5;
+//   FinanceTxList 月报新增"投资账户市值变化"行调用 investmentMarketValue（两月
+//   对比, 单调增/减由调用方计算）。
 // ============================================================================
 
 package com.everything.eve.finance
@@ -460,6 +473,164 @@ object FinanceAggregator {
             txCount = txCount,
             categoryBreakdown = categoryBreakdown,
         )
+    }
+
+    // ============================================================================
+    // 公开 API —— 投资账户市值聚合（Task 8 / FR-V2-D.2、FR-V2-D.3）
+    // ============================================================================
+
+    /**
+     * 投资账户单持仓市值（minor = 分, 已折算到目标币）。
+     *
+     * 与 [investmentTopHoldings] 一并返回, UI 层可直接列表展示。
+     *
+     * @property symbol 证券代码（与 HoldingLike.symbol / Quote.symbol 锁同口径）
+     * @property currency 持仓 / 报价币种（与 HoldingLike.currency 一致; 折算前原币）
+     * @property shares 持仓份额（Double, 透传 HoldingLike.shares）
+     * @property priceMinor 该持仓对应行情报价的 price_minor（缺价 = 0）
+     * @property valueInTargetMinor 折算到目标币后的 minor 金额（分）
+     */
+    data class InvestmentHoldingValue(
+        val symbol: String,
+        val currency: String,
+        val shares: Double,
+        val priceMinor: Long,
+        val valueInTargetMinor: Long,
+    )
+
+    /**
+     * 投资账户市值聚合快照（FinanceDashboard 投资卡片数据源）。
+     *
+     * 字段语义:
+     *   - `totalValue`: 所有非归档投资账户的市值合计（已折算到 targetCurrency）;
+     *   - `currency`: 目标币（与入参 targetCurrency 一致, 便于 UI 直接展示）;
+     *   - `accountCount`: 投资账户数（含已归档条目, 与列表口径一致）;
+     *   - `missingPriceHoldingCount`: 缺价的持仓数（UI 可据此提示"补同步行情"）;
+     *   - `topHoldings`: 跨账户 top N 持仓（市值降序）;
+     *   - `effectiveTs`: 行情包整体生效时刻（缺价 / 缺包 → null）。
+     *
+     * 边界:
+     *   - investmentAccounts 为空 → totalValue = "0.00", accountCount = 0, topHoldings = []。
+     *   - quoteTable 为空 → 全持仓缺价, totalValue = "0.00", missingPriceHoldingCount = 所有非归档持仓数。
+     *   - 缺汇率按 1:1 面值降级（与其它折算同口径）。
+     */
+    data class InvestmentMarketValueSnapshot(
+        val totalValue: String,
+        val currency: String,
+        val accountCount: Int,
+        val missingPriceHoldingCount: Int,
+        val topHoldings: List<InvestmentHoldingValue>,
+        val effectiveTs: Long?,
+    )
+
+    /**
+     * 投资账户市值聚合（Task 8 / FR-V2-D.2、FR-V2-D.3）。
+     *
+     * 算法骨架:
+     *   1. 遍历 investmentAccounts, 跳过 archived=true; 其它账户逐笔 holdings 求
+     *      (shares * price_minor) → 该持仓原币市值（cents = shares * price_minor）;
+     *      缺价（quoteTable 为 null 或 QuoteTables.priceMinorOf 返回 null）按 0 计入;
+     *   2. 逐持仓经 [toTarget] 折算到 targetCurrency, 累加进 totalCents;
+     *   3. 同时累加每个持仓的折算后市值, 收集 top N（N 默认 5）按 valueInTargetMinor
+     *      降序排列;
+     *   4. 返回 [InvestmentMarketValueSnapshot]。
+     *
+     * 注意:
+     *   - shares 是 Double, price_minor 是 Long, 两者相乘前 shares 转为 BigDecimal
+     *     走绝对值 HALF_UP 取整（与既有汇率折算舍入口径一致）;
+     *   - 同 symbol 跨账户累加（不在此处去重, top N 跨账户维度求值）;
+     *   - 缺价标记 missingPriceHoldingCount 便于 UI 给出"该账户还差 X 个报价"
+     *     引导, 不计入 totalValue（与 spec 一致: 缺价按 0 计入）;
+     *   - effectiveTs: quoteTable 为 null → null; 否则取 quoteTable.ts。
+     *
+     * @param investmentAccounts 投资账户列表（含归档条目, 内部过滤）
+     * @param quoteTable 行情包（可为 null; null 时全持仓按缺价计 0）
+     * @param topN top 持仓数（默认 5; 与 Dashboard "持仓 top 5" 锁口径）
+     * @param targetCurrency 折算目标币（默认 DEFAULT_CURRENCY = "CNY"）
+     * @param rateTable 多币种汇率表（默认 null; null / 缺汇率按面值 1:1 降级）
+     * @return 投资账户市值快照（始终非 null）
+     */
+    fun investmentMarketValue(
+        investmentAccounts: List<InvestmentAccountRecord>,
+        quoteTable: QuoteTable? = null,
+        topN: Int = 5,
+        targetCurrency: String = DEFAULT_CURRENCY,
+        rateTable: RateTable? = null,
+    ): InvestmentMarketValueSnapshot {
+        // ========== 1. 遍历账户与持仓, 累计原币市值 + 折算到目标币 ==========
+        var totalCents: Long = 0L
+        var missingPriceHoldingCount: Int = 0
+        val perHolding = ArrayList<InvestmentHoldingValue>()
+        var accountCount: Int = 0
+
+        for (acc in investmentAccounts) {
+            accountCount++
+            if (acc.archived) continue
+            for (h in acc.holdings) {
+                // 缺价查找: quoteTable 为 null 或该 symbol 不在表中 → 0
+                val priceMinor: Long = if (quoteTable == null) {
+                    0L
+                } else {
+                    QuoteTables.priceMinorOf(h.symbol, quoteTable) ?: 0L
+                }
+                if (priceMinor == 0L && quoteTable?.quotes?.containsKey(h.symbol) != true) {
+                    // 仅当"报价缺失"（既无 quote 也未命中 0 价）计入缺价统计。
+                    // 命中的报价恰好为 0（罕见但合法）不视为缺价。
+                    missingPriceHoldingCount++
+                }
+                // 原币市值 cents: shares * priceMinor (Double × Long → BigDecimal)
+                val holdingCents: Long = multiplySharesByPriceMinor(h.shares, priceMinor)
+                // 折算到目标币
+                val valueInTargetMinor: Long = toTarget(
+                    holdingCents, h.currency, targetCurrency, rateTable
+                )
+                totalCents += valueInTargetMinor
+                perHolding.add(
+                    InvestmentHoldingValue(
+                        symbol = h.symbol,
+                        currency = h.currency,
+                        shares = h.shares,
+                        priceMinor = priceMinor,
+                        valueInTargetMinor = valueInTargetMinor,
+                    )
+                )
+            }
+        }
+
+        // ========== 2. top N 排序（按 valueInTargetMinor 降序） ==========
+        val top: List<InvestmentHoldingValue> = perHolding
+            .sortedWith(
+                compareByDescending<InvestmentHoldingValue> { it.valueInTargetMinor }
+                    .thenByDescending { it.symbol }
+            )
+            .take(if (topN < 0) 0 else topN)
+
+        // ========== 3. 行情包生效时刻 ==========
+        val effectiveTs: Long? = quoteTable?.ts
+
+        return InvestmentMarketValueSnapshot(
+            totalValue = formatCents(totalCents),
+            currency = targetCurrency,
+            accountCount = accountCount,
+            missingPriceHoldingCount = missingPriceHoldingCount,
+            topHoldings = top,
+            effectiveTs = effectiveTs,
+        )
+    }
+
+    /**
+     * shares × priceMinor 的绝对值 HALF_UP 取整（与 RateTable 折算锁同舍入口径）。
+     *
+     * 价格单位是分 (price_minor Long), 份额是 Double; Long × Double 在 JVM 上
+     * 走 BigDecimal 通路避免浮点累积误差。
+     */
+    private fun multiplySharesByPriceMinor(shares: Double, priceMinor: Long): Long {
+        if (shares <= 0.0 || !shares.isFinite()) return 0L
+        // 份额与价格均为非负, 直接相乘再 HALF_UP 取整, 不涉及符号恢复。
+        val bd = java.math.BigDecimal(shares)
+            .multiply(java.math.BigDecimal(priceMinor))
+            .setScale(0, java.math.RoundingMode.HALF_UP)
+        return bd.toLong()
     }
 
     /**

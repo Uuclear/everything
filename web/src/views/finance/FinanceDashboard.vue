@@ -40,6 +40,8 @@ import {
   toCardLike,
   toTxLike,
   toLoanLike,
+  investmentMarketValue,
+  type InvestmentAccountLike,
 } from '../../finance/aggregator'
 
 const router = useRouter()
@@ -309,6 +311,33 @@ function gotoList(hash: string): void {
 function gotoRatesSettings(): void {
   router.push({ name: 'finance-settings-rates' })
 }
+
+// ========== Task 8 跳转：投资行情设置页（/finance/settings/quotes） ==========
+function gotoQuotesSettings(): void {
+  router.push({ name: 'finance-settings-quotes' })
+}
+
+// ========== Task 8 投资账户市值快照（FR-V2-D.3） ==========
+// 当前 Web 端 FinanceAccount schema 暂未扩展 holdings（编辑器扩展属后续批
+// 次），此处聚合以空投资账户列表调用，仅用于把看板骨架与 Android 镜像对齐；
+// 一旦 FinanceAccount 扩 holdings，本处将以派生 InvestmentAccountLike[] 注入。
+const investmentAccounts = computed<InvestmentAccountLike[]>(() => [])
+const investmentSnapshot = computed(() =>
+  investmentMarketValue(
+    investmentAccounts.value,
+    store.quoteTable,
+    store.rateTable,
+    store.defaultCurrency,
+    5,
+  ),
+)
+/** 把 minor 单位 bigint 转为"¥1,234"格式（与 formatYuan 锁同口径，仅展示整数）。 */
+function formatYuanFromMinor(minor: bigint): string {
+  const num = Number(minor) / 100
+  if (!Number.isFinite(num)) return '¥0'
+  const yuan = Math.floor(num)
+  return '¥' + yuan.toLocaleString('zh-CN')
+}
 </script>
 
 <template>
@@ -320,6 +349,10 @@ function gotoRatesSettings(): void {
       </n-button>
       <n-button size="small" quaternary @click="gotoRatesSettings">
         汇率包设置
+      </n-button>
+      <!-- Task 8 / FR-V2-D.2 —— 投资行情入口（与汇率包设置同款镜像） -->
+      <n-button size="small" quaternary @click="gotoQuotesSettings">
+        投资行情设置
       </n-button>
     </div>
 
@@ -445,6 +478,59 @@ function gotoRatesSettings(): void {
         <n-space class="meta" :size="14">
           <span class="meta-item">v2 子类型 · 纯客户端提醒窗口</span>
           <span class="meta-item">不同步上行 · 不外露具体日期</span>
+        </n-space>
+      </div>
+
+      <!-- ========== Task 8 / FR-V2-D.3 投资市值卡 ========== -->
+      <div class="v2-section">
+        <div class="v2-title">投资账户市值</div>
+        <div class="grid">
+          <n-card class="cell" hoverable @click="gotoQuotesSettings">
+            <template #header>投资市值</template>
+            <div class="big-num">{{ formatYuanFromMinor(investmentSnapshot.totalValue) }}</div>
+            <div class="sub">
+              {{ investmentSnapshot.currency }}
+              <span> · 账户 {{ investmentSnapshot.accountCount }} 个</span>
+              <n-tag
+                v-if="investmentSnapshot.missingPriceHoldingCount > 0"
+                size="tiny"
+                :bordered="false"
+                type="warning"
+              >
+                缺价 {{ investmentSnapshot.missingPriceHoldingCount }}
+              </n-tag>
+            </div>
+          </n-card>
+
+          <n-card class="cell" hoverable>
+            <template #header>行情包状态</template>
+            <div class="big-num">
+              <n-tag :type="store.quoteTable ? 'success' : 'default'">
+                {{ store.quoteTable ? '已导入' : '未导入' }}
+              </n-tag>
+            </div>
+            <div class="sub">
+              <span v-if="store.quoteTable">
+                生效日期 {{ store.quoteTable.ts ? new Date(store.quoteTable.ts).toISOString().slice(0, 10) : '-' }}
+              </span>
+              <span v-else>点击下方按钮导入行情包</span>
+            </div>
+          </n-card>
+
+          <n-card class="cell" hoverable>
+            <template #header>同步地址</template>
+            <div class="big-num" style="font-size: 14px; word-break: break-all;">
+              {{ store.quoteSyncUrl ?? '未配置' }}
+            </div>
+            <div class="sub">待通道恢复后由 CollectorWorker 拉取</div>
+          </n-card>
+        </div>
+        <n-space class="meta" :size="14">
+          <span class="meta-item">投资账户 · 纯客户端聚合</span>
+          <span class="meta-item">不同步上行 · 不外露具体持仓</span>
+          <n-button size="small" type="primary" ghost @click="gotoQuotesSettings">
+            投资行情设置
+          </n-button>
         </n-space>
       </div>
     </template>

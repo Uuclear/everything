@@ -25,6 +25,7 @@
 // ============================================================================
 
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { NButton, NRadioGroup, NRadio, NEmpty, NSpace, NSwitch, useMessage } from 'naive-ui'
 // B7 / FR-V2-G：仅用于在开关失败时区分“环境不支持”与“权限被拒”两种提示，
 // 不直接操作通知器（启用 / 调度 / 补发全部收口在 store action 内）。
@@ -118,6 +119,14 @@ async function onToggleNotifications(on: boolean): Promise<void> {
     message.warning('通知权限未开启，可在浏览器设置中修改')
   }
 }
+
+// ========== Task 8 / FR-V2-D.2 —— 投资行情入口 ==========
+// 仅在 dashboard tab 头部按钮触发；跳转后由 SettingsQuotesSyncView 自
+// 渲染"同步 URL + 行情包导入"完整表单（与 B5 汇率设置入口同款写法）。
+const financeRouter = useRouter()
+function gotoQuotesSettings(): void {
+  financeRouter.push({ name: 'finance-settings-quotes' })
+}
 </script>
 
 <template>
@@ -163,6 +172,10 @@ async function onToggleNotifications(on: boolean): Promise<void> {
         <!-- B6 —— 预算新建按钮（列表内也有同入口） -->
         <n-button v-if="activeTab === 'budgets'" size="small" type="primary" @click="gotoEditor('budget')">
           + 新建预算
+        </n-button>
+        <!-- Task 8 / FR-V2-D.2 —— 投资行情设置入口（dashboard 常驻） -->
+        <n-button v-if="activeTab === 'dashboard'" size="small" type="primary" ghost @click="gotoQuotesSettings">
+          投资行情
         </n-button>
       </n-space>
     </div>

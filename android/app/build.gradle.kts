@@ -40,8 +40,13 @@ android {
     // 这里开启 returnDefaultValues=true 让 JSONObject.put / Context.getString / Application
     // 等返回零值（null / 0 / false / empty List）以确保单元测试可运行（org.json.put 抛错
     // 是财务附件仓库测试最常见的根因——records 通道元数据 JSON 序列化调用 JSONObject）。
+    //
+    // includeAndroidResources：让 Robolectric 把 androidx / material3 library 内部字符串
+    // 资源（如 ModalBottomSheet Scrim 用的 close_sheet 等）合并进沙箱 resources.arsc。
+    // 否则 manifest=NONE 的 Compose Sheet 测试会因 library string NotFoundException 全军覆没。
     testOptions {
         unitTests.isReturnDefaultValues = true
+        unitTests.isIncludeAndroidResources = true
     }
 
     packaging {

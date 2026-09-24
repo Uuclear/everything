@@ -666,3 +666,277 @@ export function toLoanLike(p: FinanceLoan): LoanLike {
     status: p.status,
   }
 }
+
+// ============================================================================
+// Task 8 投资账户市值聚合（FR-V2-D.3 / spec FR-V2-D.3，独立函数 —— 不动 netWorth
+// 既有签名，避免破坏既有 190+ 测试 fixture）
+// ============================================================================
+//
+// 任务: stage5-finance-v2 / Task 8 批次（投资账户 + 手动行情）
+// 路径: web/src/finance/aggregator.ts（末尾追加，本批次由同一代理双端实现）
+// 作用: 在客户端对 investment 账户集合 × QuoteTable 做市值聚合；返回独立
+//       InvestmentMarketValueSnapshot 形态（不并入 netWorth / monthlyReport /
+//       budgetThreshold 任一既有聚合的口径），由 UI 层在投资看板按需调用。
+//
+// 设计要点:
+//   1. 独立函数 —— investmentMarketValue(...) 自身构成数据流，零依赖 netWorth
+//      / monthlyReport / budgetThreshold；缺价 / 缺汇率均按各自锁定口径降级；
+//   2. 份额 × 价格折算 —— `shares * price_minor / 1.0` 用 cents 整数 + abs →
+//      round 锁定（与 RateTable 折算锁同舍入口径），避免 Double × Long 浮点
+//      累积误差；
+//   3. 缺价 vs 0 价边界 —— 缺价（quoteTable 缺该 symbol）计入
+//      missingPriceHoldingCount，命中的报价恰好为 0（罕见但合法）不视为缺价；
+//   4. 归档过滤 —— archived=true 的投资账户不计入 totalValue / accountCount；
+//   5. topHoldings 按 valueInTargetMinor 降序，前 topN 条（默认 5）；
+//   6. 双端锁定 —— 与 Android android/.../finance/FinanceAggregator.kt#
+//      investmentMarketValue 逐字段一致。
+//
+// 关联:
+//   - .trae/specs/stage5-finance-v2/spec.md FR-V2-D.3（投资账户市值聚合）
+//   - .trae/specs/stage5-finance-v2/tasks.md Task 8 TR-8.3
+//   - web/src/finance/investmentAccountRecord.ts（持仓 DTO，1:1 锁口径）
+//   - web/src/finance/quoteTable.ts（手动行情包，1:1 锁口径）
+//   - web/src/finance/rateTable.ts（汇率折算消费方）
+//   - android/.../finance/FinanceAggregator.kt#investmentMarketValue（Android 镜像）
+// ============================================================================
+
+// -----------------------------------------------------------------------------
+// Investment 入参 DTO（与 InvestmentAccountRecord 1:1 锁口径，不并入聚合内部
+// 数据流，便于 Vitest 直接构造 fixture）
+// -----------------------------------------------------------------------------
+
+/**
+ * 投资账户市值聚合单条持仓视图（每笔 holdings[i] 聚合结果）。
+ *
+ * @property symbol 证券代码（与 HoldingLike 锁口径）
+ * @property currency 持仓原币（ISO 4217 三字母大写）
+ * @property shares 持仓份额（单位：股 / 份）
+ * @property priceMinor 该 symbol 的报价（minor = 分；缺价时为 null）
+ * @property valueInTargetMinor 该笔持仓折算到目标币后的市值（minor = 分；
+ *   缺价时按 0 计，避免 UI 显示 NaN）
+ */
+export interface InvestmentHoldingValue {
+  readonly symbol: string
+  readonly currency: string
+  readonly shares: number
+  readonly priceMinor: number | null
+  readonly valueInTargetMinor: bigint
+}
+
+/**
+ * 投资账户市值聚合快照（Dashboard 与月报行唯一消费形态）。
+ *
+ * @property totalValue 投资账户组合市值（目标币 minor = 分）
+ * @property currency 目标币 ISO 4217 三字母代码（与 targetCurrency 入参一致；
+ *   默认 DEFAULT_CURRENCY = "CNY"）
+ * @property accountCount 计入账户数（archived=true 跳过）
+ * @property missingPriceHoldingCount 缺价持仓数（quoteTable 缺该 symbol）
+ * @property topHoldings 按 valueInTargetMinor 降序的前 topN 条（默认 5）；空
+ *   账户时为 []
+ * @property effectiveTs 行情包生效时刻（quoteTable.ts；null 时为 null）
+ */
+export interface InvestmentMarketValueSnapshot {
+  readonly totalValue: bigint
+  readonly currency: string
+  readonly accountCount: number
+  readonly missingPriceHoldingCount: number
+  readonly topHoldings: readonly InvestmentHoldingValue[]
+  readonly effectiveTs: number | null
+}
+
+/**
+ * 投资账户聚合入参 DTO（与 InvestmentAccountRecord 1:1 锁口径）。
+ *
+ * 仅承载聚合所需的最小字段集（id / kind / currency / holdings / archived），
+ * 与 store 层 InvestmentAccountRecord 形态一一对应。
+ */
+export interface InvestmentAccountLike {
+  readonly id: string
+  readonly kind: string
+  readonly currency: string
+  readonly holdings: ReadonlyArray<{
+    readonly symbol: string
+    readonly shares: number
+    readonly costBasisMinor: number
+    readonly currency: string
+  }>
+  readonly archived: boolean
+}
+
+// -----------------------------------------------------------------------------
+// 常量区 —— 默认 topN 与缺价降级
+// -----------------------------------------------------------------------------
+
+/** 默认 topN —— Dashboard 卡片展示前 5 条大持仓（与 Android FinanceAggregator.DEFAULT_INVESTMENT_TOP_N 锁口径）。 */
+const DEFAULT_INVESTMENT_TOP_N = 5
+
+// -----------------------------------------------------------------------------
+// 公开 API —— investmentMarketValue（独立函数，与 netWorth / monthlyReport /
+// budgetThreshold 不在同一个数据流）
+// -----------------------------------------------------------------------------
+
+/**
+ * 投资账户市值聚合（独立入口，与 netWorth 解耦）。
+ *
+ * 算法骨架：
+ *   1. 遍历 investmentAccounts，仅 archived=false 的账户参与聚合；统计 accountCount；
+ *   2. 对每笔 holdings[i]：
+ *      - 缺价（quoteTable 缺该 symbol）→ priceMinor = null，valueInTarget = 0n，
+ *        missingPriceHoldingCount++；
+ *      - 命中报价 → 持仓原币下的市值 minor = shares * price_minor（abs → round
+ *        锁定；分母为 1 不引入折算）；
+ *      - 与 RateTable 折算（持仓原币 → 目标币）：无表 / 同币 / 缺汇率均按面值
+ *        降级（convertMinorOrIdentity 同口径）；
+ *   3. totalValue = 所有持仓 valueInTarget 之和（目标币 minor）；
+ *   4. topHoldings 按 valueInTargetMinor 降序取前 topN 条；空账户时返回 []；
+ *   5. effectiveTs 取 quoteTable.ts（未提供时为 null）。
+ *
+ * 边界：
+ *   - investmentAccounts 为空 / null → 返回零值快照（totalValue=0n,
+ *     accountCount=0, missingPriceHoldingCount=0, topHoldings=[]）；
+ *   - quoteTable 为 null → 所有持仓均视为缺价（missingPriceHoldingCount =
+ *     holdings 总数，totalValue = 0n, effectiveTs = null）；
+ *   - 同 symbol 在同一账户内多次出现 → 按序累加，不去重（与 HoldingLike 解
+ *     析口径一致）；
+ *   - 跨账户同 symbol → 分别落 topHoldings（不合并，仅按目标币市值降序排序）。
+ *
+ * @param investmentAccounts 投资账户列表（DTO 形态）
+ * @param quoteTable 手动行情包（DTO 形态；null 表示无行情）
+ * @param rateTable 离线汇率表（null 时按 1:1 面值；缺汇率按面值降级）
+ * @param targetCurrency 目标币 ISO 4217 三字母代码（默认 DEFAULT_CURRENCY）
+ * @param topN topHoldings 上限（默认 5；<=0 时取 5）
+ * @return InvestmentMarketValueSnapshot（始终非 null）
+ */
+export function investmentMarketValue(
+  investmentAccounts: readonly InvestmentAccountLike[],
+  quoteTable: QuoteTableLike | null,
+  rateTable: RateTable | null,
+  targetCurrency: string = DEFAULT_CURRENCY,
+  topN: number = DEFAULT_INVESTMENT_TOP_N,
+): InvestmentMarketValueSnapshot {
+  // 防御：目标币非法时不做任何计算（与 monthlyReport 锁同口径，v2 不再静默）。
+  if (targetCurrency.length === 0) {
+    throw new Error('investmentMarketValue targetCurrency 不能为空')
+  }
+
+  // topN 归一化：<=0 或 NaN → 默认 5。
+  const effectiveTopN = topN > 0 && Number.isFinite(topN)
+    ? Math.floor(topN)
+    : DEFAULT_INVESTMENT_TOP_N
+
+  // 行情包生效时刻（未提供时为 null —— Dashboard 投资卡片降级文案依据）。
+  const effectiveTs: number | null = quoteTable ? quoteTable.ts : null
+
+  // ========== 1. 聚合遍历 ==========
+  const allValues: InvestmentHoldingValue[] = []
+  let accountCount = 0
+  let missingPriceHoldingCount = 0
+  let totalValue = 0n
+
+  for (const acc of investmentAccounts) {
+    if (acc.archived) continue
+    accountCount++
+
+    for (const h of acc.holdings) {
+      // ---- 1.1 查价 ----
+      const priceMinor = quoteTable
+        ? priceMinorOfLike(h.symbol, quoteTable)
+        : null
+
+      // ---- 1.2 持仓原币下的 minor 市值（缺价时 = 0n） ----
+      const holdingCurrencyCents = computeHoldingCents(priceMinor, h.shares)
+
+      // ---- 1.3 折算到目标币（按持仓原币 → 目标币，与 RateTable 折算锁同入口径） ----
+      let valueInTargetMinor: bigint
+      if (priceMinor === null) {
+        // 缺价：记入 missingPriceHoldingCount；该笔持仓按 0 计，避免 UI NaN。
+        missingPriceHoldingCount++
+        valueInTargetMinor = 0n
+      } else {
+        valueInTargetMinor = toTarget(
+          holdingCurrencyCents,
+          h.currency,
+          targetCurrency,
+          rateTable,
+        )
+      }
+
+      totalValue = totalValue + valueInTargetMinor
+      allValues.push({
+        symbol: h.symbol,
+        currency: h.currency,
+        shares: h.shares,
+        priceMinor,
+        valueInTargetMinor,
+      })
+    }
+  }
+
+  // ========== 2. topHoldings 排序与截取 ==========
+  // 按 valueInTargetMinor 降序；同值按 symbol 升序作为稳定排序键。
+  allValues.sort((a, b) => {
+    if (a.valueInTargetMinor === b.valueInTargetMinor) {
+      return a.symbol.localeCompare(b.symbol)
+    }
+    return b.valueInTargetMinor < a.valueInTargetMinor ? -1 : 1
+  })
+  const topHoldings = allValues.slice(0, effectiveTopN)
+
+  return {
+    totalValue,
+    currency: targetCurrency,
+    accountCount,
+    missingPriceHoldingCount,
+    topHoldings,
+    effectiveTs,
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 私有工具方法 —— 投资聚合专用
+// -----------------------------------------------------------------------------
+
+/**
+ * QuoteTable 入参 DTO（与 web/src/finance/quoteTable.ts 的 QuoteTable 形态锁口径）。
+ *
+ * @property ts 行情包整体生效时刻（Unix 毫秒）
+ * @property quotes 报价映射（key = symbol）
+ */
+export interface QuoteTableLike {
+  readonly ts: number
+  readonly quotes: ReadonlyMap<string, {
+    readonly symbol: string
+    readonly priceMinor: number
+    readonly currency: string
+    readonly ts: number
+  }>
+}
+
+/**
+ * 查某 symbol 的报价 —— 镜像 quoteTable.ts#priceMinorOf，但接 aggregator 私
+ * 有的 QuoteTableLike 入参（不依赖外部 quoteTable.ts 的命名空间聚合，便于
+ * aggregator 独立跑 Vitest）。
+ */
+function priceMinorOfLike(symbol: string, table: QuoteTableLike): number | null {
+  if (symbol.length < 1 || symbol.length > 32) return null
+  const q = table.quotes.get(symbol)
+  return q ? q.priceMinor : null
+}
+
+/**
+ * 持仓原币下的市值 minor 计算（份额 × 报价 minor）。
+ *
+ * 缺价（priceMinor=null）→ 0n；命中报价 → shares * price_minor 后 abs →
+ * Math.round → 恢复符号（与 RateTable 折算锁同舍入口径）。
+ */
+function computeHoldingCents(priceMinor: number | null, shares: number): bigint {
+  if (priceMinor === null) return 0n
+  // shares 是有限正数（parseHoldings 校验守门）；乘前不显式 abs 防御。
+  const raw = shares * priceMinor
+  if (!Number.isFinite(raw)) return 0n
+  const absRaw = raw < 0 ? -raw : raw
+  const rounded = Math.round(absRaw)
+  // 还原符号：raw 非负场景下符号还原不动；raw 为负视为 0（business 上不会出
+  // 现负的市值，但签名层面防御性吸收）。
+  return raw < 0 ? -BigInt(rounded) : BigInt(rounded)
+}

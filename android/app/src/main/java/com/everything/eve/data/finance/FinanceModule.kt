@@ -18,6 +18,7 @@ package com.everything.eve.data.finance
  *     - "contract"     —— 合同 / 发票
  *     - "rate"         —— 离线汇率包（B5 多币种折算；整包一条 records 行）
  *     - "budget"       —— 预算（B6 预算硬约束；预计累计达阈值端侧实时预警 / 阻断确认）
+ *     - "quote"        —— 投资账户手动行情包（Task 8；整包一条 records 行）
  */
 object FinanceModule {
     /** records module 字段值（AAD / 路由都用）。 */
@@ -77,4 +78,17 @@ object FinanceModule {
      * 达阻断阈值保存前弹确认框；全程端侧判定, 不接 Reminders 通道。
      */
     const val TYPE_BUDGET: String = "budget"
+
+    // ============================================================================
+    // Task 8 投资账户手动行情（stage5-finance-v2 / FR-V2-D.2）
+    // ============================================================================
+
+    /**
+     * 子类型：投资账户手动行情包（Task 8）。
+     *
+     * 一个生效时刻整包一条 records 行（id = "quote@${ts}"），
+     * 明文载荷契约见 [com.everything.eve.finance.QuoteTables.parse]；
+     * 本地 finance_quote 表按 symbol 拆行冗余缓存，密文以 records 通道为准。
+     */
+    const val TYPE_QUOTE: String = "quote"
 }

@@ -55,8 +55,11 @@ import com.everything.eve.finance.BudgetTxLike
 import com.everything.eve.finance.ContractRecord
 import com.everything.eve.finance.FinanceAggregator
 import com.everything.eve.finance.FinanceRecords
+import com.everything.eve.finance.FinanceAggregator.InvestmentMarketValueSnapshot
+import com.everything.eve.finance.InvestmentAccountRecord
 import com.everything.eve.finance.LoanRecord
 import com.everything.eve.finance.PolicyRecord
+import com.everything.eve.finance.QuoteTable
 import com.everything.eve.finance.ReceiptHint
 import com.everything.eve.finance.SpeechHint
 import com.everything.eve.finance.SubscriptionRecord
@@ -386,6 +389,38 @@ open class FinanceViewModel(app: Application) : AndroidViewModel(app) {
     val defaultCurrencyState = defaultCurrencyFlow.asStateFlow()
 
     // =============================================================================
+    // Task 8 投资账户手动行情（stage5-finance-v2 / FR-V2-D.2、FR-V2-D.3）
+    // ============================================================================
+    // 行情包与投资市值派生故意**不进**主 14 路 combine：
+    //   1. 行情包刷新频率低（手动导入 / 远端下行），单开一个 StateFlow 即可；
+    //   2. 投资市值是"账户列表 × 行情表"两路输入的派生，UI 层订阅时按需
+    //      combine；进入主 combine 会把 190+ 既有用例整体牵动；
+    //   3. 缺价与目标币稳定后才计算市值，与 netWorth 折算同款聚合函数（独立）。
+    // ============================================================================
+
+    /** 最新行情包（私有可变源；导入 / 启动回填写入）。 */
+    private val quoteTableFlow = MutableStateFlow<QuoteTable?>(null)
+
+    /** 最新行情包只读流（QuotesImportScreen 订阅展示）。 */
+    val quoteTableState = quoteTableFlow.asStateFlow()
+
+    /** 投资市值派生快照可变源（私有；下游只读 [quoteInvestmentState]）。 */
+    private val quoteInvestmentMutable = MutableStateFlow<InvestmentMarketValueSnapshot?>(null)
+
+    /** 投资市值派生快照只读流（Dashboard 投资账户卡片订阅）。 */
+    val quoteInvestmentState = quoteInvestmentMutable.asStateFlow()
+
+    /** Task 8：quote 同步 URL 内存态（用以推送 setter 写入 pref）。 */
+    private var quoteSyncUrlMemory: String = FinanceSettings.DEFAULT_QUOTE_SYNC_URL
+
+    /** Task 8：quote 同步 URL 只读流（QuotesImportScreen 订阅展示当前 URL）。 */
+    val quoteSyncUrlState: kotlinx.coroutines.flow.StateFlow<String> =
+        kotlinx.coroutines.flow.MutableStateFlow(quoteSyncUrlMemory)
+            .also { mutable ->
+                quoteSyncUrlMemory.let { mutable.value = it }
+            }.asStateFlow()
+
+    // =============================================================================
     // B8 AI 联动记账提示（小票 OCR / 语音记账）—— 纯内存、零持久化
     // ============================================================================
     // 关键红线：
@@ -491,6 +526,16 @@ open class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         defaultCurrencyFlow.value = runCatching {
             FinanceSettings.getDefaultCurrency(appCtx)
         }.getOrDefault(FinanceSettings.DEFAULT_CURRENCY)
+        // Task 8：行情同步 URL 也回填一份内存态，便于设置屏兜底。
+        quoteSyncUrlMemory = runCatching {
+            FinanceSettings.getQuoteSyncUrl(appCtx)
+        }.getOrDefault(FinanceSettings.DEFAULT_QUOTE_SYNC_URL)
+        // Task 8：VM 构造后做一次市值派生。
+        // 注意：state 字段声明在本 init 块之后，本 init 块时机调用
+        // recomputeQuoteInvestmentInternal() 读取 state.value 会触发 NPE。
+        // 故改为在 hydrateQuoteTable 完成后, 由其内部延迟触发一次
+        // （或者下一次 importQuoteTable 时顺带触发）；VM 构造期不主动读 state。
+        hydrateQuoteTable()
     }
 
     // =============================================================================
@@ -1313,6 +1358,165 @@ open class FinanceViewModel(app: Application) : AndroidViewModel(app) {
         defaultCurrencyFlow.value = code
         runCatching { FinanceSettings.setDefaultCurrency(appCtx, code) }
         return Result.success(Unit)
+    }
+
+    // =============================================================================
+    // Task 8 投资行情：导入 / 同步 URL / 市值派生（stage5-finance-v2 / FR-V2-D.2、FR-V2-D.3）
+    // ============================================================================
+    // 与 B5 利率包同款：导入成功 → 更新 quoteTableFlow + best-effort 重算市值；
+    // 服务端下行由 CollectorWorker.quoteTableRepository.pullAndDecrypt 承接，
+    // VM 不直接拉网络。同步 URL 仅用于用户主动"立即同步"按钮触发：
+    //   - 见 [pullQuoteNow] 走 ServiceLocator.quoteTableRepository；返回成功时
+    //     hydrateQuoteTable 从本地表回填最新包，从而触发 quoteTableFlow 更新。
+    // ============================================================================
+
+    /**
+     * VM 创建即从本地 finance_quote 表回填最新行情包。
+     *
+     * ServiceLocator 未初始化（JVM 单测桩）/ DB 异常时静默保留 null；
+     * Dashboard 的投资账户卡片在 quoteTableState=null 时显示"暂无行情"。
+     */
+    private fun hydrateQuoteTable() {
+        viewModelScope.launch {
+            try {
+                val table = ServiceLocator.quoteTableRepository.latest()
+                if (table != null) {
+                    quoteTableFlow.value = table
+                    recomputeQuoteInvestmentInternal()
+                }
+            } catch (_: Exception) {
+                // 未就绪：保持 null（未导入口径）。
+            }
+        }
+    }
+
+    /**
+     * 导入一份行情包明文 JSON（设置屏 SAF 选文件后调用）。
+     *
+     * 与 [importRateTable] 同款设计：返回 [Result] 同步反映成败；
+     * 成功 → quoteTableFlow + 派生市值刷新，发 SaveSucceeded 事件；
+     * 失败（包非法 / MK 未解锁 / DB 异常）→ 发 Error("quote_import_invalid")。
+     */
+    fun importQuoteTable(json: String): Result<Unit> {
+        var outcome: Result<Unit> = Result.success(Unit)
+        viewModelScope.launch {
+            try {
+                val result = ServiceLocator.quoteTableRepository.importPackage(json)
+                val table = result.getOrNull()
+                if (table != null) {
+                    quoteTableFlow.value = table
+                    recomputeQuoteInvestmentInternal()
+                    _eventChannel.trySend(
+                        FinanceUiEvent.SaveSucceeded("quote@${table.ts}"),
+                    )
+                } else {
+                    outcome = Result.failure(
+                        result.exceptionOrNull()
+                            ?: IllegalArgumentException("行情包导入失败"),
+                    )
+                    _eventChannel.trySend(FinanceUiEvent.Error("quote_import_invalid"))
+                }
+            } catch (e: Exception) {
+                outcome = Result.failure(e)
+                _eventChannel.trySend(FinanceUiEvent.Error("quote_import_invalid"))
+            }
+        }
+        return outcome
+    }
+
+    /**
+     * 设置行情同步 URL。
+     *
+     * 仅做非空校验（URL 合法性由 OkHttp 在真正请求时判定，避免端侧过早拒绝）。
+     * 写入 eve-finance SharedPreferences，best-effort。
+     */
+    fun setQuoteSyncUrl(url: String): Result<Unit> {
+        val trimmed = url.trim()
+        if (trimmed.isBlank()) {
+            _eventChannel.trySend(FinanceUiEvent.Error("quote_sync_url_invalid"))
+            return Result.failure(IllegalArgumentException("行情同步 URL 不能为空"))
+        }
+        quoteSyncUrlMemory = trimmed
+        (quoteSyncUrlState as? kotlinx.coroutines.flow.MutableStateFlow)?.value = trimmed
+        runCatching { FinanceSettings.setQuoteSyncUrl(appCtx, trimmed) }
+        return Result.success(Unit)
+    }
+
+    /**
+     * 立即同步行情包：先 setQuoteSyncUrl + 调
+     * [ServiceLocator.quoteTableRepository].pullAndDecrypt → hydrateQuoteTable 回流。
+     */
+    fun pullQuoteNow(url: String): Result<Unit> {
+        val urlResult = setQuoteSyncUrl(url)
+        if (urlResult.isFailure) return urlResult
+        var outcome: Result<Unit> = Result.success(Unit)
+        viewModelScope.launch {
+            try {
+                // 拉取 type="quote" 的密文记录（与 RateTableRepository.pullAndDecrypt 同款模式）；
+                // ServiceLocator.quoteTableRepository.pullAndDecrypt 内部对 records 做
+                // module=finance + type=quote + 非墓碑过滤, 单包解密失败 runCatching 跳过。
+                val quoteRecords = ServiceLocator.repo.listRecordsAfter(0L)
+                ServiceLocator.quoteTableRepository.pullAndDecrypt(quoteRecords)
+                hydrateQuoteTable()
+                _eventChannel.trySend(FinanceUiEvent.SaveSucceeded("quote@pull"))
+            } catch (e: Exception) {
+                outcome = Result.failure(e)
+                _eventChannel.trySend(FinanceUiEvent.Error("quote_sync_url_invalid"))
+            }
+        }
+        return outcome
+    }
+
+    /**
+     * 重算投资市值派生快照并推 [quoteInvestmentState]。
+     *
+     * 委托给 [FinanceAggregator.investmentMarketValue] —— 纯函数层独立函数；
+     * 不影响 netWorth / monthlyReport 既有 190+ 测试。
+     */
+    private fun recomputeQuoteInvestmentInternal() {
+        val targetCurrency = defaultCurrencyFlow.value
+        val rateTable = rateTableFlow.value
+        val quoteTable = quoteTableFlow.value
+        val accounts = state.value.accounts
+        // 仅有 stock 账户且 holdings 可解析为有效 JSON 时纳入计算。
+        val investmentAccounts: List<InvestmentAccountRecord> = accounts.mapNotNull { entity ->
+            if (entity.kind != "stock") return@mapNotNull null
+            val raw = entity.note
+            if (raw.isNullOrBlank()) {
+                return@mapNotNull InvestmentAccountRecord(
+                    id = entity.id,
+                    kind = "stock",
+                    currency = entity.currency,
+                    holdings = emptyList(),
+                    archived = entity.archived,
+                )
+            }
+            runCatching {
+                InvestmentAccountRecord(
+                    id = entity.id,
+                    kind = "stock",
+                    currency = entity.currency,
+                    holdings = com.everything.eve.finance.InvestmentAccountRecords
+                        .parseHoldings(raw),
+                    archived = entity.archived,
+                )
+            }.getOrNull()
+        }
+        val snapshot = FinanceAggregator.investmentMarketValue(
+            investmentAccounts = investmentAccounts,
+            quoteTable = quoteTable,
+            rateTable = rateTable,
+            targetCurrency = targetCurrency,
+            topN = 5,
+        )
+        (quoteInvestmentMutable).value = snapshot
+    }
+
+    /** 行情或账户变化触发的派生刷新入口（未来可由 observe* 链路兜底）。 */
+    private fun recomputeQuoteInvestment(
+        target: kotlinx.coroutines.flow.MutableStateFlow<InvestmentMarketValueSnapshot?>,
+    ) {
+        recomputeQuoteInvestmentInternal()
     }
 
     // =============================================================================

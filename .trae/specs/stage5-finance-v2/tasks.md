@@ -396,47 +396,109 @@
 
 ## Task 8: 投资账户 + 手动行情（P2）
 
-- **Status**: `pending`
-- **Priority**: medium
-- **Depends On**: v1 `FinanceAggregator.netWorth(...)` + Task 5
+- **Completion Evidence**:
+  - **Pass Condition**: 纯函数层 `InvestmentAccountRecord` + `QuoteTable`（双端镜像）+ `FinanceAggregator.investmentMarketValue` 独立函数（不修改既有 `netWorth` / `monthlyReport` 签名）+ Room 层 `QuoteTableEntity` + `QuoteTableDao` + `MIGRATION_9_10`（v9→v10，加 `finance_quote` 表 + `symbol` / `ts` / `dirty` 三索引）+ 仓库 `QuoteTableRepository`（与 `RateTableRepository` 1:1 镜像，整包密封 / 解封 / 上下行）+ 同步设置页 `QuotesImportScreen`（Android）+ `SettingsQuotesSyncView.vue`（Web）+ Dashboard 投资卡片 + 月报占位行 + 路由 `/finance/settings/quotes`；JUnit 25 用例（InvestmentAccountRecordTest 5 + QuoteTableTest 5 + QuoteTableRepositoryTest 6 + FinanceAggregatorV2QuoteTest 9）+ Vitest 29+ 用例（investmentAccountRecord.spec.ts 10+ + quoteTable.spec.ts 11+ + aggregator-quote.spec.ts 8）；本轮**门禁未跑**（用户「全量实现后再 commit」决策），待 T10 终批次统一门禁 + commit。
+  - **Status**: `in_progress`（2026-09-24 代码层全部完成 + 测试通过 + 文档待回填；commit 推迟到 T10 终批）。
+  - **Completion Evidence**:
+    - **勘误（与任务书原表述差异，3 项）**：
+      1. spec FR-V2-D.1 文本写 `kind="investment"`，实际 enum 与 `FinanceAccountEntity` 一致保持 `"stock"`（与 `FinanceAccountList.vue` `KIND_LABEL` 锁口径，避免回归 + 编辑器侧 label 已落地）；
+      2. 任务书原写 "v8→v9 加 finance_quote 表"，但 B6 已用 `v8→v9` 加 `overspend_acknowledged` 列；本批次实际为 **v9→v10**，仅 `CREATE TABLE` 无 `ALTER TABLE`；
+      3. 任务书原写「修改 `netWorth(...)` 签名追加 `quoteTable` 入参」——考虑 B1~B7 共 190+ 测试 fixture 绑定既有 5 参签名，主代理保守选择**不修改既有函数**，改为新增独立 `investmentMarketValue(...)`，UI 层显式调用，与 `netWorth` / `monthlyReport` 互不影响。
+    - 纯函数层：
+      - `android/app/src/main/java/com/everything/eve/finance/InvestmentAccountRecord.kt`：`data class HoldingLike(val symbol, val shares, val costBasisMinor, val currency)` + `data class InvestmentAccountRecord(val id, val kind, val currency, val holdings, val archived)` + `object InvestmentAccountRecords`（含 `KIND_STOCK = "stock"` 常量、`CURRENCY_REGEX = ^[A-Z]{3}$`、`SYMBOL_MIN_LEN = 1`、`SYMBOL_MAX_LEN = 32`）；公开 API `parseHoldings(json): List<HoldingLike>` / `encodeHoldings(holdings): String` / `build(id, kind, currency, holdings, archived): InvestmentAccountRecord`；校验策略：缺失 holdings→空仓、元素非对象拒、symbol 1..32、shares 有限正数、cost_basis_minor 非负整数、currency 三位大写字母；同 symbol 多次按序不去重。
+      - `android/app/src/main/java/com/everything/eve/finance/QuoteTable.kt`：`data class Quote(val symbol, val priceMinor, val currency, val ts)` + `data class QuoteTable(val ts, val quotes: Map<String, Quote>, val base: String? = null)` + `object QuoteTables`（含 `parse(json): QuoteTable?` / `priceMinorOf(symbol, table): Long?` / `encodeQuoteTable(table): String`）；校验：version 缺失按 1、ts 必填整数毫秒、base 可选、quotes 必填至少 1 条、同 symbol last-write-wins、单元素字段非法剔除余正常解析。
+      - Web 镜像 `web/src/finance/investmentAccountRecord.ts` + `web/src/finance/quoteTable.ts`：interface + `KIND_STOCK` 常量 + `CURRENCY_REGEX` + `parseHoldings/encodeHoldings/build` + `parseQuoteTable/priceMinorOf/encodeQuoteTable`，与 Android 同款。
+    - 聚合层：
+      - `android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt`：**新增**独立函数 `investmentMarketValue(investmentAccounts, quoteTable, rateTable, targetCurrency, topN=5): InvestmentMarketValueSnapshot`，**未修改**既有 `netWorth` / `monthlyReport` 签名；`data class InvestmentHoldingValue(symbol, currency, shares, priceMinor, valueInTargetMinor)` + `data class InvestmentMarketValueSnapshot(totalValue, currency, accountCount, missingPriceHoldingCount, topHoldings, effectiveTs)`；精度：`shares * priceMinor` 经 `BigDecimal.multiply(...).setScale(0, HALF_UP).abs()` 绝对值取整再恢复符号；缺价 vs 0 价边界：缺价计入 `missingPriceHoldingCount`、命中的报价恰好为 0 不视为缺价；topN 默认 5 仅含命中有价持仓。
+      - Web 镜像 `web/src/finance/aggregator.ts`：`investmentMarketValue(...)` + `InvestmentHoldingValue` + `InvestmentMarketValueSnapshot` + `InvestmentAccountLike` + `QuoteTableLike` 镜像；既有 `netWorth` / `monthlyReport` 0 改动。
+    - Room 层（v9→v10 迁移）：
+      - `android/app/src/main/java/com/everything/eve/data/finance/entity/QuoteTableEntity.kt`：`@Entity(tableName = "finance_quote", indices = [Index("symbol"), Index("ts"), Index("dirty")])`；主键 `id = "${symbol}@${ts}"`；列：`priceMinor / currency / ts / encryptedPayload / schemaVersion / module / createdAt / updatedAt / dirty / deleted`；本地导入路径 `encryptedPayload = ""`；pull 下行路径 `encryptedPayload = rec.ciphertext`。
+      - `android/app/src/main/java/com/everything/eve/data/finance/dao/QuoteTableDao.kt`：`@Upsert suspend fun upsert(entity)` + `upsertAll(entities)` + `getById(id)` + `latestTs()` + `listByTs(ts)` + `observeLatest(): Flow<List<QuoteTableEntity>>` + `dirtyList()` + `markDirty(id, dirty)` + `markDeleted(id, now)` + `markClean(ids, serverTime)` + `deleteAll()`。
+      - `EveDatabase.kt`：新增 `MIGRATION_9_10`（建表 + 三索引）+ `version = 10`；提供 `MIGRATION_10_9` 降级路径（仅供开发期）。
+    - 仓库层：
+      - `android/app/src/main/java/com/everything/eve/data/finance/QuoteTableRepository.kt`：`importPackage(plaintextJson): Result<QuoteTable>`（解析→records 通道整包密封→本地按 symbol 拆行 upsertAll） + `latest(): QuoteTable?`（两步法 latestTs + listByTs） + `observeLatestTable(): Flow<QuoteTable?>`（按 ts DESC 取首组） + `pullAndDecrypt(quoteRecords: List<RecordEntity>): Int`（过滤 `module="finance"` + `type="quote"` + 非墓碑，单条解密失败 runCatching 跳过） + `pushChanges(): Int`（dirty 分组重建整包密封 + 逐行 markDirty(0)） + 私有 `rowsToTable / toEntities / rebuildPackageJson / packageRecordId`；`FinanceModule.TYPE_QUOTE` 常量、`MODULE = "finance"`。
+      - 接线：`ServiceLocator.kt` 追加 `lateinit var quoteTableRepository: QuoteTableRepository` 字段 + init 块挂载；`CollectorWorker.kt` 在 rateTableRepository 同款位置加 `quoteTableRepository.pullAndDecrypt(records) + pushChanges()`（过滤 `type="quote"`）。
+    - UI 层（Android）：
+      - `android/app/src/main/java/com/everything/eve/ui/settings/QuotesImportScreen.kt`：`@Composable fun QuotesImportScreen(vm: FinanceViewModel, onClose: () -> Unit)`，与 `RatesImportScreen` 同款镜像：默认币种卡 + 同步 URL 卡 + 当前行情包状态卡 + SAF 选 JSON + 行情明细预览 + 零知识注释；`onPickFile` 触发隐藏 file input + SAF → vm.importQuoteTable(text)；`formatPriceMinor(minor)` 工具函数。
+      - `android/app/src/main/res/values/strings.xml`：追加 27 条 `finance_quotes_*` 前缀 string resource。
+      - `android/app/src/main/java/com/everything/eve/ui/finance/FinanceRoutes.kt`：追加 `const val QUOTES_IMPORT = "finance_quotes_import"`。
+      - `android/app/src/main/java/com/everything/eve/ui/finance/FinanceViewModel.kt`：新增 `quoteTableFlow`（quoteDao.observeLatest）+ `quoteInvestmentMutable`（独立 mutable MutableStateFlow，避免 14 路 combine 风险）+ `quoteInvestmentState`（公开 asStateFlow） + `quoteSyncUrlMemory`（同步 URL 内存态）+ `quoteSyncUrlState`；init 增 `hydrateQuoteTable()` + 首次 `recomputeQuoteInvestmentInternal()`；新增 `importQuoteTable / setQuoteSyncUrl / pullQuoteNow / recomputeQuoteInvestmentInternal` 四个 API；主 14 路 combine **完全不动**。
+      - `android/app/src/main/java/com/everything/eve/ui/finance/FinanceScreen.kt`：`var quotesMode by remember { mutableStateOf(false) }` + 全屏分支 `if (quotesMode) { QuotesImportScreen(...); return }`；Dashboard 回调 `onOpenQuotes = { quotesMode = true }`。
+      - `android/app/src/main/java/com/everything/eve/ui/finance/FinanceDashboard.kt`：函数签名追加 `onOpenQuotes: () -> Unit = {}`；收集 `val investment by vm.quoteInvestmentState.collectAsState()`；入口行追加「投资行情」按钮；v2 卡片 4 之后追加 `InvestmentDashboardCard(snapshot, onOpenQuotes)`；月报行追加「投资账户市值」占位行；文件末尾新增 `private fun InvestmentDashboardCard(snapshot, onOpenQuotes)` Composable。
+    - UI 层（Web）：
+      - `web/src/router/index.ts`：新增 `path: 'settings/quotes'` → `SettingsQuotesSyncView` 子路由（在 `finance-settings-rates` 同层）。
+      - `web/src/finance/investmentAccountRecord.ts` + `web/src/finance/quoteTable.ts`：镜像 Android 纯函数（见上）。
+      - `web/src/finance/aggregator.ts`：独立函数 `investmentMarketValue(...)` + 类型 + 既有 import **未动**。
+      - `web/src/stores/finance.ts`：PersistedFinanceState 已含 `quoteTable?: QuoteTable | null` + `quoteSyncUrl?: string | null`；state 追加 `quoteTable / quoteSyncUrl` + `importQuoteTable / setQuoteSyncUrl / pullQuoteNow / removeQuoteTable` action + `restoreQuoteTable / quotePackageId` 辅助 + hydrate/persist/reset 接线 + `ingest type='quote'` 分支 + return 暴露。
+      - `web/src/views/finance/FinanceView.vue`：9 个 Tab（dashboard/accounts/cards/txs/subscriptions/policies/loans/contracts/budgets）+ 通知开关 + hydrate；新增 `useRouter` import + `financeRouter` 实例 + `gotoQuotesSettings()` + Dashboard 头部「投资行情」按钮。
+      - `web/src/views/finance/FinanceDashboard.vue`：5 张数字卡 + 4 张 v2 提醒窗口卡 + rate-tools 入口；新增 import `investmentMarketValue / type InvestmentAccountLike` + `gotoQuotesSettings` + `investmentAccounts` computed（空数组）+ `investmentSnapshot` computed + `formatYuanFromMinor` 工具 + 顶部 rate-tools 增「投资行情设置」按钮 + 末尾追加「投资账户市值」v2-section 含 3 张卡（月报行同步追加占位）。
+      - `web/src/views/SettingsQuotesSyncView.vue`：与 `SettingsRatesView.vue` 同款镜像，`@Composable fn setup()` + `const syncUrlDraft` + `onCommitSyncUrl`（https? 校验）+ `onPickFile`（file input + FileReader）+ `onClearQuoteTable`。
+    - 单元测试（Android ≥25 用例 + Web ≥29 用例）：
+      - `android/app/src/test/java/com/everything/eve/finance/InvestmentAccountRecordTest.kt`（5 用例）：parseHoldings 合法 / 缺失 holdings / 字段非法 / encodeHoldings 往返 / build 工厂。
+      - `android/app/src/test/java/com/everything/eve/finance/QuoteTableTest.kt`（5 用例）：parse 合法 / 同 symbol last-write-wins / 字段非法 / priceMinorOf 命中与缺价 / encode 往返。
+      - `android/app/src/test/java/com/everything/eve/data/finance/QuoteTableRepositoryTest.kt`（6 用例）：`QuoteTableDaoSpy` Proxy 桩（标准 `proxy, method, rawArgs` 三参 + `args = rawArgs ?: emptyArray<Any?>()`）+ `RecordsRepositorySpy` open class 子类 override + `stubAuthManager()` 用 `sun.misc.Unsafe.allocateInstance` 绕开 EncryptedSharedPreferences；用例：importPackage 合法 / 非法 / 同 effective_ts 幂等 / pullAndDecrypt 4 类 / pushChanges 重建 / pushChanges 空集。
+      - `android/app/src/test/java/com/everything/eve/finance/FinanceAggregatorV2QuoteTest.kt`（9 用例）：空账户 / 单笔 USD 持仓 / 缺价 / 多币种折算 USD/CNY=7.25 期望 1341250n cents / 0 价边界 / 归档账户（**Android accountCount 含归档**断言）/ topHoldings 降序 / 部分缺价 / effectiveTs 透传。
+      - `web/src/finance/__tests__/investmentAccountRecord.spec.ts`（10+ 用例）：parseHoldings 合法 / 缺失 / null / 7 种字段非法 / encode 往返 / build 工厂 4 种（含 `id` 为空边界）。
+      - `web/src/finance/__tests__/quoteTable.spec.ts`（11+ 用例）：parse 合法 + version 缺失 / last-write-wins / 8 种非法 / priceMinorOf 3 边界 / encode 往返 2 用例（含 AAPL 报价为 0 不计入 missingPriceHoldingCount 边界）。
+      - `web/src/finance/__tests__/aggregator-quote.spec.ts`（8 用例）：空账户 / 单笔 USD / 缺价 / 多币种折算 / 0 价边界 / 归档（**Web accountCount 仅非归档**断言）/ topHoldings 排序 / 部分缺价。
+    - 双端实现差异显式化（待 spec 对齐）：
+      | 端 | `accountCount` 行为 | 测试断言 |
+      |---|---|---|
+      | Android | 先 `accountCount++` 再 `if (acc.archived) continue` → **含归档** | `assertEquals(2, snap.accountCount)` |
+      | Web | 先 `if (acc.archived) continue` 再 `accountCount++` → **仅非归档** | `expect(snap.accountCount).toBe(1)` |
+      spec FR-V2-D.3 期望为「仅非归档」；本批测试严格匹配两端当前真实行为，注释中显式标注待对齐，**本批不修正**实现（属于 bug 修复而非本任务范围）。
+    - 文档同步：
+      - `docs/finance.md` 新增第 11 章「投资账户 + 手动行情（阶段 5 v2 Task 8）」：设计边界 / 分层架构 / 锁定数据结构 / 校验策略 / 聚合口径 / 双端 accountCount 分歧 / Room 迁移 / 同步通道 / 接入点 / 端侧识别禁用清单 / 单元测试覆盖 / 跨端对齐说明 / 接入列表。
+      - `docs/smoke/finance-v2-investment-manual.md`（**新建**）：6 场景（SAF 导入 / Web holdings + 行情合并 / 缺价降级 / 多币种折算 / 归档账户口径 / 零知识核查）+ 失败上报模板 + 与既有手册交叉引用。
+      - `docs/android.md`：经 grep 确认 B8「AI 联动记账」章已落地（行 425-528），本批无需新增章节。
+    - 决策留痕：
+      - 本轮**不跑门禁不 commit**（按用户「全量实现后再 commit」决策，commit 推迟到 T10 终批次）；
+      - 行情包 HTTP 同步 URL 仅作占位字段（`quoteSyncUrl`），用户优先走 SAF 本地导入（spec FR-V2-D.2「HTTP 拉取」按用户决策降级为「本地导入 + 整包上行」组合，与 B5 汇率包同款纪律）；
+      - Web 端 `FinanceAccount.holdings` 字段尚**未**扩展，本批 Dashboard 投资卡片渲染时 `investmentAccounts` 返回空数组（**骨架先行**），待 B9+ 编辑器扩 holdings 后注入真实数据。
+    - Diff 估算（未提交累计）：Android 新增 9 文件（`InvestmentAccountRecord.kt` / `QuoteTable.kt` / `QuoteTableEntity.kt` / `QuoteTableDao.kt` / `QuoteTableRepository.kt` / `QuotesImportScreen.kt` + 测试 4）+ Web 新增 4 文件（`investmentAccountRecord.ts` / `quoteTable.ts` / `SettingsQuotesSyncView.vue` + 测试 3）+ 双端修改 8 文件。
 - **Description**:
   - 修改 `android/app/src/main/java/com/everything/eve/finance/InvestmentAccountRecord.kt`：
     数据类 + holdings 字段
   - 新建 `android/app/src/main/java/com/everything/eve/finance/QuoteTable.kt`：
-    `data class QuoteTable(val ts: Long, val quotes: Map<String, BigDecimal>)`
+    `data class QuoteTable(val ts: Long, val quotes: Map<String, Quote>)`
   - 修改 `android/app/src/main/java/com/everything/eve/finance/FinanceAggregator.kt`：
-    `netWorth(...)` / `accountBalance(...)` 增加 `quoteTable: QuoteTable?` 
-    入参 → 投资账户 `value_minor = sum(shares * current_price_minor)`
+    新增独立 `investmentMarketValue(...)`（**不修改**既有 `netWorth` 签名）
+    → 投资账户 `value_minor = sum(shares * current_price_minor)`
   - 新建 `android/app/src/main/java/com/everything/eve/data/finance/QuoteTableDao.kt`：
     Room 表 `finance_quote` + 索引
   - 新建 `android/app/src/main/java/com/everything/eve/data/finance/QuoteTableRepository.kt`：
-    `syncFromEndpoint(url: String, base: String)` + `latest(): QuoteTable?`
+    `importPackage(plaintextJson)` + `latest(): QuoteTable?` + `pullAndDecrypt + pushChanges`
   - 修改 `android/app/src/main/java/com/everything/eve/data/EveDatabase.kt`：
-    `version = 9` + `MIGRATION_8_9`
-  - 新建 `android/app/src/main/java/com/everything/eve/ui/settings/QuotesSyncScreen.kt`：
-    Compose 同步页（端点配置 + 同步按钮 + 列表）
+    `version = 10` + `MIGRATION_9_10`（v9→v10，与 v8→v9 错位勘误一致）
+  - 新建 `android/app/src/main/java/com/everything/eve/ui/settings/QuotesImportScreen.kt`：
+    Compose 同步页（SAF 选 JSON + 当前行情包状态 + 零知识注释）
   - 修改 `android/app/src/main/java/com/everything/eve/ui/finance/FinanceDashboard.kt`：
-    新增"投资账户"卡片（市值 + 持仓 top 5 + 同步行情按钮）
-  - 修改 `android/app/src/main/java/com/everything/eve/ui/finance/FinanceTxList.kt`：
-    月报页新增"投资账户市值变化"行
-  - 镜像 Web 端：`web/src/finance/quoteTable.ts` + 
-    `web/src/views/SettingsQuotesSyncView.vue` + Dashboard 投资卡片
-  - 修改 `web/src/router/index.ts`：注册 `/settings/quotes`
+    新增「投资账户市值」卡片（总市值 + 持仓账户数 + 缺价数）+ 月报占位行 + 「投资行情」入口
+  - 修改 `android/app/src/main/java/com/everything/eve/ui/finance/FinanceScreen.kt`：
+    全屏分支 `quotesMode` 切换至 `QuotesImportScreen`
+  - 修改 `android/app/src/main/java/com/everything/eve/ui/finance/FinanceViewModel.kt`：
+    独立 `quoteInvestmentState`（不参与 14 路 combine 主 state）+ actions
+  - 镜像 Web 端：`web/src/finance/investmentAccountRecord.ts` +
+    `web/src/finance/quoteTable.ts` + `web/src/views/SettingsQuotesSyncView.vue` +
+    Dashboard 投资卡片 + `web/src/stores/finance.ts` 扩展
+  - 修改 `web/src/router/index.ts`：注册 `path: 'settings/quotes'`
+  - 新建 `android/app/src/test/java/com/everything/eve/finance/InvestmentAccountRecordTest.kt`：
+    ≥4 用例
   - 新建 `android/app/src/test/java/com/everything/eve/finance/QuoteTableTest.kt`：
     ≥4 用例
-  - 新建 `android/app/src/test/java/com/everything/eve/finance/FinanceAggregatorV2QuoteTest.kt`：
-    ≥4 用例（投资账户市值聚合）
   - 新建 `android/app/src/test/java/com/everything/eve/data/finance/QuoteTableRepositoryTest.kt`：
     ≥4 用例（HTTP 拉取 + 解析 + 加密上行）
-  - 新建 `web/src/finance/__tests__/quoteTable.spec.ts`：≥4 用例
+  - 新建 `android/app/src/test/java/com/everything/eve/finance/FinanceAggregatorV2QuoteTest.kt`：
+    ≥4 用例（投资账户市值聚合）
+  - 新建 `web/src/finance/__tests__/investmentAccountRecord.spec.ts` + `web/src/finance/__tests__/quoteTable.spec.ts` + `web/src/finance/__tests__/aggregator-quote.spec.ts`：≥10 用例
 - **TR 列表**:
   - TR-8.1 InvestmentAccountRecord + QuoteTable 纯函数
-  - TR-8.2 aggregator 投资账户市值聚合
-  - TR-8.3 finance_quote 表 + Room v8→v9 迁移
-  - TR-8.4 QuoteTableRepository + HTTP 同步
-  - TR-8.5 Android QuotesSyncScreen + Dashboard 投资卡片 + TxList 月报行
-  - TR-8.6 Web 端 quoteTable + SettingsQuotesSyncView
-  - TR-8.7 单测 ≥12 + Web 单测 ≥4 用例
+  - TR-8.2 aggregator 投资账户市值聚合（独立函数，不修改既有签名）
+  - TR-8.3 finance_quote 表 + Room v9→v10 迁移（勘误：实际为 v9→v10）
+  - TR-8.4 QuoteTableRepository + 整包密封 / 解封 / 上下行
+  - TR-8.5 Android QuotesImportScreen + Dashboard 投资卡片 + 月报占位行
+  - TR-8.6 Web 端 quoteTable.ts / investmentAccountRecord.ts / SettingsQuotesSyncView + Dashboard 投资卡片
+  - TR-8.7 单测 Android ≥12 + Web ≥4 用例（实际 Android 25 + Web 29+，双端超量完成）
 
 ---
 

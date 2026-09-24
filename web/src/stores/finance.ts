@@ -81,6 +81,7 @@ import {
   type ValidationResult,
 } from '../finance/types'
 import { parseRateTable, type RateTable } from '../finance/rateTable'
+import { parseQuoteTable, type QuoteTable } from '../finance/quoteTable'
 import {
   defaultAttachmentChannel,
   uploadFile,
@@ -181,6 +182,21 @@ export interface PersistedFinanceState {
    * 零知识：本字段不携带任何业务数据。
    */
   notificationsEnabled?: boolean
+  /**
+   * Task 8 手动行情包（stage5-finance-v2 / FR-V2-D.2）。
+   *
+   * 可选字段：旧本地数据（Task 8 之前落盘的 schemaVersion=2 形态）无此字段，
+   * hydrate 时降级为 null（不升 schemaVersion，保持 2）；null 表示未导入行
+   * 情包，看板投资市值卡按缺价降级（missingPriceHoldingCount 全计入）。
+   */
+  quoteTable?: QuoteTable | null
+  /**
+   * Task 8 行情同步 URL（stage5-finance-v2 / FR-V2-D.2，null/空串=关闭）。
+   *
+   * 可选字段：旧本地数据无此字段时 hydrate 降级 null；UI 层在"行情同步入口"
+   * 卡上展示该 URL，无 URL 时同步按钮置灰。
+   */
+  quoteSyncUrl?: string | null
 }
 
 /** localStorage key —— `eve:finance:v1`（spec §持久化 §6 一致）。 */
@@ -405,6 +421,23 @@ export const useFinanceStore = defineStore('finance', () => {
    * enable 不会再次弹窗，直接返回 true）。
    */
   const notificationsEnabled = ref(false)
+
+  // ========== Task 8 手动行情包 / 同步 URL（stage5-finance-v2 / FR-V2-D.2） ==========
+  /**
+   * 已导入的手动行情包（null = 未导入；investmentMarketValue 在缺价时按 0 计
+   * 并把全部持仓计入 missingPriceHoldingCount）。
+   *
+   * 仅手动 JSON 导入产生（parseQuoteTable 校验通过后赋值），本批次不接
+   * 网络。
+   */
+  const quoteTable = ref<QuoteTable | null>(null)
+  /**
+   * 行情同步 URL（自托管 HTTP GET 端点；null / 空串 = 关闭）。
+   *
+   * 仅在 UI 设置页"行情同步入口"卡上落地展示；该字段是用户本地偏好位，
+   * 不随密文上行（spec 零知识：sync URL 不属于业务数据）。
+   */
+  const quoteSyncUrl = ref<string | null>(null)
 
   // ========== 计算属性 ==========
 
@@ -862,6 +895,33 @@ export const useFinanceStore = defineStore('finance', () => {
       return
     }
 
+    // ========== Task 8 行情包分支（type='quote'；FR-V2-D.2） ==========
+    // 行情包与 B5 汇率包镜像：确定性 id=`quote@${ts}`；同 ts 重复导入以 envelope
+    // version 严格递增；墓碑忽略；多包并存时取 ts 最大者最新者覆盖。
+    if (remote.type === 'quote') {
+      if (remote.deleted) return
+      try {
+        const obj = channel.open(
+          remote.id,
+          remote.module,
+          remote.ciphertext,
+          remote.version,
+        ) as unknown as Record<string, unknown>
+        const table = parseQuoteTable(JSON.stringify(obj))
+        rateRecordVersions.value = {
+          ...rateRecordVersions.value,
+          [remote.id]: remote.version,
+        }
+        if (quoteTable.value == null || table.ts >= quoteTable.value.ts) {
+          quoteTable.value = table
+        }
+        persist()
+      } catch {
+        // 跳过坏包，不阻塞其他记录 ingest。
+      }
+      return
+    }
+
     // 墓碑：按 type 路由删除本地缓存。
     if (remote.deleted) {
       accounts.delete(remote.id)
@@ -1121,6 +1181,131 @@ export const useFinanceStore = defineStore('finance', () => {
     persist()
   }
 
+  // ========== Task 8 手动行情包 / 同步 URL（stage5-finance-v2 / FR-V2-D.2） ==========
+
+  /**
+   * 行情包 records 通道确定性 id（与 Android QuoteTableRepository 同键）。
+   *
+   * quote@${ts} —— 上行加密时唯一键；同 ts 重复导入时 envelope version 严
+   * 格递增，避免服务端 LWW 判 skipped。
+   */
+  function quotePackageId(ts: number): string {
+    return `quote@${ts}`
+  }
+
+  /**
+   * 导入 spec FR-V2-D.2 手动行情包明文 JSON（设置页"Sync Quotes"路径）。
+   *
+   * 流程与 B5 importRateTable 镜像：
+   *   1. parseQuoteTable 全量校验；失败 → ok:false + 中文错误消息；
+   *   2. 成功 → 覆写 quoteTable + persist（本地立即可用，解锁 / 离线亦生效）；
+   *   3. 加密上行（FR-V2-D.2）：确定性 id=`quote@${ts}`，version 自 records
+   *      通道信封递增；skipped（版本竞争）→ pullAll(0) 全量对账；
+   *   4. 上行异常（MK 未就绪 / 网络）不污染本地状态，synced=false 给 UI 提
+   *      示；本地导入保持有效（看板上即时报缺价降级）。
+   *
+   * @param json 行情包明文 JSON 字符串（FileReader.readAsText 产物）
+   */
+  async function importQuoteTable(
+    json: string,
+  ): Promise<{ ok: true; table: QuoteTable; synced: boolean } | { ok: false; error: string }> {
+    let table: QuoteTable
+    try {
+      table = parseQuoteTable(json)
+    } catch (e) {
+      const error = e instanceof Error ? e.message : '行情包导入失败：未知错误'
+      return { ok: false, error }
+    }
+    // 本地先落地。
+    quoteTable.value = table
+    persist()
+    // 加密上行（best-effort，与 importRateTable 同纪律）。
+    let synced = false
+    try {
+      const id = quotePackageId(table.ts)
+      // envelope version 记录在 rateRecordVersions 同 Map（key 不冲突：键
+      // 前缀区分——'rate@' vs 'quote@'）；用 restoreRateVersions 同套规则
+      // 过滤，避免引入新持久化字段。
+      const version = (rateRecordVersions.value[id] ?? 0) + 1
+      const now = Date.now()
+      const ciphertext = channel.seal(JSON.parse(json) as Record<string, unknown>, id, version)
+      const res = await channel.push({
+        id,
+        module: FINANCE_MODULE,
+        type: 'quote',
+        ciphertext,
+        version,
+        device_id: 'web',
+        created_at: now,
+        updated_at: now,
+        deleted: false,
+      })
+      if (res.skipped > 0) {
+        await pullAll(0)
+      } else {
+        rateRecordVersions.value = { ...rateRecordVersions.value, [id]: version }
+        persist()
+        synced = true
+      }
+    } catch {
+      // 本地表已落地，synced=false 由 UI 提示，不回滚。
+    }
+    return { ok: true, table, synced }
+  }
+
+  /**
+   * 设置行情同步 URL（自托管 HTTP GET 端点）。
+   *
+   * 仅接受合法 https? URL（极简校验：必须以 http:// 或 https:// 开头），
+   * 其它输入一律拒；UI 层落地在"Sync Quotes"卡上。
+   *
+   * @returns true 表示已更新并持久化；false 表示校验拒绝
+   */
+  function setQuoteSyncUrl(url: string): boolean {
+    if (typeof url !== 'string') return false
+    const trimmed = url.trim()
+    if (trimmed.length === 0) {
+      quoteSyncUrl.value = null
+      persist()
+      return true
+    }
+    if (!/^https?:\/\//.test(trimmed)) return false
+    quoteSyncUrl.value = trimmed
+    persist()
+    return true
+  }
+
+  /**
+   * 占位的"立即同步"hook（设置页"Sync Now"按钮）。
+   *
+   * spec FR-V2-D.2 仅承诺"手动导入 / 自托管 HTTP GET 同步"两种来源；本期
+   * 不接网络（避免引入第三方云 SDK / 不引入 GMS / 维持零知识），按钮被调
+   * 时仅返回 synced=false 提示"尚未接入自托管端点"——待后续批次（T-mirror）
+   * 接入端点后真正下行情情。
+   *
+   * 当前默认行为：返回 synced=false 并把错误回写 quoteSyncUrl=null？
+   * —— 不，仅返回占位错误，状态不变；调用方据此提示。
+   */
+  async function pullQuoteNow(): Promise<{ ok: false; error: string }> {
+    return { ok: false, error: '行情同步尚未接入：请先用 JSON 文件导入或等待后续批次接入自托管端点' }
+  }
+
+  /**
+   * 移除当前行情包（设置页"移除当前行情包"按钮）。
+   *
+   * 本地直接清空 quoteTable + 同步 envelope version 自增（用于下一次
+   * 导入时走新一轮 push，不被旧 version 卡住）。本操作不上行服务端（避免
+   * 主动制造一份"清空 tombstone"，与 B5 clearRateTable 不上行的纪律一致）。
+   */
+  function removeQuoteTable(): boolean {
+    if (quoteTable.value === null) return false
+    const id = quotePackageId(quoteTable.value.ts)
+    rateRecordVersions.value = { ...rateRecordVersions.value, [id]: (rateRecordVersions.value[id] ?? 0) + 1 }
+    quoteTable.value = null
+    persist()
+    return true
+  }
+
   /**
    * hydrate 辅助：从持久化形态还原 RateTable。
    *
@@ -1140,6 +1325,30 @@ export const useFinanceStore = defineStore('finance', () => {
     const rates = obj.rates
     if (rates === null || typeof rates !== 'object' || Array.isArray(rates)) return null
     return { effectiveTs: obj.effectiveTs, rates: rates as Record<string, number> }
+  }
+
+  /**
+   * hydrate 辅助：从持久化形态还原 QuoteTable（Task 8）。
+   *
+   * 旧本地数据无该字段（undefined）→ null；字段存在但形态被破坏（本地
+   * JSON 损坏 / 手工篡改）时同样安全降级 null；非 null 形态严格按
+   * parseQuoteTable 二次校验，校验失败 → null（只污染内存，不阻断 hydrate）。
+   *
+   * 注：parseQuoteTable 接受的对象与 spec FR-V2-D.2 严格对齐；本还原函数
+   * 先用 encodeQuoteTable 反序列化再交回 parseQuoteTable，避免落盘形态
+   * 与内存形态漂移时漏字段（last-write-wins 等 Map 语义必须经 parse 走一
+   * 遍才能保证）。
+   */
+  function restoreQuoteTable(raw: unknown): QuoteTable | null {
+    if (raw == null) return null
+    if (typeof raw !== 'object' || Array.isArray(raw)) return null
+    try {
+      // 把内存形态反序列化为 JSON 字符串，再走一次 parseQuoteTable 严格校验。
+      const json = JSON.stringify(raw)
+      return parseQuoteTable(json)
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -1199,6 +1408,12 @@ export const useFinanceStore = defineStore('finance', () => {
     // B7：还原浏览器通知偏好位。旧本地数据无此字段（undefined）时按
     // false 处理；只接受严格布尔 true，任何异常形态都安全降级为关闭。
     notificationsEnabled.value = state.notificationsEnabled === true
+    // Task 8：还原手动行情包与同步 URL（独立降级，互不影响 hydrate）。
+    quoteTable.value = restoreQuoteTable(state.quoteTable)
+    quoteSyncUrl.value =
+      typeof state.quoteSyncUrl === 'string' && state.quoteSyncUrl.length > 0
+        ? state.quoteSyncUrl
+        : null
     // 还原 v1 三类条目。
     for (const acc of state.accounts ?? []) {
       accounts.set(acc.id, {
@@ -1350,6 +1565,9 @@ export const useFinanceStore = defineStore('finance', () => {
       // B7：浏览器通知偏好位随同一 StorageState 明文落盘（可选字段，
       // schemaVersion 保持 2；旧版本读取时忽略，缺失时 hydrate 按 false 还原）。
       notificationsEnabled: notificationsEnabled.value,
+      // Task 8：手动行情包与同步 URL 落盘（与 B5 汇率表同级别本地状态）。
+      quoteTable: quoteTable.value,
+      quoteSyncUrl: quoteSyncUrl.value,
     }
     storage.write(state)
   }
@@ -1929,6 +2147,9 @@ export const useFinanceStore = defineStore('finance', () => {
     rateTable.value = null
     defaultCurrency.value = DEFAULT_CURRENCY
     rateRecordVersions.value = {}
+    // Task 8：登出 / 重新锁定时手动行情包与同步 URL 一并清空（与 B5 同步纪律）。
+    quoteTable.value = null
+    quoteSyncUrl.value = null
     // B7：锁定 / 登出时撤销所有已排期本地通知并释放定时器。
     // 注意：notificationsEnabled 偏好位刻意保留（下次解锁若仍为 true 可直接恢复）。
     stopNotifications()
@@ -1972,6 +2193,9 @@ export const useFinanceStore = defineStore('finance', () => {
     rateTable.value = null
     defaultCurrency.value = DEFAULT_CURRENCY
     rateRecordVersions.value = {}
+    // Task 8：测试间隔离，行情包与同步 URL 恢复默认。
+    quoteTable.value = null
+    quoteSyncUrl.value = null
     // B7：测试间隔离，通知偏好位复位、通知器进程内单例清空。
     notificationsEnabled.value = false
     resetFinanceNotifierForTest()
@@ -2045,6 +2269,13 @@ export const useFinanceStore = defineStore('finance', () => {
     importRateTable,
     setDefaultCurrency,
     clearRateTable,
+    // Task 8 行情包 / 同步 URL（FR-V2-D.2）
+    quoteTable,
+    quoteSyncUrl,
+    importQuoteTable,
+    setQuoteSyncUrl,
+    pullQuoteNow,
+    removeQuoteTable,
     // 计算属性
     listAccounts,
     listCards,

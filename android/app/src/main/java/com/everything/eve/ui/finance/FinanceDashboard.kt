@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import com.everything.eve.R
 import com.everything.eve.finance.ContractRecord
 import com.everything.eve.finance.FinanceAggregator
+import com.everything.eve.finance.FinanceAggregator.InvestmentMarketValueSnapshot
 import com.everything.eve.finance.LoanRecord
 import com.everything.eve.finance.PolicyRecord
 import com.everything.eve.finance.SubscriptionRecord
@@ -69,12 +70,15 @@ private const val DAY_MS = 86_400_000L
  *   RatesImportScreen（由 FinanceScreen 切 settingsMode）。
  * @param onOpenBudgets B6 回调：点击"预算管理"入口时全屏打开 BudgetListScreen
  *   （由 FinanceScreen 切 budgetMode）。
+ * @param onOpenQuotes Task 8 回调：点击"投资账户 / 同步行情"入口时全屏打开
+ *   QuotesImportScreen（由 FinanceScreen 切 quotesMode）。
  */
 @Composable
 fun FinanceDashboard(
     vm: FinanceViewModel,
     onOpenSettings: () -> Unit = {},
     onOpenBudgets: () -> Unit = {},
+    onOpenQuotes: () -> Unit = {},
 ) {
     val state by vm.state.collectAsState()
     val dashboard = state.dashboard
@@ -82,6 +86,9 @@ fun FinanceDashboard(
     val budget = state.budget
     // B5 入口按钮标签随默认币种实时刷新。
     val defaultCurrency by vm.defaultCurrencyState.collectAsState()
+    // Task 8：投资市值派生快照（独立 StateFlow，不进 14 路 combine）。
+    val investment: InvestmentMarketValueSnapshot?
+        by vm.quoteInvestmentState.collectAsState()
 
     Column(
         modifier = Modifier
@@ -120,6 +127,13 @@ fun FinanceDashboard(
                 modifier = Modifier.semantics { testTag = "dashboard_budget_entry" },
             ) {
                 Text(stringResource(R.string.finance_budget_dashboard_entry))
+            }
+            // Task 8 投资账户 / 同步行情入口（同款轻量按钮，与 B5 / B6 同行）。
+            TextButton(
+                onClick = onOpenQuotes,
+                modifier = Modifier.semantics { testTag = "dashboard_quotes_entry" },
+            ) {
+                Text(stringResource(R.string.finance_quotes_dashboard_entry))
             }
         }
 
@@ -200,6 +214,12 @@ fun FinanceDashboard(
                 MonthlyRow(stringResource(R.string.finance_tx_kind_income), tag = "dashboard_monthly_income")
                 MonthlyRow(stringResource(R.string.finance_tx_kind_expense), tag = "dashboard_monthly_expense")
                 MonthlyRow(stringResource(R.string.finance_tx_kind_transfer) + " txCount", tag = "dashboard_monthly_txcount")
+                // Task 8：投资账户市值变化行（与 v1 月报同款 **** 占位，仅做表达占位，
+                // 真正数字由独立 InvestmentMarketValueSnapshot 提供，零知识不渲染）。
+                MonthlyRow(
+                    stringResource(R.string.finance_quotes_dashboard_monthly_investment_value),
+                    tag = "dashboard_monthly_investment_value",
+                )
                 Text(
                     text = "预算：${budget.name}",
                     style = MaterialTheme.typography.labelSmall,
@@ -268,6 +288,19 @@ fun FinanceDashboard(
             earliestMs = state.contracts
                 .filter { it.endTs in nowMs..(nowMs + 90L * DAY_MS) }
                 .minOfOrNull { it.endTs },
+        )
+
+        // =============================================================================
+        // Task 8 投资账户卡片（stage5-finance-v2 / FR-V2-D.3）
+        // ============================================================================
+        // 卡片标题 + 总市值（占位）+ 缺价计数 + 持仓 top 5。零知识：金额用 **** 占位
+        // （与 v1 净资产卡同款规范，避免截屏泄漏具体市值）；点击同步行情按钮回调
+        // onOpenQuotes 进 QuotesImportScreen。
+        // 行情未导入时显示"暂无行情"提示，不阻塞其他卡片渲染。
+        // =============================================================================
+        InvestmentDashboardCard(
+            snapshot = investment,
+            onOpenQuotes = onOpenQuotes,
         )
 
         // 空态
@@ -382,6 +415,116 @@ private fun V2DashboardCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.semantics { testTag = "${tag}_hint" },
             )
+        }
+    }
+}
+
+// =============================================================================
+// Task 8 投资账户 Dashboard 卡片（stage5-finance-v2 / FR-V2-D.3）
+// ============================================================================
+// 总市值（占位）+ 缺价提示 + 持仓 top 5 行；行情未导入时显示"暂无行情"。
+// 零知识：金额数字统一用 finance_dashboard_amount_mask 占位；仅渲染
+// symbol / currency 代码 / 缺价计数等公开要素，避免截屏泄漏具体持仓市值。
+// =============================================================================
+
+/**
+ * 投资账户 Dashboard 卡片。
+ *
+ * @param snapshot 投资市值派生快照（独立 StateFlow）；null 表示无投资账户或未派生。
+ * @param onOpenQuotes 点击"同步行情"按钮回调（进 QuotesImportScreen）。
+ */
+@Composable
+private fun InvestmentDashboardCard(
+    snapshot: InvestmentMarketValueSnapshot?,
+    onOpenQuotes: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { testTag = "dashboard_investment" },
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.finance_quotes_dashboard_card_title),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            // 标题行下方：账户数 + 同步行情按钮；纯信息交互，不渲染市值数字。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                val accountCountText = snapshot?.accountCount?.toString()
+                    ?: stringResource(R.string.finance_quotes_dashboard_no_accounts)
+                Text(
+                    text = stringResource(
+                        R.string.finance_quotes_dashboard_account_count_format,
+                        accountCountText,
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.semantics { testTag = "dashboard_investment_account_count" },
+                )
+                TextButton(
+                    onClick = onOpenQuotes,
+                    modifier = Modifier.semantics { testTag = "dashboard_investment_sync_btn" },
+                ) {
+                    Text(stringResource(R.string.finance_quotes_dashboard_sync_btn))
+                }
+            }
+            // 总市值：行情未导入时显示"暂无行情"，否则 **** 占位（与净资产同款）。
+            val totalDisplay = if (snapshot == null) {
+                stringResource(R.string.finance_quotes_dashboard_no_quote)
+            } else {
+                stringResource(R.string.finance_dashboard_amount_mask)
+            }
+            Text(
+                text = stringResource(
+                    R.string.finance_quotes_dashboard_total_value_format,
+                    totalDisplay,
+                    snapshot?.currency ?: "",
+                ),
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.semantics { testTag = "dashboard_investment_total" },
+            )
+            // 缺价提示：仅在 missingPriceHoldingCount > 0 时显示，零知识只暴露条数。
+            if (snapshot != null && snapshot.missingPriceHoldingCount > 0) {
+                Text(
+                    text = stringResource(
+                        R.string.finance_quotes_dashboard_missing_count_format,
+                        snapshot.missingPriceHoldingCount,
+                    ),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.semantics {
+                        testTag = "dashboard_investment_missing_count"
+                    },
+                )
+            }
+            // 持仓 top 5：symbol + 单价占位；最多 5 条（topN=5）。
+            if (snapshot != null && snapshot.topHoldings.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = stringResource(R.string.finance_quotes_dashboard_top_holdings_title),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    snapshot.topHoldings.forEach { holding ->
+                        Text(
+                            text = stringResource(
+                                R.string.finance_quotes_dashboard_top_holding_row_format,
+                                holding.symbol,
+                                holding.currency,
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.semantics {
+                                testTag = "dashboard_investment_top_${holding.symbol}"
+                            },
+                        )
+                    }
+                }
+            }
         }
     }
 }

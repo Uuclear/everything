@@ -52,6 +52,7 @@ import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.everything.eve.R
+import com.everything.eve.ui.settings.QuotesImportScreen
 import com.everything.eve.ui.settings.RatesImportScreen
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -89,6 +90,9 @@ fun FinanceScreen(
 
     // B5 设置屏路由态（false = 不显示；全屏承载 RatesImportScreen，返回态仿编辑器）
     var settingsMode by remember { mutableStateOf(false) }
+
+    // Task 8 设置屏路由态：行情包导入 / 同步 URL（全屏承载 QuotesImportScreen）。
+    var quotesMode by remember { mutableStateOf(false) }
 
     // B6 预算管理路由态：null=不显示；BUDGET_LIST=列表；BUDGET_NEW=新建；
     // 其他字符串=按预算 id 编辑（见文件顶部哨兵常量）。
@@ -137,6 +141,15 @@ fun FinanceScreen(
         RatesImportScreen(
             vm = vm,
             onClose = { settingsMode = false },
+        )
+        return
+    }
+
+    // Task 8 设置模式：行情包导入 / 同步 URL（全屏承载，与 RatesImportScreen 同款镜像）。
+    if (quotesMode) {
+        QuotesImportScreen(
+            vm = vm,
+            onClose = { quotesMode = false },
         )
         return
     }
@@ -224,6 +237,7 @@ fun FinanceScreen(
                         vm = vm,
                         onOpenSettings = { settingsMode = true },
                         onOpenBudgets = { budgetMode = BUDGET_LIST },
+                        onOpenQuotes = { quotesMode = true },
                     )
                     FinanceRoutes.TAB_ACCOUNTS -> FinanceAccountList(
                         vm = vm,
