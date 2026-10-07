@@ -22,6 +22,7 @@ import {
 import { expiryLevel } from '../stores/vault'
 import { useClipboard } from '../composables/useClipboard'
 import TotpLiveCode from './TotpLiveCode.vue'
+import IdentityAttachmentFields from './IdentityAttachmentFields.vue'
 
 const props = defineProps<{ show: boolean; record: DecryptedRecord | null }>()
 const emit = defineEmits<{
@@ -200,6 +201,24 @@ const levelColor: Record<string, string> = {
         <n-descriptions-item label="到期日期">{{ identity.expires_on || '—' }}</n-descriptions-item>
         <n-descriptions-item v-if="identity.notes" label="备注">
           <pre class="multiline">{{ identity.notes }}</pre>
+        </n-descriptions-item>
+        <n-descriptions-item
+          v-if="
+            identity.front_attachment_id ||
+            identity.back_attachment_id ||
+            (identity.scan_attachment_ids?.length ?? 0) > 0
+          "
+          label="影像"
+        >
+          <IdentityAttachmentFields
+            v-if="record"
+            :record-id="record.id"
+            :identity-kind="identity.kind"
+            :front-id="identity.front_attachment_id ?? null"
+            :back-id="identity.back_attachment_id ?? null"
+            :scan-ids="identity.scan_attachment_ids ?? []"
+            readonly
+          />
         </n-descriptions-item>
       </n-descriptions>
     </template>

@@ -95,6 +95,8 @@ dependencies {
     implementation(libs.mlkit.text.recognition)
     // 中文识别模型构件：提供 ChineseTextRecognizerOptions（text-recognition 本体仅含 Latin 壳）
     implementation(libs.mlkit.text.recognition.chinese)
+    // 阶段 5 items：二维码生成/解码（ZXing core）
+    implementation(libs.zxing.core)
 
     // JVM 单测：Crockford 向量等不依赖 native 的纯算法
     testImplementation(libs.junit)

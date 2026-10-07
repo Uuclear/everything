@@ -24,6 +24,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { NButton, NCard, NEmpty, NModal, NSpace } from 'naive-ui'
 import { useFinanceStore } from '../../stores/finance'
+import { useVaultStore } from '../../stores/vault'
 import { downloadFile } from '../../finance/attachment'
 
 // ========== Props / Emits ==========
@@ -35,6 +36,8 @@ const props = defineProps<{
   attachmentId: string | null
   /** MIME（用于路由 PDF / image / 兜底）；可由父组件传入。 */
   mime: string | null
+  /** 附件所属 store：财务默认 finance；证件走 vault。 */
+  source?: 'finance' | 'vault'
 }>()
 
 const emit = defineEmits<{
@@ -42,7 +45,8 @@ const emit = defineEmits<{
   (e: 'update:show', value: boolean): void
 }>()
 
-const store = useFinanceStore()
+const financeStore = useFinanceStore()
+const vaultStore = useVaultStore()
 
 // ========== 内部状态 ==========
 
@@ -168,12 +172,17 @@ async function downloadAttachmentFromStore(
 ): Promise<{ ok: true; value: Blob } | { ok: false; error: string }> {
   // 取 store 中已缓存的 AttachmentRef（元数据）+ 由父组件注入 channel。
   // 此处走 store.getAttachmentMeta 暴露的元数据接口。
-  const meta = store.getAttachmentMeta(attachmentId)
+  if (props.source === 'vault') {
+    const meta = vaultStore.getAttachmentMeta(attachmentId)
+    if (!meta) return { ok: false, error: '附件不存在' }
+    const ch = vaultStore.getAttachmentChannel('identity')
+    return downloadFile(attachmentId, ch, meta.sha256)
+  }
+  const meta = financeStore.getAttachmentMeta(attachmentId)
   if (!meta) {
     return { ok: false, error: '附件不存在' }
   }
-  // 调 attachment.ts 的 downloadFile，channel 由 store 暴露（见 store-finance.ts 扩展）。
-  const ch = store.getAttachmentChannel()
+  const ch = financeStore.getAttachmentChannel()
   if (!ch) {
     return { ok: false, error: '附件通道未初始化' }
   }

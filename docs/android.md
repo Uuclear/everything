@@ -23,6 +23,14 @@ cd android
 - 当前允许明文 HTTP（`usesCleartextTraffic=true`）仅用于局域网调试；
   正式使用请走 HTTPS 域名并关闭该选项。
 
+### 轨迹底图（Web 已落地；Android 若加地图请复用）
+
+Web 轨迹页缺省不再直连 `tile.openstreetmap.org`（浏览器易 **403**），而是请求同源
+`GET /api/v1/map/tiles/{z}/{x}/{y}.png`（须 **approved** 访问令牌）。服务端用
+`User-Agent: Everything-Eve/1.0 (+self-hosted)` 拉取 `data/config.yaml` 中
+`map.upstream_template` 所指上游，可选磁盘缓存 `data/map_cache/`。Android 未来嵌入
+地图时请走该 API 或同等代理，勿在客户端硬编码 OSM 直连。
+
 ## 现有能力（阶段 1 完成 + 阶段 2 同步兼容 + 阶段 3 采集器 + 阶段 4a 位置轨迹 + 阶段 4b 日程/日历）
 
 - 注册 / 登录解锁（lazysodium Native API：Argon2id、XChaCha20-Poly1305 信封，与 Go/Web 逐字节互通）

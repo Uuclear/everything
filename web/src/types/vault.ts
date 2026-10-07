@@ -37,6 +37,8 @@ export interface CardData {
   exp_year?: number // 四位年
   cvv?: string
   notes?: string
+  /** 可选卡面图（module=pass / type=attachment）。 */
+  card_face_attachment_id?: string
 }
 
 export interface IdentityData {
@@ -48,6 +50,12 @@ export interface IdentityData {
   issued_on?: string // YYYY-MM-DD
   expires_on?: string // YYYY-MM-DD（到期提醒据此计算）
   notes?: string
+  /** 身份证正面影像 id（module=identity / type=attachment）。 */
+  front_attachment_id?: string
+  /** 身份证反面影像 id。 */
+  back_attachment_id?: string
+  /** 多页扫描（护照等），顺序为 UI 页序。 */
+  scan_attachment_ids?: string[]
 }
 
 export type VaultData = LoginData | NoteData | CardData | IdentityData

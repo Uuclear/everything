@@ -10,6 +10,72 @@
     <!-- 阶段 5 Task 10 / TR-10.1：财务入口文案（VaultScreen TopAppBar actions TextButton 渲染，
          沿用 4b nav_calendar 同款镜像模式 → 与 "采集 / 设备" / "日历" 并列显示）。 -->
     <string name="nav_finance">财务</string>
+    <!-- 阶段 5 items Task 9：物品入口 -->
+    <string name="nav_items">物品</string>
+    <string name="nav_identities">证件</string>
+    <string name="nav_vault_home">今日</string>
+    <string name="nav_archive_wall">证件墙</string>
+    <string name="vault_home_title">今日与我</string>
+    <string name="vault_home_identity_expiry">7 日内证件到期</string>
+    <string name="vault_home_empty_identity">暂无即将到期证件</string>
+    <string name="vault_home_counts">物品与卡片</string>
+    <string name="vault_home_counts_format">物品 %1$d 件 · 银行卡 %2$d 张</string>
+    <string name="vault_home_location_today">今日轨迹采样</string>
+    <string name="vault_home_location_unknown">尚未统计</string>
+    <string name="vault_home_location_empty">今日暂无采样点</string>
+    <string name="vault_home_location_points_format">今日已采 %1$d 点</string>
+    <string name="archive_wall_title">证件墙</string>
+
+    <string name="action_back">返回</string>
+    <string name="action_save">保存</string>
+
+    <string name="identities_title">证件</string>
+    <string name="identity_editor_title">编辑证件</string>
+    <string name="identity_field_title">标题</string>
+    <string name="identity_field_kind">类型</string>
+    <string name="identity_field_name">姓名</string>
+    <string name="identity_field_number">证件号</string>
+    <string name="identity_field_expires">到期日</string>
+    <string name="identity_ocr_scan_front">扫描正面</string>
+    <string name="identity_ocr_scan_back">扫描反面</string>
+    <string name="identity_ocr_front_title">识别身份证正面</string>
+    <string name="identity_ocr_back_title">识别身份证反面</string>
+    <string name="identity_ocr_no_result">未识别到有效证件信息，请重试或手动输入</string>
+    <string name="finance_card_ocr_entry">扫描卡面</string>
+    <string name="finance_card_ocr_no_result">未识别到有效卡号，请重试或手动输入</string>
+    <string name="identity_image_front">正面影像</string>
+    <string name="identity_image_back">反面影像</string>
+
+    <string name="vault_image_pick">选择图片</string>
+    <string name="vault_image_remove">移除图片</string>
+    <string name="vault_image_preview_pending">已关联附件（预览加载中）</string>
+    <string name="vault_image_mime_rejected">不支持的图片格式</string>
+    <string name="vault_image_read_failed">无法读取图片</string>
+    <string name="vault_image_upload_failed">图片保存失败</string>
+
+    <string name="finance_card_face_image">卡面照片（可选）</string>
+
+    <!-- 阶段 5 items TR-5.3：保修提醒通知（零知识：不含物品名称/价格） -->
+    <string name="item_reminder_title">物品提醒</string>
+    <string name="item_reminder_warranty_text">[%1$s] 1 件物品保修即将到期</string>
+
+    <!-- 阶段 5 items UI 文案 -->
+    <string name="items_title">物品</string>
+    <string name="items_search_tags">按标签搜索</string>
+    <string name="items_new">新建物品</string>
+    <string name="items_scan">扫码</string>
+    <string name="items_category_all">全部</string>
+    <string name="items_empty">暂无物品</string>
+    <string name="item_editor_save">保存</string>
+    <string name="item_editor_name">名称</string>
+    <string name="item_editor_category">分类</string>
+    <string name="item_editor_receipt_invalid">发票链接须以 https:// 开头</string>
+    <string name="item_scan_not_found">未找到该物品</string>
+    <string name="item_scan_manual">手动输入物品 ID</string>
+    <string name="item_scan_search">搜索</string>
+    <string name="item_delete">删除</string>
+    <string name="item_delete_confirm">确认删除</string>
+    <string name="item_edit">编辑</string>
 
     <!-- 阶段 4b Task 5 / TR-5.3：日程提醒通知文案（spec FR-5 零知识红线） -->
     <!-- 通知 channel "events" 名称 + 描述；API 26+ 创建。 -->

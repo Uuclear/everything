@@ -260,13 +260,21 @@ class AttachmentRepositoryTest {
             attachmentId: String,
             plaintextJson: String,
             recordId: String,
+        ): String = upsertModuleAttachment("finance", attachmentId, plaintextJson)
+
+        override suspend fun upsertModuleAttachment(
+            parentModule: String,
+            attachmentId: String,
+            plaintextJson: String,
         ): String {
-            upsertAttachmentCalls.add(Triple(attachmentId, plaintextJson, recordId))
+            upsertAttachmentCalls.add(Triple(attachmentId, plaintextJson, parentModule))
             return attachmentId
         }
 
-        override fun decryptFinanceAttachment(entity: RecordEntity): String {
-            // 桩场景下不应被调用；返回占位 JSON 防 caller 抛 NPE。
+        override fun decryptFinanceAttachment(entity: RecordEntity): String =
+            decryptModuleAttachment(entity)
+
+        override fun decryptModuleAttachment(entity: RecordEntity): String {
             return "{}"
         }
 
@@ -354,7 +362,7 @@ class AttachmentRepositoryTest {
 
         val result = runBlocking {
             repo.upload(
-                recordId = "policy-1",
+                parentRefId = "policy-1",
                 content = content,
                 mime = "application/pdf",
                 sha256Hex = sha,
@@ -375,6 +383,10 @@ class AttachmentRepositoryTest {
         assertEquals("AttachmentEntity.size 必须 = 100", 100L, entity.size)
         // records 通道也应被调
         assertEquals("recordsRepository.upsertFinanceAttachment 应被调一次", 1, recSpy.upsertAttachmentCalls.size)
+        val metaJson = recSpy.upsertAttachmentCalls.first().second
+        val meta = org.json.JSONObject(metaJson)
+        assertEquals("policy-1", meta.getString("parent_ref_id"))
+        assertEquals("finance", meta.getString("parent_module"))
     }
 
     // ============================================================================
@@ -394,7 +406,7 @@ class AttachmentRepositoryTest {
 
         val result = runBlocking {
             repo.upload(
-                recordId = "policy-1",
+                parentRefId = "policy-1",
                 content = content,
                 mime = "application/pdf",
                 sha256Hex = sha,
@@ -428,7 +440,7 @@ class AttachmentRepositoryTest {
 
         val result = runBlocking {
             repo.upload(
-                recordId = "policy-1",
+                parentRefId = "policy-1",
                 content = content,
                 mime = "application/pdf",
                 sha256Hex = sha,
@@ -460,7 +472,7 @@ class AttachmentRepositoryTest {
 
         val result = runBlocking {
             repo.upload(
-                recordId = "policy-1",
+                parentRefId = "policy-1",
                 content = content,
                 mime = "application/pdf",
                 sha256Hex = badSha,
@@ -489,7 +501,7 @@ class AttachmentRepositoryTest {
 
         val result = runBlocking {
             repo.upload(
-                recordId = "policy-1",
+                parentRefId = "policy-1",
                 content = content,
                 mime = "application/pdf",
                 sha256Hex = badSha,
@@ -522,7 +534,7 @@ class AttachmentRepositoryTest {
         val sha = sha256Hex(content)
         runBlocking {
             val upRes = repo.upload(
-                recordId = "policy-1",
+                parentRefId = "policy-1",
                 content = content,
                 mime = "image/png",
                 sha256Hex = sha,
@@ -559,7 +571,7 @@ class AttachmentRepositoryTest {
         val realSha = sha256Hex(content)
         runBlocking {
             val upRes = repo.upload(
-                recordId = "policy-1",
+                parentRefId = "policy-1",
                 content = content,
                 mime = "application/pdf",
                 sha256Hex = realSha,

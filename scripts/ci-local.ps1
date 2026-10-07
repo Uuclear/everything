@@ -27,6 +27,11 @@ function Bar([string]$msg) {
 
 function Gate-Server {
     Bar "[1/3] Go server test + vet + cross-compile"
+    # 与 scripts/setup-go-local.ps1 配套：进程内 PATH，不写 git/系统环境。
+    $toolsGoBin = Join-Path $root '.tools\go\bin'
+    if (-not (Get-Command go -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $toolsGoBin 'go.exe'))) {
+        $env:PATH = "$toolsGoBin;" + $env:PATH
+    }
     $go = Get-Command go -ErrorAction SilentlyContinue
     if (-not $go) {
         Write-Host "  X go not found in PATH — server gate skipped" -ForegroundColor Red

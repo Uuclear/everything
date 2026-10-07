@@ -45,6 +45,10 @@ import { useFinanceStore } from '../../stores/finance'
 import type { CardKind, FinanceCard, CurrencyCode } from '../../finance/types'
 import { DEFAULT_CARD_COLOR, DEFAULT_CURRENCY } from '../../finance/types'
 import { luhnValidate, extractLast4 } from '../../finance/luhn'
+import { uploadFile, deleteAttachment, downloadFile } from '../../finance/attachment'
+import AttachmentViewer from './AttachmentViewer.vue'
+import OcrScanButton from '../../ocr/components/OcrScanButton.vue'
+import { parseCardText } from '../../ocr/parsers/card'
 
 const route = useRoute()
 const router = useRouter()
@@ -84,6 +88,11 @@ const maskedPan = ref('')
 const archived = ref(false)
 const includeInNetAssets = ref(true)
 const submitting = ref(false)
+const cardFaceAttachmentId = ref<string | null>(null)
+const cardFaceThumbUrl = ref<string | null>(null)
+const cardFaceUploading = ref(false)
+const showCardFaceViewer = ref(false)
+const cardFaceFileInput = ref<HTMLInputElement | null>(null)
 
 // ========== 模式判断 ==========
 const editingId = computed<string | null>(() => {
@@ -110,6 +119,8 @@ onMounted(() => {
       // 不预填 masked_pan —— 完整卡号不入库, 用户需重新输入。
       archived.value = c.archived
       includeInNetAssets.value = c.include_in_net_assets
+      cardFaceAttachmentId.value = c.card_face_attachment_id ?? null
+      void refreshCardFaceThumb()
     } else {
       message.warning('未找到该卡,可能已删除')
     }
@@ -171,8 +182,9 @@ function save() {
       last4 = extracted
     }
 
+    const cardId = editingId.value ?? cryptoRandomId()
     const payload: FinanceCard = {
-      id: editingId.value ?? cryptoRandomId(),
+      id: cardId,
       schema_version: 1,
       name: name.value.trim(),
       kind: kind.value,
@@ -195,6 +207,9 @@ function save() {
       // brand 字段为推断辅助,v1 schema 不强制保存;此处塞进 last4 前缀注释
       // 提示 —— store 不会保留额外字段, 故 brand 仅在 UI 上下文使用。
       ...({ brand: brand.value } as Record<string, unknown>),
+    }
+    if (cardFaceAttachmentId.value) {
+      payload.card_face_attachment_id = cardFaceAttachmentId.value
     }
     if (editingId.value) {
       store.updateCard(payload)
@@ -234,6 +249,85 @@ function cryptoRandomId(): string {
 }
 
 // 输入提示: 卡号仅做 Luhn 校验, 不入库完整值;在 UI 上提示用户。
+
+async function refreshCardFaceThumb() {
+  if (cardFaceThumbUrl.value) {
+    URL.revokeObjectURL(cardFaceThumbUrl.value)
+    cardFaceThumbUrl.value = null
+  }
+  const id = cardFaceAttachmentId.value
+  if (!id || !editingId.value) return
+  const meta = store.getAttachmentMeta(id)
+  if (!meta) return
+  const ch = store.getAttachmentChannel()
+  const down = await downloadFile(id, ch, meta.sha256)
+  if (down.ok) cardFaceThumbUrl.value = URL.createObjectURL(down.value)
+}
+
+async function onCardFacePicked(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0]
+  ;(event.target as HTMLInputElement).value = ''
+  const recordId = editingId.value
+  if (!file || !recordId) {
+    if (!recordId) message.warning('请先保存卡片后再上传卡面图')
+    return
+  }
+  cardFaceUploading.value = true
+  try {
+    const ch = store.getAttachmentChannel()
+    const result = await uploadFile(recordId, file, ch)
+    if (!result.ok) {
+      message.error(result.error)
+      return
+    }
+    store.addAttachment(recordId, result.value)
+    cardFaceAttachmentId.value = result.value.id
+    await refreshCardFaceThumb()
+    message.success('已上传卡面图')
+  } catch {
+    message.error('上传失败')
+  } finally {
+    cardFaceUploading.value = false
+  }
+}
+
+function buildCardOcrFields(text: string) {
+  const hint = parseCardText(text)
+  if (!hint) return {}
+  const fields: Record<string, string> = {}
+  if (hint.pan) fields.pan = hint.pan
+  if (hint.holder) fields.holder = hint.holder
+  if (hint.expiryMonth != null && hint.expiryYear != null) {
+    fields.expiry = `${String(hint.expiryMonth).padStart(2, '0')}/${String(hint.expiryYear).slice(-2)}`
+  }
+  return fields
+}
+
+function applyCardOcr(fields: Record<string, string>) {
+  if (fields.pan) maskedPan.value = fields.pan.replace(/\s+/g, '')
+  if (fields.holder) name.value = fields.holder
+  if (fields.expiry) {
+    message.info(`识别到有效期 ${fields.expiry}（请核对后保存）`)
+  }
+}
+
+async function removeCardFace() {
+  const recordId = editingId.value
+  const id = cardFaceAttachmentId.value
+  if (!recordId || !id) return
+  const ch = store.getAttachmentChannel()
+  const result = await deleteAttachment(id, ch)
+  if (!result.ok) {
+    message.error(result.error)
+    return
+  }
+  store.removeAttachment(recordId, id)
+  cardFaceAttachmentId.value = null
+  if (cardFaceThumbUrl.value) {
+    URL.revokeObjectURL(cardFaceThumbUrl.value)
+    cardFaceThumbUrl.value = null
+  }
+}
 </script>
 
 <template>
@@ -289,6 +383,12 @@ function cryptoRandomId(): string {
                   : '✗ Luhn 未通过, 修正后可保存'
             }}
           </span>
+          <OcrScanButton
+            label="扫描卡面"
+            :build-fields="buildCardOcrFields"
+            :field-labels="{ pan: '卡号', holder: '持卡人', expiry: '有效期' }"
+            @apply="applyCardOcr"
+          />
         </n-form-item>
         <n-form-item label="计入净资产">
           <n-switch v-model:value="includeInNetAssets" />
@@ -297,8 +397,48 @@ function cryptoRandomId(): string {
           <n-switch v-model:value="archived" />
           <span class="hint">归档后不再计入看板</span>
         </n-form-item>
+        <n-form-item label="卡面照片（可选）">
+          <div class="card-face">
+            <img
+              v-if="cardFaceThumbUrl"
+              :src="cardFaceThumbUrl"
+              alt="卡面"
+              class="card-face-thumb"
+              @click="showCardFaceViewer = true"
+            />
+            <n-space>
+              <n-button
+                :disabled="!editingId || cardFaceUploading"
+                @click="cardFaceFileInput?.click()"
+              >
+                {{ cardFaceUploading ? '上传中…' : cardFaceThumbUrl ? '更换' : '上传' }}
+              </n-button>
+              <n-button
+                v-if="cardFaceAttachmentId"
+                quaternary
+                type="error"
+                @click="removeCardFace"
+              >
+                删除
+              </n-button>
+            </n-space>
+            <input
+              ref="cardFaceFileInput"
+              type="file"
+              accept="image/*"
+              class="hidden-input"
+              @change="onCardFacePicked"
+            />
+          </div>
+          <span class="hint">仅存影像；完整卡号仍仅 last4 入库</span>
+        </n-form-item>
       </n-form>
     </n-card>
+    <AttachmentViewer
+      v-model:show="showCardFaceViewer"
+      :attachment-id="cardFaceAttachmentId"
+      mime="image/jpeg"
+    />
   </div>
 </template>
 
@@ -321,5 +461,21 @@ h2 {
   margin-left: 10px;
   font-size: 12px;
   color: #6b7280;
+}
+.card-face {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.card-face-thumb {
+  max-width: 200px;
+  max-height: 120px;
+  object-fit: contain;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+  cursor: pointer;
+}
+.hidden-input {
+  display: none;
 }
 </style>

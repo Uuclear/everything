@@ -12,6 +12,9 @@ import SecurityView from '../views/SecurityView.vue'
 import LocationsView from '../views/LocationsView.vue'
 // 阶段 4b — 日程/日历视图：与既有密码库/轨迹同级，在 /vault 主框架内。
 import CalendarView from '../views/CalendarView.vue'
+// 阶段 5 — 物品台账
+import ItemsView from '../views/ItemsView.vue'
+import ItemDetailView from '../views/ItemDetailView.vue'
 // 阶段 5 — 财务视图：与轨迹 / 日历同级, 在 /finance 主框架内（独立子应用
 // 框架, 便于后续拆分子包 / 权限独立配置）。
 import FinanceView from '../views/FinanceView.vue'
@@ -29,17 +32,21 @@ import BudgetEditor from '../views/finance/BudgetEditor.vue'
 import SettingsRatesView from '../views/SettingsRatesView.vue'
 // 阶段 5 v2 Task 8 — 投资行情设置（手动行情包导入 + 同步 URL；FR-V2-D.2）
 import SettingsQuotesSyncView from '../views/SettingsQuotesSyncView.vue'
+import VaultHomeView from '../views/VaultHomeView.vue'
+import ArchiveWallView from '../views/ArchiveWallView.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(), // hash 模式对单二进制 SPA 托管最友好
   routes: [
-    { path: '/', redirect: '/vault/logins' },
+    { path: '/', redirect: '/vault/home' },
     { path: '/welcome', name: 'welcome', component: WelcomeView },
     {
       path: '/vault',
       component: AppShell,
       children: [
-        { path: '', redirect: '/vault/logins' },
+        { path: '', redirect: '/vault/home' },
+        { path: 'home', name: 'home', component: VaultHomeView },
+        { path: 'archive', name: 'archive', component: ArchiveWallView },
         { path: 'logins', name: 'logins', component: LoginsView },
         { path: 'notes', name: 'notes', component: NotesView },
         { path: 'cards', name: 'cards', component: CardsView },
@@ -49,6 +56,8 @@ export const router = createRouter({
         { path: 'locations', name: 'locations', component: LocationsView },
         // 日历页（阶段 4b）：4a 之后第二个扩展模块；与轨迹共享 /vault 框架与登录守卫。
         { path: 'calendar', name: 'calendar', component: CalendarView },
+        { path: 'items', name: 'items', component: ItemsView },
+        { path: 'items/:id', name: 'item-detail', component: ItemDetailView },
         // 设备与安全设置也在主框架内（侧边导航进入）。
         { path: 'devices', name: 'devices', component: DevicesView },
         { path: 'security', name: 'security', component: SecurityView },
@@ -124,6 +133,6 @@ export const router = createRouter({
 // 路由守卫：无令牌去登录/注册；主密钥只在内存，进入主框架后由锁屏重新解锁。
 router.beforeEach((to) => {
   if (to.name !== 'welcome' && !getAccessToken()) return { name: 'welcome' }
-  if (to.name === 'welcome' && getAccessToken()) return { name: 'logins' }
+  if (to.name === 'welcome' && getAccessToken()) return { name: 'home' }
   return true
 })

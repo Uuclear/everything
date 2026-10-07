@@ -34,6 +34,8 @@
 
 package com.everything.eve.reminder
 
+import com.everything.eve.data.item.ItemEntity
+import com.everything.eve.items.MS_PER_DAY
 import com.everything.eve.recurrence.EventRule
 import com.everything.eve.recurrence.Frequency
 import com.everything.eve.recurrence.RRule
@@ -370,6 +372,78 @@ class ReminderSchedulerTest {
         // reminders[60] 触发最早（start - 60*60_000）
         val expected = start - 60 * MINUTE_MS
         assertEquals(expected, result)
+    }
+
+    // -------------------------------------------------------------------------
+    // 阶段 5 items：nextItemTrigger（保修 30/7/1）
+    // -------------------------------------------------------------------------
+
+    private fun itemEntity(
+        id: String = "item-1",
+        durationDays: Int = 365,
+        untilTs: Long,
+    ) = ItemEntity(
+        id = id,
+        name = "test",
+        category = "electronics",
+        tags_json = "[]",
+        brand = null,
+        model = null,
+        serial_no = null,
+        purchase_date = 0L,
+        purchase_price_cents = 0L,
+        currency = "CNY",
+        warranty_duration_days = durationDays,
+        warranty_until_ts = untilTs,
+        receipt_url = null,
+        note = null,
+        location_text = null,
+        dirty = false,
+        created_ts = 0L,
+        updated_ts = 0L,
+    )
+
+    @Test
+    fun nextItemTrigger_zero_warranty_returns_null() {
+        val item = itemEntity(durationDays = 0, untilTs = NOW + MS_PER_DAY)
+        assertNull(ReminderScheduler.nextItemTrigger(item, NOW))
+    }
+
+    @Test
+    fun nextItemTrigger_picks_30d_before_expiry() {
+        val until = NOW + 40L * MS_PER_DAY
+        val item = itemEntity(untilTs = until)
+        val expected = until - 30L * MS_PER_DAY
+        assertEquals(expected, ReminderScheduler.nextItemTrigger(item, NOW))
+    }
+
+    @Test
+    fun nextItemTrigger_picks_7d_when_30d_passed() {
+        val until = NOW + 10L * MS_PER_DAY
+        val item = itemEntity(untilTs = until)
+        val expected = until - 7L * MS_PER_DAY
+        assertEquals(expected, ReminderScheduler.nextItemTrigger(item, NOW))
+    }
+
+    @Test
+    fun nextItemTrigger_picks_1d_before_expiry() {
+        val until = NOW + 2L * MS_PER_DAY
+        val item = itemEntity(untilTs = until)
+        val expected = until - MS_PER_DAY
+        assertEquals(expected, ReminderScheduler.nextItemTrigger(item, NOW))
+    }
+
+    @Test
+    fun nextItemTrigger_expired_returns_null() {
+        val item = itemEntity(untilTs = NOW - MS_PER_DAY)
+        assertNull(ReminderScheduler.nextItemTrigger(item, NOW))
+    }
+
+    @Test
+    fun nextItemTrigger_after_last_reminder_returns_null() {
+        val until = NOW + MS_PER_DAY / 2
+        val item = itemEntity(untilTs = until)
+        assertNull(ReminderScheduler.nextItemTrigger(item, NOW))
     }
 
     // -------------------------------------------------------------------------

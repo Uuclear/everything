@@ -28,6 +28,17 @@ import { useEventRulesStore } from './event-rules'
 // try-catch 块；财务模块与事件模块使用各自的 CryptoChannel 与 since 游标，
 // 互不干扰；任一模块解密失败不破坏 4a vault 闭环。
 import { useFinanceStore } from './finance'
+// 阶段 5 / Task 10：物品模块独立 Pinia store（web/src/stores/items.ts）
+import { useItemsStore } from './items'
+import {
+  ATTACHMENT_RECORD_TYPE,
+  defaultAttachmentChannel,
+  deleteAttachment as deleteAttachmentFile,
+  uploadFile,
+  type AttachmentChannel,
+  type AttachmentRecord,
+  type AttachmentRef,
+} from '../vault/attachment'
 
 /**
  * 命名地点（module=place）解密缓存记录（阶段 4a / tasks.md Task 9）。
@@ -72,6 +83,183 @@ export const useVaultStore = defineStore('vault', () => {
   const lastSyncAt = ref(0)
   /** 增量游标：本设备已拉取到的最大 updated_at（毫秒）。 */
   let since = 0
+
+  // ========== 证件/密码库附件（stage2b；module=identity|pass） ==========
+  const attachments = reactive(new Map<string, AttachmentRef>())
+  const attachmentsByRecordId = reactive(new Map<string, Set<string>>())
+  const attachmentCipherCache = reactive(new Map<string, AttachmentRecord>())
+  const attachmentRemote = new Map<string, AttachmentRecord>()
+  const attachmentChannels = new Map<string, AttachmentChannel>()
+
+  function isVaultAttachmentModule(module: string): boolean {
+    return module === 'identity' || module === 'pass'
+  }
+
+  /** 按父 module 构造附件通道（密封 AAD + upsert 上行 records）。 */
+  function getAttachmentChannel(parentModule: string): AttachmentChannel {
+    const cached = attachmentChannels.get(parentModule)
+    if (cached) return cached
+    if (!auth.sodium || !auth.masterKey) {
+      throw new Error('附件通道未初始化：请先解锁')
+    }
+    const sodium = auth.sodium
+    const mk = auth.masterKey
+    const base = defaultAttachmentChannel(sodium, mk, parentModule, attachmentRemote)
+    const ch: AttachmentChannel = {
+      parentModule,
+      seal: base.seal.bind(base),
+      open: base.open.bind(base),
+      async listByRecord(recordId) {
+        const out: AttachmentRecord[] = []
+        for (const rec of attachmentCipherCache.values()) {
+          if (rec.parentModule !== parentModule) continue
+          if (rec.deleted) continue
+          if (recordId === '' || rec.recordId === recordId) out.push(rec)
+        }
+        return out
+      },
+      async upsert(rec) {
+        attachmentCipherCache.set(rec.id, rec)
+        attachmentRemote.set(rec.id, rec)
+        const res = await api.pushRecords([
+          {
+            id: rec.id,
+            module: parentModule,
+            type: ATTACHMENT_RECORD_TYPE,
+            ciphertext: rec.ciphertext,
+            version: rec.version,
+            created_at: rec.created_at,
+            updated_at: rec.updated_at,
+            deleted: rec.deleted,
+          },
+        ])
+        since = Math.max(since, res.server_time)
+        return {
+          applied: res.applied,
+          skipped: res.skipped,
+          server_time: res.server_time,
+        }
+      },
+    }
+    attachmentChannels.set(parentModule, ch)
+    return ch
+  }
+
+  function getAttachmentMeta(id: string): AttachmentRef | undefined {
+    return attachments.get(id)
+  }
+
+  function addAttachment(recordId: string, ref: AttachmentRef): void {
+    attachments.set(ref.id, ref)
+    const set = attachmentsByRecordId.get(recordId)
+    if (set) set.add(ref.id)
+    else attachmentsByRecordId.set(recordId, new Set([ref.id]))
+  }
+
+  function removeAttachment(recordId: string, attachmentId: string): void {
+    attachments.delete(attachmentId)
+    const set = attachmentsByRecordId.get(recordId)
+    if (set) {
+      set.delete(attachmentId)
+      if (set.size === 0) attachmentsByRecordId.delete(recordId)
+    }
+  }
+
+  async function uploadVaultAttachment(
+    parentModule: string,
+    recordId: string,
+    file: File,
+  ) {
+    const ch = getAttachmentChannel(parentModule)
+    return uploadFile(recordId, file, ch, (ref) => addAttachment(recordId, ref))
+  }
+
+  async function deleteVaultAttachment(
+    parentModule: string,
+    recordId: string,
+    attachmentId: string,
+  ) {
+    const ch = getAttachmentChannel(parentModule)
+    const result = await deleteAttachmentFile(attachmentId, ch)
+    if (result.ok) removeAttachment(recordId, attachmentId)
+    return result
+  }
+
+  /** identity / pass 附件 ingest（type=attachment）。 */
+  function ingestVaultAttachment(remote: RemoteRecord) {
+    if (!isVaultAttachmentModule(remote.module)) return
+    if (remote.type !== ATTACHMENT_RECORD_TYPE) return
+
+    if (remote.deleted) {
+      const cipher = attachmentCipherCache.get(remote.id)
+      if (cipher) {
+        cipher.deleted = true
+        cipher.updated_at = remote.updated_at
+        cipher.version = Math.max(cipher.version, remote.version)
+        const set = attachmentsByRecordId.get(cipher.recordId)
+        if (set) {
+          set.delete(remote.id)
+          if (set.size === 0) attachmentsByRecordId.delete(cipher.recordId)
+        }
+      }
+      attachments.delete(remote.id)
+      return
+    }
+
+    try {
+      const plain = openRecord(
+        auth.sodium!,
+        auth.masterKey!,
+        fromBase64(remote.ciphertext),
+        remote.id,
+        remote.module,
+        remote.version,
+      )
+      let meta: {
+        mime: string
+        size: number
+        sha256: string
+        recordId?: string
+        parent_ref_id?: string
+      }
+      try {
+        meta = JSON.parse(new TextDecoder().decode(plain)) as {
+          mime: string
+          size: number
+          sha256: string
+          recordId?: string
+          parent_ref_id?: string
+        }
+      } catch {
+        return
+      }
+      const recordId = meta.recordId ?? meta.parent_ref_id ?? ''
+      const ref: AttachmentRef = {
+        id: remote.id,
+        mime: meta.mime,
+        size: meta.size,
+        sha256: meta.sha256,
+      }
+      attachments.set(remote.id, ref)
+      attachmentCipherCache.set(remote.id, {
+        id: remote.id,
+        ciphertext: remote.ciphertext,
+        version: remote.version,
+        recordId,
+        parentModule: remote.module,
+        plaintextJson: JSON.stringify(meta),
+        deleted: false,
+        device_id: 'web',
+        created_at: remote.created_at,
+        updated_at: remote.updated_at,
+      })
+      const set = attachmentsByRecordId.get(recordId)
+      if (set) set.add(remote.id)
+      else attachmentsByRecordId.set(recordId, new Set([remote.id]))
+    } catch {
+      // 单条附件解密失败不阻塞其它记录
+    }
+  }
 
   const list = computed(() => Array.from(records.values()))
 
@@ -120,6 +308,10 @@ export const useVaultStore = defineStore('vault', () => {
     // place 模块走独立缓存分支（不混入 pass/identity 列表）。
     if (remote.module === 'place') {
       ingestPlace(remote)
+      return
+    }
+    if (remote.type === ATTACHMENT_RECORD_TYPE && isVaultAttachmentModule(remote.module)) {
+      ingestVaultAttachment(remote)
       return
     }
     if (remote.deleted) {
@@ -234,6 +426,13 @@ export const useVaultStore = defineStore('vault', () => {
       await financeStore.pullAll(full ? 0 : since)
     } catch (e) {
       // 单模块同步失败不破坏 4a 闭环（与事件模块同策略）
+    }
+    // ---- 阶段 5 / TR-10.1：物品模块拉取 ----
+    try {
+      const itemsStore = useItemsStore()
+      await itemsStore.pullAll(full ? 0 : since)
+    } catch (e) {
+      // 单模块同步失败不破坏 4a 闭环
     }
   }
 
@@ -374,6 +573,11 @@ export const useVaultStore = defineStore('vault', () => {
   function reset() {
     records.clear()
     placeRecords.clear() // place 明文同样只驻内存
+    attachments.clear()
+    attachmentsByRecordId.clear()
+    attachmentCipherCache.clear()
+    attachmentRemote.clear()
+    attachmentChannels.clear()
     since = 0
     lastSyncAt.value = 0
   }
@@ -381,6 +585,8 @@ export const useVaultStore = defineStore('vault', () => {
   return {
     records,
     placeRecords,
+    attachments,
+    attachmentsByRecordId,
     syncing,
     lastSyncAt,
     list,
@@ -392,5 +598,11 @@ export const useVaultStore = defineStore('vault', () => {
     savePlace,
     remove,
     reset,
+    getAttachmentChannel,
+    getAttachmentMeta,
+    uploadVaultAttachment,
+    deleteVaultAttachment,
+    addAttachment,
+    removeAttachment,
   }
 })

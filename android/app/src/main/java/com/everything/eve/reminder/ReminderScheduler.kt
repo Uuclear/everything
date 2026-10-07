@@ -53,8 +53,11 @@ import com.everything.eve.data.event.EventReminderLogEntity
 import com.everything.eve.data.finance.FinanceModule
 import com.everything.eve.data.finance.dao.FinanceCardDao
 import com.everything.eve.data.finance.entity.FinanceCardEntity
+import com.everything.eve.data.item.ItemEntity
 import com.everything.eve.finance.NextCardFiring
 import com.everything.eve.finance.V2PayloadCodec
+import com.everything.eve.items.ItemTriggerLike
+import com.everything.eve.items.nextItemTrigger as computeNextItemTrigger
 import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import java.util.concurrent.TimeUnit
@@ -327,6 +330,18 @@ object ReminderScheduler {
     }
 
     /**
+     * 阶段 5 items TR-5.1：物品保修 30/7/1 天提醒最近触发时刻（委托 items 纯函数）。
+     */
+    fun nextItemTrigger(item: ItemEntity, now: Long): Long? =
+        computeNextItemTrigger(
+            ItemTriggerLike(
+                warranty_duration_days = item.warranty_duration_days,
+                warranty_until_ts = item.warranty_until_ts,
+            ),
+            now,
+        )
+
+    /**
      * 阶段 5 TR-6.1：计算信用卡卡片的最近触发时刻（纯函数；不依赖 Android Framework）。
      *
      * 算法（与 spec §阶段 5 TR-5.2 nextCardFiring 行为一致）：
@@ -512,6 +527,38 @@ object ReminderScheduler {
      * @param fireAt 计划触发时刻（写 finance_reminder_log 用）。
      * @param ctx 应用 Context。
      */
+    /**
+     * 阶段 5 items TR-5.2：注册全局单闹钟（物品保修模块）。
+     */
+    suspend fun scheduleNextItem(
+        triggerAtMs: Long,
+        itemId: String,
+        occurrenceTs: Long,
+        ctx: Context,
+    ) {
+        val alarmScheduler: AlarmScheduler = RealAlarmScheduler(ctx.applicationContext)
+        val pi = buildPendingIntent(
+            ctx = ctx.applicationContext,
+            module = MODULE_ITEM,
+            refId = itemId,
+            refKind = REF_KIND_ITEM_WARRANTY,
+            occurrenceTs = occurrenceTs,
+        )
+        val exactOk = alarmScheduler.scheduleExact(triggerAtMs, pi)
+        if (!exactOk) {
+            alarmScheduler.scheduleInexact(triggerAtMs, pi)
+            try {
+                ServiceLocator.db.itemReminderLogDao().insertRaw(
+                    itemId = itemId,
+                    occurrenceTs = occurrenceTs,
+                    kind = "alarm_killed",
+                    createdTs = System.currentTimeMillis(),
+                )
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     suspend fun scheduleNextFinance(
         triggerAtMs: Long,
         refId: String,
@@ -595,6 +642,22 @@ object ReminderScheduler {
             }
         }
 
+        // 2.5) 阶段 5 items TR-5.2：物品保修 30/7/1 提醒。
+        var bestItemTrigger: Long? = null
+        var bestItemId: String? = null
+        val items: List<ItemEntity> = try {
+            ServiceLocator.itemsRepo.observeAll().first()
+        } catch (_: Exception) {
+            emptyList()
+        }
+        for (item in items) {
+            val ts = nextItemTrigger(item, now) ?: continue
+            if (bestItemTrigger == null || ts < bestItemTrigger) {
+                bestItemTrigger = ts
+                bestItemId = item.id
+            }
+        }
+
         // 3) 阶段 5 TR-6.1 财务分支：全局最小 nextCardFiring →
         //    (refId, refKind, triggerTs)。
         //    注：observeActive 已经过滤 archived/deleted；
@@ -654,6 +717,9 @@ object ReminderScheduler {
             if (bestEventTrigger != null) {
                 add(Triple(bestEventTrigger, GLOBAL_RANK_EVENT, SOURCE_EVENT))
             }
+            if (bestItemTrigger != null) {
+                add(Triple(bestItemTrigger, GLOBAL_RANK_ITEM, SOURCE_ITEM))
+            }
             if (bestFinanceTrigger != null) {
                 add(Triple(bestFinanceTrigger, GLOBAL_RANK_CARD, SOURCE_CARD))
             }
@@ -683,6 +749,14 @@ object ReminderScheduler {
                     triggerAtMs = bestEventTrigger!!,
                     eventId = bestEventId!!,
                     occurrenceTs = bestEventTrigger!!,
+                    ctx = appCtx,
+                )
+            }
+            winner.third == SOURCE_ITEM -> {
+                scheduleNextItem(
+                    triggerAtMs = bestItemTrigger!!,
+                    itemId = bestItemId!!,
+                    occurrenceTs = bestItemTrigger!!,
                     ctx = appCtx,
                 )
             }
@@ -1024,6 +1098,12 @@ internal const val MODULE_EVENT: String = "event"
 /** 阶段 5 模块标识：财务（5 新增）。 */
 internal const val MODULE_FINANCE: String = "finance"
 
+/** 阶段 5 items 模块标识：物品保修提醒。 */
+internal const val MODULE_ITEM: String = "item"
+
+/** 物品提醒种类：保修到期前 30/7/1 天档位。 */
+internal const val REF_KIND_ITEM_WARRANTY: String = "warranty_expiring"
+
 /** 财务卡片类型：信用卡（账单/还款提醒仅对 credit 卡片生效）。 */
 internal const val CARD_KIND_CREDIT: String = "credit"
 
@@ -1054,18 +1134,20 @@ internal const val REF_KIND_LOAN_DUE: String = "loan_due"
  * v2 三类在全局合并中的优先级 rank（仅用于同毫秒 tie-break）：
  * event=0 < card=1 < subscription=2 < policy=3 < loan=4。
  */
-private const val V2_KIND_RANK_SUBSCRIPTION: Int = 2
-private const val V2_KIND_RANK_POLICY: Int = 3
-private const val V2_KIND_RANK_LOAN: Int = 4
+private const val V2_KIND_RANK_SUBSCRIPTION: Int = 3
+private const val V2_KIND_RANK_POLICY: Int = 4
+private const val V2_KIND_RANK_LOAN: Int = 5
 
-/** rebuildChain 统一候选比较中 event / card 两个来源的全局 rank。 */
+/** rebuildChain 统一候选比较全局 rank（同毫秒 tie-break）。 */
 private const val GLOBAL_RANK_EVENT: Int = 0
-private const val GLOBAL_RANK_CARD: Int = 1
+private const val GLOBAL_RANK_ITEM: Int = 1
+private const val GLOBAL_RANK_CARD: Int = 2
 
-/** rebuildChain 胜出来源标记：0=event，1=card，2=v2。 */
+/** rebuildChain 胜出来源：event / item / card / v2。 */
 private const val SOURCE_EVENT: Int = 0
-private const val SOURCE_CARD: Int = 1
-private const val SOURCE_V2: Int = 2
+private const val SOURCE_ITEM: Int = 1
+private const val SOURCE_CARD: Int = 2
+private const val SOURCE_V2: Int = 3
 
 /** 账单/还款日合法范围（1-31 日）。 */
 internal val BILLING_DAY_RANGE: IntRange = 1..31

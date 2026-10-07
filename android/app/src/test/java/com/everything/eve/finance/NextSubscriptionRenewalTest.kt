@@ -44,7 +44,7 @@ class NextSubscriptionRenewalTest {
          * fixture 文件 SHA-256（小写 hex）—— TR-4.6 双端一致性硬守护。
          * 任何一端改动 fixture 都会导致本断言失败, 必须双端同步后更新此常量。
          */
-        const val FIXTURE_SHA256 = "c4ea61f7cc17c177ec93fc8cafc4b0cb616d8267ca79eb77bc17440f26edcb76"
+        const val FIXTURE_SHA256 = "d685f4cde636aaa729b20fb49517ad6b30455a71201e1d4f8750cefc146bb264"
 
         /** 锁定 JVM 默认时区到 CST（UTC+8），与 NextCardFiringTest 同款。 */
         @BeforeClass

@@ -6,6 +6,8 @@ import com.everything.eve.auth.AuthManager
 import com.everything.eve.data.EveDatabase
 import com.everything.eve.data.RecordsRepository
 import com.everything.eve.data.event.EventsRepository
+import com.everything.eve.data.identity.IdentityRepository
+import com.everything.eve.data.item.ItemsRepository
 import com.everything.eve.data.finance.AttachmentRepository
 import com.everything.eve.data.finance.FinanceRepository
 import com.everything.eve.data.finance.QuoteTableRepository
@@ -35,6 +37,12 @@ object ServiceLocator {
     lateinit var repo: RecordsRepository
         private set
     lateinit var eventsRepo: EventsRepository
+        private set
+    /** 阶段 5 items Task 4：物品台账（明文 item 表 + records 密文通道）。 */
+    lateinit var itemsRepo: ItemsRepository
+        private set
+    /** 阶段 2b：证件模块仓库。 */
+    lateinit var identityRepo: IdentityRepository
         private set
     // 阶段 5 Task 4：财务模块仓库（明文 4 表 + records 通道复用，仅搭骨架）
     lateinit var financeRepo: FinanceRepository
@@ -80,6 +88,8 @@ object ServiceLocator {
         repo = RecordsRepository(db.recordDao(), auth)
         // 阶段 4b Task 4：日程/日历模块仓库（明文 event 表 + records 密文通道复用）
         eventsRepo = EventsRepository(db.eventDao(), repo)
+        itemsRepo = ItemsRepository(db.itemDao(), repo)
+        identityRepo = IdentityRepository(db.identityDao(), repo)
         // 阶段 5 Task 4：财务模块仓库骨架（明文 4 表 + records 密文通道复用，
         // T6/T11 才真正编排上行；不同步上行逻辑）。
         financeRepo = FinanceRepository(

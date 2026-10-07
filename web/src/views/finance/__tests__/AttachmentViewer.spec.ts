@@ -37,7 +37,6 @@
 // ============================================================================
 
 import { describe, it, expect, beforeEach } from 'vitest'
-// @ts-expect-error node 全局 Buffer 由 vitest node 环境提供（无需显式 import 类型）。
 const NodeBuffer: typeof Buffer = (globalThis as { Buffer?: typeof Buffer }).Buffer!
 import { createPinia, setActivePinia } from 'pinia'
 import {
@@ -97,8 +96,10 @@ function memoryAttachmentChannel(): AttachmentChannel & {
   remote: Map<string, AttachmentRecord>
 } {
   const remote = new Map<string, AttachmentRecord>()
+  const parentModule = 'finance'
   return {
     remote,
+    parentModule,
     seal(plaintext, _attachmentId, _version) {
       return NodeBuffer.from(plaintext).toString('base64')
     },

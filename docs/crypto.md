@@ -430,6 +430,62 @@ nonce = random 24B（每块独立，禁止跨块复用）
 - **内容识别 / 分类映射**：服务端零改动；分类映射完全在客户端（详见 [finance.md](finance.md)
   §6 与 [module-schemas.md](module-schemas.md) §9.5.3）。
 
+### 6.7.8 Vault 级附件（阶段 2b：identity / pass / finance）
+
+阶段 2b 将 §6.7 财务附件能力泛化到密码库与证件模块，**不新造 envelope 参数、
+不新造块 AAD 前缀**。证件正反面、护照多页扫描、银行卡卡面等与财务合同 PDF
+共用同一套 L2 块密封；仅 L1 元数据 records 信封的 `module` 段随父业务变化。
+
+#### 挂载点与记录形态
+
+| 父业务 | 附件 `module` | 附件 `type` | 典型 `parent_ref_id` |
+|---|---|---|---|
+| 证件 | `identity` | `attachment` | 证件记录 `id` |
+| 密码库银行卡 | `pass` | `attachment` | `module=pass` / `type=card` 记录 `id` |
+| 财务合同/保单/流水 | `finance` | `attachment` | 合同 / 交易等记录 `id`（与 v2 一致） |
+
+父记录通过 `front_attachment_id` / `back_attachment_id` / `scan_attachment_ids`（identity，
+见 [module-schemas.md](module-schemas.md) §3）或各模块自有 `*_attachment_id` 字段
+持有附件 UUID；附件元数据 JSON 必须含 `parent_ref_id` 反向指向父记录。
+
+#### L1 元数据 envelope（按父 module）
+
+```
+AAD = "eve:v1:record:" ‖ attachment_id(UTF-8) ‖ ":" ‖ parent_module(UTF-8) ‖ ":" ‖ BE_UINT64(version)
+```
+
+- `parent_module` 取上表中的 `identity` / `pass` / `finance` 文本，**不得**一律写
+  `finance`。
+- 加密原语、nonce 布局、Base64 编码与 §6.7.4 / 第 1 节完全同款。
+- 元数据明文 JSON 字段集与 §6.7.3 一致，并包含 `parent_ref_id`（与
+  [module-schemas.md](module-schemas.md) §9.18 对齐）。
+
+#### L2 块密文 envelope（全 vault 共用）
+
+与 §6.7.5 **逐字节相同**：
+
+```
+AAD = "eve:v1:attachment-block:" ‖ attachment_id(UTF-8) ‖ ":" ‖ offset(UTF-8 十进制)
+```
+
+- `identity` / `pass` 附件块与 `finance` 附件块**共用**同一前缀与 `attachment_blocks`
+  存取通道；服务端不区分业务模块，仅校验归属与密文形态。
+- 块大小 256 KiB、单文件 ≤ 50 MiB、`sha256(原始字节)` 客户端校验与 §6.7.2 一致。
+- 允许 MIME 在 finance v2 基础上增加 `image/webp`（三端白名单同步）。
+
+#### 跨端锚点（实施 W2/W3）
+
+- Web：自 `web/src/vault/attachment.ts`（自 finance 泛化）调用 `sealRecord` +
+  `sealAttachmentBlock` / `openAttachmentBlock`。
+- Android：与 Web 同 AAD 规则；Room 缓存表须带 `parent_module` 或等价列（见
+  [stage2b-vault-attachments spec](../.trae/specs/stage2b-vault-attachments/spec.md)）。
+
+#### 零知识与预览
+
+- 解密影像仅驻留内存；Web 使用短期 `blob:` URL，**禁止**写入 localStorage /
+  IndexedDB。
+- 日志 / 通知 / 崩溃栈不得包含证件号、完整卡号或附件原始文件名。
+
 ## 7. 固定测试向量
 
 ### 7.1 主密码信封
@@ -534,6 +590,13 @@ ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmIWDn9l9j4ZLuseuCaVv4fttrfeQEX6yIjtKfYJ+tAQAXXyOj
   参数 / 不新造 AAD 前缀**；客户端 `Quote(symbol, priceMinor, currency, ts)` 密封，
   服务端不解密、不做二次校验（详见 [finance.md](finance.md) §8.4 与
   [module-schemas.md](module-schemas.md) §9.5.6）。
+
+**已登记**（阶段 2b，契约见 §6.7.8；实现见 W2/W3）：
+
+- **Vault 级影像附件**：`module=identity` / `pass` 与既有 `finance` 共用
+  `type=attachment` 与块前缀 `eve:v1:attachment-block:{id}:{offset}`；L1 AAD
+  `module` 段随父模块变化。详见
+  [stage2b-vault-attachments spec](../.trae/specs/stage2b-vault-attachments/spec.md)。
 
 **尚未实现**：
 

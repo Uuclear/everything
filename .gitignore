@@ -1,3 +1,8 @@
+# 本地工具链（Goal 安装的可移植 Go 等）
+.tools/
+server/eve.exe
+server/data-goal-run/
+
 # Go
 /server/data/
 *.db

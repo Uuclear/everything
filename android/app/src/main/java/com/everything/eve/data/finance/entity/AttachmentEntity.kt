@@ -50,10 +50,12 @@ data class AttachmentEntity(
     @PrimaryKey val id: String,
 
     /**
-     * 父记录 id（policy / contract 等 v2 子类型记录的主键）；
-     * UI / 同步层用此字段把附件挂回到对应记录下。
+     * 父记录 id（module-schemas `parent_ref_id`；Room 列名 record_id 历史兼容）。
      */
     @ColumnInfo(name = "record_id") val recordId: String,
+
+    /** 展示用文件名（1–120 字符；可空串）。 */
+    @ColumnInfo(defaultValue = "''") val name: String = "",
 
     /**
      * MIME 类型（application/pdf / image/jpeg / image/png 等）；
@@ -88,7 +90,7 @@ data class AttachmentEntity(
      */
     @ColumnInfo(name = "schema_version", defaultValue = "1") val schemaVersion: Int = 1,
 
-    /** 模块标识，固定 `"finance"`（与 records 表 module 字段一致）。 */
+    /** 父模块（finance / identity 等；与 records.module 一致）。 */
     @ColumnInfo(defaultValue = "finance") val module: String = "finance",
 
     /** 创建时刻（Unix 毫秒；本地时钟）。 */
@@ -121,6 +123,7 @@ data class AttachmentEntity(
         if (other !is AttachmentEntity) return false
         if (id != other.id) return false
         if (recordId != other.recordId) return false
+        if (name != other.name) return false
         if (mime != other.mime) return false
         if (size != other.size) return false
         if (sha256 != other.sha256) return false
@@ -137,6 +140,7 @@ data class AttachmentEntity(
     override fun hashCode(): Int {
         var result = id.hashCode()
         result = 31 * result + recordId.hashCode()
+        result = 31 * result + name.hashCode()
         result = 31 * result + mime.hashCode()
         result = 31 * result + size.hashCode()
         result = 31 * result + sha256.hashCode()

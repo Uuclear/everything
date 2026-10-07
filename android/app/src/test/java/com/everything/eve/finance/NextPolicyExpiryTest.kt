@@ -38,7 +38,7 @@ class NextPolicyExpiryTest {
 
     companion object {
         /** fixture 文件 SHA-256（小写 hex, 与订阅测试同一文件同一常量, TR-4.6）。 */
-        const val FIXTURE_SHA256 = "c4ea61f7cc17c177ec93fc8cafc4b0cb616d8267ca79eb77bc17440f26edcb76"
+        const val FIXTURE_SHA256 = "d685f4cde636aaa729b20fb49517ad6b30455a71201e1d4f8750cefc146bb264"
 
         @BeforeClass
         @JvmStatic

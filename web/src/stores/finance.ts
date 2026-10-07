@@ -88,6 +88,7 @@ import {
   type AttachmentChannel,
   type AttachmentRecord,
 } from '../finance/attachment'
+import { ATTACHMENT_RECORD_TYPE } from '../vault/attachment'
 import {
   nextLoanDue,
   nextPolicyExpiry,
@@ -377,13 +378,59 @@ export const useFinanceStore = defineStore('finance', () => {
    * 懒构造附件 channel（首次调用才走 defaultAttachmentChannel，避免
    * pinia 未激活场景触发 useAuthStore 引用错误；测试注入后即可绕过）。
    */
+  /**
+   * 财务附件通道：密封 AAD module=finance；upsert 经 api.pushRecords 上行
+   *（与 vault identity/pass 附件同 records 通道，非仅内存 remote）。
+   */
   function getAttachmentChannel(): AttachmentChannel {
     if (_attachmentChannel) return _attachmentChannel
     const auth = useAuthStore()
     if (!auth.sodium || !auth.masterKey) {
       throw new Error('附件通道未初始化：请先解锁（auth.masterKey 不存在）')
     }
-    _attachmentChannel = defaultAttachmentChannel(auth.sodium, auth.masterKey, attachmentRemote)
+    const parentModule = FINANCE_MODULE
+    const base = defaultAttachmentChannel(auth.sodium, auth.masterKey, attachmentRemote)
+    _attachmentChannel = {
+      parentModule,
+      seal: base.seal.bind(base),
+      open: base.open.bind(base),
+      async listByRecord(recordId) {
+        const out: AttachmentRecord[] = []
+        const seen = new Set<string>()
+        const consider = (rec: AttachmentRecord) => {
+          if (seen.has(rec.id) || rec.deleted) return
+          if (rec.parentModule && rec.parentModule !== parentModule) return
+          if (recordId !== '' && rec.recordId !== recordId) return
+          seen.add(rec.id)
+          out.push(rec)
+        }
+        for (const rec of attachmentCipherCache.values()) consider(rec)
+        for (const rec of attachmentRemote.values()) consider(rec)
+        return out
+      },
+      async upsert(rec) {
+        attachmentCipherCache.set(rec.id, rec)
+        attachmentRemote.set(rec.id, rec)
+        const res = await api.pushRecords([
+          {
+            id: rec.id,
+            module: FINANCE_MODULE,
+            type: ATTACHMENT_RECORD_TYPE,
+            ciphertext: rec.ciphertext,
+            version: rec.version,
+            created_at: rec.created_at,
+            updated_at: rec.updated_at,
+            deleted: rec.deleted,
+          },
+        ])
+        since = Math.max(since, res.server_time)
+        return {
+          applied: res.applied,
+          skipped: res.skipped,
+          server_time: res.server_time,
+        }
+      },
+    }
     return _attachmentChannel
   }
   /** schema 版本（v1=1；v2 B1 启用时升 2；schemaVersion>2 由迁移接管）。 */
@@ -992,6 +1039,7 @@ export const useFinanceStore = defineStore('finance', () => {
         ciphertext: remote.ciphertext,
         version: remote.version,
         recordId,
+        parentModule: FINANCE_MODULE,
         plaintextJson: JSON.stringify(meta),
         deleted: false,
         device_id: 'web',

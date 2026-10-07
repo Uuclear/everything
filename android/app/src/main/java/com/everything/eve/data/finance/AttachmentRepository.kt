@@ -44,6 +44,12 @@ import com.everything.eve.data.RecordsRepository
 import com.everything.eve.data.finance.dao.AttachmentDao
 import com.everything.eve.data.finance.entity.AttachmentEntity
 import com.everything.eve.finance.AttachmentRef
+import com.everything.eve.vault.AttachmentValidation
+import com.everything.eve.vault.VAULT_ATTACHMENT_TYPE
+import com.everything.eve.vault.attachmentMetadataJson
+import com.everything.eve.vault.parseAttachmentParentModule
+import com.everything.eve.vault.parseAttachmentParentRefId
+import com.everything.eve.vault.validateAttachmentUpload
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONObject
 import java.security.MessageDigest
@@ -102,45 +108,37 @@ class AttachmentRepository(
      *   [Result.failure]（含 IllegalArgumentException 提示）。
      */
     suspend fun upload(
-        recordId: String,
+        parentRefId: String,
         content: ByteArray,
         mime: String,
         sha256Hex: String,
+        parentModule: String = FinanceModule.MODULE,
+        name: String = "",
     ): Result<AttachmentRef> {
-        // ---- 前置校验：size / mime / sha256 合法性 ----
-        if (content.isEmpty()) {
-            return Result.failure(IllegalArgumentException("附件字节数为 0"))
-        }
-        if (content.size.toLong() > com.everything.eve.finance.ATTACHMENT_MAX_SIZE_BYTES) {
-            return Result.failure(
-                IllegalArgumentException(
-                    "附件超过 ${com.everything.eve.finance.ATTACHMENT_MAX_SIZE_BYTES} 字节上限",
-                ),
-            )
-        }
-        if (!isValidSha256Hex(sha256Hex)) {
-            return Result.failure(IllegalArgumentException("sha256 hex 非法：必须 64 字符 [0-9a-f]"))
+        when (val check = validateAttachmentUpload(content, sha256Hex, mime)) {
+            is AttachmentValidation.Rejected ->
+                return Result.failure(IllegalArgumentException(check.reason))
+            AttachmentValidation.Ok -> Unit
         }
 
-        // ---- masterKey 取自内存态（零知识红线）----
         val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
             ?: return Result.failure(IllegalStateException("资料库未解锁"))
 
-        // ---- 加密 + 双写 ----
         val attachmentId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
-        val sealed = CryptoEnvelope.sealRecord(mk, content, attachmentId, "finance", 1)
+        val sealed = CryptoEnvelope.sealRecord(mk, content, attachmentId, parentModule, 1)
 
         attachmentDao.upsert(
             AttachmentEntity(
                 id = attachmentId,
-                recordId = recordId,
+                recordId = parentRefId,
+                name = name.take(120),
                 mime = mime,
                 size = content.size.toLong(),
                 sha256 = sha256Hex,
                 encryptedPayload = sealed,
                 schemaVersion = 1,
-                module = "finance",
+                module = parentModule,
                 createdAt = now,
                 updatedAt = now,
                 dirty = 1,
@@ -148,17 +146,17 @@ class AttachmentRepository(
             ),
         )
 
-        // ---- records 通道密文（type=attachment）----
-        // 明文载荷契约：{"id","recordId","mime","size","sha256"}
-        // ——与 [RecordsRepository.decryptFinanceAttachment] 后续反序列化字段对齐。
-        val plain = JSONObject()
-            .put("id", attachmentId)
-            .put("recordId", recordId)
-            .put("mime", mime)
-            .put("size", content.size.toLong())
-            .put("sha256", sha256Hex)
-            .toString()
-        recordsRepository.upsertFinanceAttachment(attachmentId, plain, recordId)
+        val plain = attachmentMetadataJson(
+            attachmentId = attachmentId,
+            parentRefId = parentRefId,
+            parentModule = parentModule,
+            mime = mime,
+            size = content.size.toLong(),
+            sha256Hex = sha256Hex,
+            name = name,
+            createdAtMs = now,
+        )
+        recordsRepository.upsertModuleAttachment(parentModule, attachmentId, plain)
 
         return Result.success(
             AttachmentRef(
@@ -252,15 +250,15 @@ class AttachmentRepository(
      * @return [Result.success] Unit；id 不存在时也返回 success（幂等删除）。
      */
     suspend fun delete(id: String): Result<Unit> {
+        val existing = attachmentDao.getById(id)
+        val parentModule = existing?.module ?: FinanceModule.MODULE
         val now = System.currentTimeMillis()
         attachmentDao.markDeleted(id, now)
-        // tombstone records 通道：明文载荷契约 {"id","deleted":true}
         val plain = JSONObject()
             .put("id", id)
             .put("deleted", true)
             .toString()
-        // recordId 留空字符串——墓碑不需要回挂父记录；服务端按 id 删除即可。
-        recordsRepository.upsertFinanceAttachment(id, plain, "")
+        recordsRepository.upsertModuleAttachment(parentModule, id, plain)
         return Result.success(Unit)
     }
 
@@ -293,8 +291,8 @@ class AttachmentRepository(
         var count = 0
         val now = System.currentTimeMillis()
         for (rec in records) {
-            // 兜底过滤：只处理 finance + attachment；其他 type / module 跳过
-            if (rec.module != "finance" || rec.type != FinanceModule.TYPE_ATTACHMENT) continue
+            if (rec.type != VAULT_ATTACHMENT_TYPE && rec.type != FinanceModule.TYPE_ATTACHMENT) continue
+            if (rec.module !in ALLOWED_ATTACHMENT_PARENT_MODULES) continue
 
             // 墓碑优先：deleted=true → markDeleted，不解密
             if (rec.deleted) {
@@ -304,13 +302,15 @@ class AttachmentRepository(
             }
 
             // 非墓碑 → 解密 → 解析 → 入库
-            val plain = recordsRepository.decryptFinanceAttachment(rec)
+            val plain = recordsRepository.decryptModuleAttachment(rec)
             val obj = parseAttachmentPlaintext(plain)
             val id = obj.stringOrNull("id") ?: rec.id
-            val recordId = obj.stringOrNull("recordId") ?: ""
+            val recordId = parseAttachmentParentRefId(obj)
+            val parentModule = parseAttachmentParentModule(obj, rec.module)
             val mime = obj.stringOrNull("mime") ?: ""
             val size = obj.longOrNull("size") ?: 0L
             val sha256 = obj.stringOrNull("sha256") ?: ""
+            val name = obj.stringOrNull("name") ?: ""
 
             // ---- 入库：dirty=0（下行已对账干净），deleted=0 ----
             // 已知字段：id / recordId / mime / size / sha256；encryptedPayload 留空
@@ -337,12 +337,13 @@ class AttachmentRepository(
                 AttachmentEntity(
                     id = id,
                     recordId = recordId,
+                    name = name,
                     mime = mime,
                     size = size,
                     sha256 = sha256,
                     encryptedPayload = ByteArray(0),
                     schemaVersion = 1,
-                    module = "finance",
+                    module = parentModule,
                     createdAt = rec.createdAt,
                     updatedAt = rec.updatedAt,
                     dirty = 0,
@@ -377,14 +378,17 @@ class AttachmentRepository(
     suspend fun pushChanges(): Int {
         val dirty = attachmentDao.dirtyList()
         for (entity in dirty) {
-            val plain = JSONObject()
-                .put("id", entity.id)
-                .put("recordId", entity.recordId)
-                .put("mime", entity.mime)
-                .put("size", entity.size)
-                .put("sha256", entity.sha256)
-                .toString()
-            recordsRepository.upsertFinanceAttachment(entity.id, plain, entity.recordId)
+            val plain = attachmentMetadataJson(
+                attachmentId = entity.id,
+                parentRefId = entity.recordId,
+                parentModule = entity.module,
+                mime = entity.mime,
+                size = entity.size,
+                sha256Hex = entity.sha256,
+                name = entity.name,
+                createdAtMs = entity.createdAt,
+            )
+            recordsRepository.upsertModuleAttachment(entity.module, entity.id, plain)
         }
         // 推送后 Room 表 dirty=0（records 表 dirty 由 sync 推服务端后翻）
         for (entity in dirty) {
@@ -403,15 +407,6 @@ class AttachmentRepository(
      * @param sha256Hex 待校验字符串。
      * @return true=合法；false=长度错或包含非 hex 字符。
      */
-    private fun isValidSha256Hex(sha256Hex: String): Boolean {
-        if (sha256Hex.length != 64) return false
-        for (c in sha256Hex) {
-            val ok = c in '0'..'9' || c in 'a'..'f'
-            if (!ok) return false
-        }
-        return true
-    }
-
     /**
      * 端侧再算 SHA-256 并比对预期 hex。
      *
@@ -477,5 +472,12 @@ class AttachmentRepository(
     private companion object {
         /** SHA-256 hex 编码表（小写）。 */
         private val HEX_CHARS = "0123456789abcdef".toCharArray()
+
+        /** 允许落本地附件缓存的父模块白名单。 */
+        private val ALLOWED_ATTACHMENT_PARENT_MODULES = setOf(
+            FinanceModule.MODULE,
+            "identity",
+            "pass",
+        )
     }
 }

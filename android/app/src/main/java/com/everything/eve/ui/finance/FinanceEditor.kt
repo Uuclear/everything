@@ -62,7 +62,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
 import com.everything.eve.R
+import com.everything.eve.ServiceLocator
+import com.everything.eve.finance.CardOcrHint
 import com.everything.eve.finance.Luhn
+import com.everything.eve.finance.parseCardText
+import com.everything.eve.ui.components.VaultImageSlot
+import com.everything.eve.ui.vault.TextOcrScannerSheet
 
 /**
  * 编辑器入口 Composable（spec FR-1 / FR-3 / FR-4）。
@@ -97,6 +102,7 @@ fun FinanceEditor(
 
     // B8 AI 联动 Sheet 可见性：互斥弹一个；false 时不挂载任何 Sheet。
     var showOcrSheet by remember { mutableStateOf(false) }
+    var showCardOcrSheet by remember { mutableStateOf(false) }
     var showSpeechSheet by remember { mutableStateOf(false) }
 
     /**
@@ -170,7 +176,9 @@ fun FinanceEditor(
                 )
                 FinanceEditorKind.CARD -> CardFields(
                     buffer = buffer,
+                    vm = vm,
                     onChange = { buffer = it },
+                    onCardOcrEntry = { showCardOcrSheet = true },
                 )
                 FinanceEditorKind.TX -> TxFields(
                     buffer = buffer,
@@ -215,6 +223,35 @@ fun FinanceEditor(
                 showOcrSheet = false
             },
             onDismiss = { showOcrSheet = false },
+        )
+    }
+
+    if (showCardOcrSheet) {
+        TextOcrScannerSheet(
+            titleRes = R.string.finance_card_ocr_entry,
+            noResultRes = R.string.finance_card_ocr_no_result,
+            parse = ::parseCardText,
+            preview = { hint: CardOcrHint ->
+                hint.last4?.let {
+                    Text(stringResource(R.string.finance_card_last4_stored_format, it))
+                }
+                if (hint.expiryMonth != null && hint.expiryYear != null) {
+                    Text("有效期：%02d/%d".format(hint.expiryMonth, hint.expiryYear % 100))
+                }
+                hint.holder?.let { Text(stringResource(R.string.finance_card_field_holder) + "：$it") }
+            },
+            onApply = { hint ->
+                var next = buffer
+                hint.pan?.let { pan ->
+                    val last4 = Luhn.extractLast4(pan)
+                    next = next.copy(pan = pan, last4 = last4 ?: next.last4)
+                }
+                hint.holder?.let { next = next.copy(holder = it) }
+                buffer = next
+                showCardOcrSheet = false
+            },
+            onDismiss = { showCardOcrSheet = false },
+            testTagPrefix = "card_ocr",
         )
     }
 
@@ -391,7 +428,9 @@ private fun AccountKindRadioChip(
 @Composable
 private fun CardFields(
     buffer: FinanceEditorBuffer,
+    vm: FinanceViewModel,
     onChange: (FinanceEditorBuffer) -> Unit,
+    onCardOcrEntry: () -> Unit,
 ) {
     OutlinedTextField(
         value = buffer.name,
@@ -446,6 +485,13 @@ private fun CardFields(
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.semantics { testTag = "card_editor_last4_chip" },
         )
+    }
+
+    OutlinedButton(
+        onClick = onCardOcrEntry,
+        modifier = Modifier.semantics { testTag = "card_editor_ocr_entry" },
+    ) {
+        Text(stringResource(R.string.finance_card_ocr_entry))
     }
 
     OutlinedTextField(
@@ -527,6 +573,15 @@ private fun CardFields(
         modifier = Modifier
             .fillMaxWidth()
             .semantics { testTag = "card_editor_note" },
+    )
+
+    VaultImageSlot(
+        label = stringResource(R.string.finance_card_face_image),
+        attachmentId = buffer.cardFaceAttachmentId,
+        onAttachmentIdChange = { onChange(buffer.copy(cardFaceAttachmentId = it)) },
+        loadPreview = { aid -> ServiceLocator.attachmentRepo.download(aid) },
+        onUpload = { bytes, mime -> vm.uploadVaultImage(buffer.id, bytes, mime) },
+        modifier = Modifier.padding(top = 8.dp),
     )
 
     Row(

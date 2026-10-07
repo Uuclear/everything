@@ -84,6 +84,9 @@ class ReminderReceiver : BroadcastReceiver() {
                 // 财务模块分支：拉 FinanceCardDao 按 ref_kind 渲染抽象通知
                 handleFinanceModule(appCtx, refId, refKind)
             }
+            MODULE_ITEM -> {
+                handleItemModule(appCtx, refId, occurrenceTs)
+            }
             else -> {
                 // 事件模块分支（4b 既有逻辑，含 MODULE_EVENT 与 module="" 兜底）
                 handleEventModule(appCtx, refId, refKind, occurrenceTs)
@@ -161,6 +164,61 @@ class ReminderReceiver : BroadcastReceiver() {
             } catch (e: SecurityException) {
                 logNotificationDenied(appCtx, eventId, occurrenceTs)
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 物品模块分支（阶段 5 items TR-5.3）
+    // -------------------------------------------------------------------------
+
+    /**
+     * 物品保修提醒：仅渲染抽象文案 + itemId 哈希前缀，不渲染 name/价格/序列号。
+     */
+    private fun handleItemModule(appCtx: Context, itemId: String, occurrenceTs: Long) {
+        if (itemId.isEmpty()) return
+        val exists = try {
+            runBlocking { ServiceLocator.itemsRepo.getById(itemId) != null }
+        } catch (_: Exception) {
+            false
+        }
+        if (!exists) return
+
+        val hashPrefix = itemId.hashCode().toUInt().toString(16).take(6)
+        val title = appCtx.getString(R.string.item_reminder_title)
+        val contentText = appCtx.getString(R.string.item_reminder_warranty_text, hashPrefix)
+
+        val notificationsEnabled = NotificationManagerCompat.from(appCtx).areNotificationsEnabled()
+        if (!notificationsEnabled) {
+            logItemNotificationDenied(appCtx, itemId, occurrenceTs)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                appCtx, Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                logItemNotificationDenied(appCtx, itemId, occurrenceTs)
+                return
+            }
+        }
+        try {
+            postNotification(appCtx, itemId, title, contentText)
+        } catch (_: SecurityException) {
+            logItemNotificationDenied(appCtx, itemId, occurrenceTs)
+        }
+    }
+
+    private fun logItemNotificationDenied(ctx: Context, itemId: String, occurrenceTs: Long) {
+        try {
+            runBlocking {
+                ServiceLocator.db.itemReminderLogDao().insertRaw(
+                    itemId = itemId,
+                    occurrenceTs = occurrenceTs,
+                    kind = "notification_denied",
+                    createdTs = System.currentTimeMillis(),
+                )
+            }
+        } catch (_: Exception) {
         }
     }
 

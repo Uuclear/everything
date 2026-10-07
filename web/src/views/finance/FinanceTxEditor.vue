@@ -44,6 +44,8 @@ import {
   warningText,
 } from '../../finance/budgetGate'
 import BudgetConfirmDialog from './BudgetConfirmDialog.vue'
+import OcrScanButton from '../../ocr/components/OcrScanButton.vue'
+import { parseReceiptText } from '../../ocr/parsers/receipt'
 
 const route = useRoute()
 const router = useRouter()
@@ -238,6 +240,22 @@ function cryptoRandomId(): string {
 }
 
 // 默认分类建议 —— 与 spec FR-6 客户端内置分类一致。
+function buildReceiptOcrFields(text: string) {
+  const hint = parseReceiptText(text)
+  if (!hint) return {}
+  const fields: Record<string, string> = {}
+  if (hint.amountMinor != null) fields.amountYuan = String(Math.round(hint.amountMinor / 100))
+  if (hint.ts != null) fields.occurredAt = String(hint.ts)
+  if (hint.merchant) fields.category = hint.merchant.slice(0, 20)
+  return fields
+}
+
+function applyReceiptOcr(fields: Record<string, string>) {
+  if (fields.amountYuan) amountYuan.value = Number(fields.amountYuan)
+  if (fields.occurredAt) occurredAt.value = Number(fields.occurredAt)
+  if (fields.category) category.value = fields.category
+}
+
 const CATEGORY_SUGGESTIONS = [
   '餐饮', '交通', '居家', '购物', '娱乐', '医疗', '教育', '通讯', '旅行',
   '工资', '奖金', '投资', '兼职', '红包', '退款',
@@ -262,6 +280,12 @@ const CATEGORY_SUGGESTIONS = [
         </n-form-item>
         <n-form-item label="金额(元)" :feedback="errors.amount" :validation-status="errors.amount ? 'error' : undefined">
           <n-input-number v-model:value="amountYuan" :min="0" :precision="0" />
+          <OcrScanButton
+            label="扫描小票"
+            :build-fields="buildReceiptOcrFields"
+            :field-labels="{ amountYuan: '金额(元)', occurredAt: '发生时刻(ms)', category: '分类' }"
+            @apply="applyReceiptOcr"
+          />
         </n-form-item>
         <n-form-item label="分类" :feedback="errors.category" :validation-status="errors.category ? 'error' : undefined">
           <n-input v-model:value="category" placeholder="餐饮 / 交通 / ..." maxlength="20" />

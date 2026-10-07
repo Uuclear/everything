@@ -36,7 +36,7 @@ import rateTableJson from '../__fixtures__/rate-table-cases.json'
 
 /** fixture 真理源 SHA-256（与 Android 镜像必须逐字节一致）。 */
 const EXPECTED_FIXTURE_SHA256 =
-  '7a1c77af553595423a3d0a338421e00eb7c0f59ca7b906d9768faf3abb2aea12'
+  'd55b432f2048225d9405d6d772c371a053fda6213df8a825a6154867a90d3140'
 
 interface ConvertCase {
   name: string

@@ -54,6 +54,7 @@
    - [9.19 Android Room v10 schema 与 §9.10–9.18 字段映射](#919-android-room-v10-schema-与-910-918-字段映射)
    - [9.20 v2 跨端一致性要求（财务模块扩展）](#920-v2-跨端一致性要求财务模块扩展)
 10. [Android 本期 UI 支持矩阵](#10-android-本期-ui-支持矩阵)
+11. [item 模块（阶段 5 物品）](#9-item-模块阶段-5-物品)（规范 TR-1.1 章号 9；与 finance 文档章号并列）
 
 ## 1. 总则
 
@@ -68,6 +69,7 @@
 | `pass` | `note` | note |
 | `pass` | `card` | card |
 | `identity` | `id_card` / `passport` / `driver_license` / `generic` | identity（记录 `type` 即证件子类型） |
+| `identity` | `attachment` | 不单独出现在 UI 列表；元数据缓存 / 反查用（阶段 2b 证件影像） |
 | `note`（历史） | `secure_note`（历史） | note（只读兼容，见第 4 节） |
 
 未知的 module/type：Web 端保留在服务端、不在 UI 暴露（天然前向兼容）；
@@ -186,7 +188,8 @@ Android 端原样同步入库、不在 UI 暴露。
   "issuer": "中华人民共和国出入境管理局",
   "issued_on": "2020-01-15",
   "expires_on": "2030-01-14",
-  "notes": "旧护照已剪角"
+  "notes": "旧护照已剪角",
+  "scan_attachment_ids": ["a1b2c3d4-e5f6-7890-abcd-ef1234567890"]
 }
 ```
 
@@ -200,6 +203,14 @@ Android 端原样同步入库、不在 UI 暴露。
 | `issued_on` | string | 否 | 签发日期，`"YYYY-MM-DD"` |
 | `expires_on` | string | 否 | 到期日期，`"YYYY-MM-DD"`（到期提醒据此计算） |
 | `notes` | string | 否 | 备注 |
+| `front_attachment_id` | string (UUID) | 否 | 证件正面影像；引用 `module=identity` / `type=attachment` 子记录 `id`（阶段 2b）。身份证 `id_card` 推荐填写。 |
+| `back_attachment_id` | string (UUID) | 否 | 证件反面影像；同上。身份证 `id_card` 推荐与 `front_attachment_id` 成对。 |
+| `scan_attachment_ids` | string (UUID)[] | 否 | 多页扫描（护照、驾驶证、通用证件等）；数组顺序为 UI 页序。附件元数据 `parent_ref_id` 指向本证件记录 `id`。 |
+
+影像子记录契约见 [§9.18](#918-字段定义typeattachment附件元数据阶段-5-v2) 与
+阶段 2b spec [`.trae/specs/stage2b-vault-attachments/spec.md`](../.trae/specs/stage2b-vault-attachments/spec.md)：
+`module=identity`、`type=attachment`，块密文 AAD 与财务附件共用
+`eve:v1:attachment-block:{attachment_id}:{offset}`（[crypto.md](crypto.md) §6.7.8）。
 
 ### 3.1 到期提醒分级
 
@@ -1573,3 +1584,146 @@ event 作为 records 表一条密文记录写入，明文载荷符合本节定�
 - **字段如有变更**：Web types.ts、Android EventEntity.kt、本文档三端**必须**
   同改 + 同步更新本节字段表与目录入口，并更新 fixture（保持 SHA-256 一致
   仍由 fixture 派生）。
+
+## 9. item 模块（阶段 5 物品）
+
+阶段 5 物品台账模块。物品作为加密个人库中的一条记录，走既有 records 通道同步
+（与第 7 章 `place`、第 8 章 `event`、上文 finance 模块同款链路），复用
+`CryptoEnvelope` 的 XChaCha20-Poly1305 与 AAD 规则，**不新造**任何加密原语或
+服务端接口。二维码 payload 仅含物品 `id`（客户端 UUID），永不上行服务端解析；
+保修提醒在 Android 端与 4b `event` 共用 `ReminderScheduler`（见
+[android.md](android.md) 物品章）。
+
+> **章号说明**：本节标题沿用 stage5-items TR-1.1 的「第 9 章 item」编号；
+> 上文「9. finance」为财务模块独立大章，二者小节号（9.1、9.2…）互不混用——
+> 物品挂载点 / 字段见**本节** 9.1–9.6，财务见 finance 大章内 9.1–9.20。
+
+### 9.1 模块挂载点
+
+item 作为 records 表一条密文记录写入，明文载荷符合本节定义：
+
+- **`module = "item"`**、**`type = "item"`**（与第 7 章 `place`、第 8 章 `event`
+  同款 `module`/`type` 双键约定；前者用于 records 投递索引，后者随明文写入
+  密文内供端侧识别）。v1 仅 `type="item"`；**v2 预留**同 `module="item"` 信封装载
+  子类 `type="vehicle"` / `type="property"` / `type="insurance"`（车辆 / 房产 /
+  保单子模块，本期不下发字段表，见 [stage5-items spec](../.trae/specs/stage5-items/spec.md)
+  Future Enhancements）。
+- **AAD**：`eve:v1:record:{id}:item:{BE_UINT64(version)}`——即 [crypto.md](crypto.md)
+  第 5 节通用 records AAD 扩展 `{module}` 段，`module` 文本取 `"item"`；与 4a
+  `place`、4b `event`、finance 同型（仅 `module` 段不同），**不新造** envelope
+  参数。
+- 服务端在 records 投递（`server/internal/api/records_handler.go`）阶段仅校验
+  `id`/`module` 非空与密文非空，**不**校验 `type`、不解密、不解析物品字段。
+  客户端遇到不识别的 `type` 仍按密文原样入库（前向兼容）。
+- 服务端可见元数据仅限 records 表已有列；不引入新表、新列、新接口（服务端零改动）。
+
+### 9.2 字段定义
+
+物品明文 JSON（嵌入 records 密文内）字段表为跨端契约：Web `web/src/items/types.ts`
+（`Item`）、Android `ItemEntity` / `ItemsRepository` 内 `Item` 数据类与本表
+**逐字段一致**（命名 / 单位 / 枚举相同）；任何字段变更须三端同改 + 同步更新本文档。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | UUID 字符串 | 是 | 客户端 UUID v4；兼作 records 主键与二维码 payload；永不上行服务端解析 `id` 内容。 |
+| `name` | string | 是 | 物品名称；UTF-8；≤120 字符；前端表单校验非空。 |
+| `category` | enum | 是 | 一级分类，6 选 1；取值见 9.3；非枚举值由**前端拒绝保存**。 |
+| `tags` | string[] | 是 | 二级自由文本标签；规则见 9.4；允许 `[]`。 |
+| `brand` | string \| null | 否 | 品牌；≤80 字符。 |
+| `model` | string \| null | 否 | 型号；≤80 字符。 |
+| `serial_no` | string \| null | 否 | 序列号；≤120 字符。 |
+| `purchase_date` | int64 | 是 | 购买日锚点，Unix **毫秒**；取设备**本地时区**日历日语义（与 4b event 本地时刻一致）。 |
+| `purchase_price_cents` | int64 | 是 | 购买价格，以**分**为单位的整数（最小货币单位）；避免浮点；例：12990.00 元 → `1299000`。 |
+| `currency` | string | 是 | ISO 4217 三字母代码；MVP 默认 `CNY`（UI 可不暴露切换）。 |
+| `warranty_duration_days` | int32 | 是 | 保修天数；`0` = 无保修；≥0。 |
+| `warranty_until_ts` | int64 | 是 | 保修截止时刻，Unix 毫秒；**客户端自动计算、编辑器只读**：`purchase_date + warranty_duration_days × 86400000`（与 `web/src/items/warranty.ts` / Android `Warranty.kt` 纯函数一致）；`warranty_duration_days=0` 时可为 `0` 或等于 `purchase_date`（跨端须与纯函数输出一致）。 |
+| `receipt_url` | string \| null | 否 | 发票/凭证**外部链接**；须以 `https://` 为前缀（前端 `isValidReceiptUrl` 校验）；v1 不上传附件。 |
+| `note` | string \| null | 否 | 备注；纯文本；≤2000 字符。 |
+| `location_text` | string \| null | 否 | 存放位置描述；纯文本；≤120 字符；**不关联**第 7 章 `place` 模块。 |
+| `created_ts` | int64 | 是 | 创建时刻，Unix 毫秒；客户端本地时钟写入。 |
+| `updated_ts` | int64 | 是 | 最后更新时刻，Unix 毫秒；每次编辑递增；冲突策略 records LWW。 |
+
+**口径与边界（TR-1.2）**
+
+- **价格单位**：`purchase_price_cents` 一律**分**（int64）；展示层由客户端除以 100 格式化为元。
+- **保修截止**：`warranty_until_ts` 仅由 `purchase_date` + `warranty_duration_days` 推导；
+  用户不可手改；Android 保修提醒 `nextItemTrigger` 在到期前 30 / 7 / 1 天取未来最近触发点
+  （`warranty_duration_days=0` 或已过期 → 无触发）。
+- **发票链接**：保存前须通过 `https://` 前缀校验；非 HTTPS 拒绝保存。
+- **服务端零知识、无二次校验（文档明示四点）**：
+  1. 服务端**不解密**，故**无法校验** `category` 是否属于 6 类枚举；
+  2. 服务端**不解析** `tags`，故**无法校验**数量上限与去重规则；
+  3. 服务端**不访问、不抓取** `receipt_url`，故**无法校验** URL 形态与 HTTPS；
+  4. 服务端**不接触** `purchase_price_cents` / `serial_no` 等明文，故**无法校验**
+     价格单位、保修天数与 `warranty_until_ts` 是否自洽。
+- 上述约束由 Web / Android 表单与纯函数单测保证；服务端仅做密文中转与版本 LWW。
+
+### 9.3 类别枚举（category）
+
+一级 `category` 固定 6 类；UI 下拉 / chips 单选；新增枚举须改 spec 与三端校验。
+
+| 枚举值 | 中文（UI） | 说明 |
+|---|---|---|
+| `electronics` | 电子设备 | 手机、电脑、相机等 |
+| `furniture` | 家具 | 桌椅、床、柜等 |
+| `apparel` | 服饰 | 衣物、鞋帽等 |
+| `tools` | 工具 | 电动工具、手工工具等 |
+| `books` | 书籍 | 纸质书、教材等 |
+| `other` | 其他 | 未归入以上类别 |
+
+自定义归类：用户可在 `tags` 二级标签中补充语义（如「专业设备」），**不**扩展
+`category` 枚举。
+
+### 9.4 二级标签（tags）规则
+
+| 规则 | 约束 | 校验方 |
+|---|---|---|
+| 数量上限 | ≤ **8** 个标签 | 客户端 `normalizeTags` / 表单 |
+| 单标签长度 | 每项 ≤ **24** 字符（UTF-8 码点计） | 客户端截断或拒绝 |
+| 去重 | **大小写不敏感**去重（归一后保留首次出现的原文或统一小写策略，跨端与 `normalizeTags` fixture 一致） | 客户端纯函数 |
+| 筛选 | UI 支持 tag **子串**搜索；全量拉取后客户端过滤 | 客户端 |
+| 服务端 | 只见密文，**不**将 tags 索引为分类键 | — |
+
+### 9.5 JSON Schema 示例
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-4789-a012-3456789abcde",
+  "name": "卧室 NAS",
+  "category": "electronics",
+  "tags": ["卧室", "存储"],
+  "brand": "Synology",
+  "model": "DS923+",
+  "serial_no": "SN2024XXXX",
+  "purchase_date": 1735689600000,
+  "purchase_price_cents": 429900,
+  "currency": "CNY",
+  "warranty_duration_days": 730,
+  "warranty_until_ts": 1743465600000,
+  "receipt_url": "https://example.com/receipt/123",
+  "note": "含 2×4TB 硬盘",
+  "location_text": "书房机柜第二层",
+  "created_ts": 1737072000000,
+  "updated_ts": 1737072000000
+}
+```
+
+字段口径（与 9.2 对应）：
+
+- `purchase_price_cents`: 429900 = 4299.00 元（**分**）。
+- `warranty_until_ts`: 由购买日 + 730 天自动计算，编辑器只读。
+- 二维码：编码内容仅为 `id` 字符串，不含 name / serial / price 等字段。
+
+### 9.6 跨端一致性要求
+
+- **Web**：`web/src/items/types.ts`（`Item` / `ItemCategory`）与本节字段表逐字段一致。
+- **Android**：`android/.../data/item/ItemEntity.kt` 列映射 + `ItemsRepository` JSON
+  往返与本节一致；`tags` 以 `tags_json` TEXT 存 JSON 数组。
+- **纯函数**：`warrantyUntilTs` / `nextItemTrigger` / `normalizeTags` /
+  `isValidReceiptUrl` 与 `web/src/items/warranty.ts`、
+  `android/.../item/Warranty.kt` 同源；共享 fixture
+  `web/src/items/__fixtures__/cases.json`（Android 测试资源镜像，SHA-256 一致）。
+- **加密**：封/开记录 AAD 必须为 `eve:v1:record:{id}:item:{BE_UINT64(version)}`；
+  详见 [crypto.md](crypto.md)（物品链路小节与 finance / event 并列引用本节）。
+- **字段变更**：Web types、Android Entity、本文档 9.2 表三端**必须**同改，并更新
+  fixture 与 Vitest / JUnit 用例。

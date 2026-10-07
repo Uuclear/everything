@@ -311,6 +311,7 @@ class FinanceRepositoryTest {
             "expiry_year",
             "holder",
             "note",
+            "card_face_attachment_id",
             "icon",
             "color",
             "archived",

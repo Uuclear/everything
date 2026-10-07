@@ -26,6 +26,7 @@ coroutinesTest = "1.9.0"
 camerax = "1.4.2"
 mlkitTextRecognition = "16.0.1"
 robolectric = "4.14.1"
+zxing = "3.5.3"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -78,6 +79,7 @@ camerax-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref =
 camerax-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
 # ML Kit 文字识别（自包含 AAR：模型随包下发、全程 on-device、无 GMS 云依赖）
 mlkit-text-recognition = { module = "com.google.mlkit:text-recognition", version.ref = "mlkitTextRecognition" }
+zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 # ML Kit 中文文字识别模型构件：text-recognition 16.0.1 仅为 Latin 门面薄壳，
 # ChineseTextRecognizerOptions 位于本独立构件（同为 16.0.1，全程端侧、无云依赖）
 mlkit-text-recognition-chinese = { module = "com.google.mlkit:text-recognition-chinese", version.ref = "mlkitTextRecognition" }

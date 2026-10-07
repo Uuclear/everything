@@ -59,6 +59,10 @@ fun VaultScreen(
     // 阶段 5 Task 10 / TR-10.1：财务入口回调（沿用 4b CALENDAR 同款模式镜像新增；
     // AppNav.kt 中绑定 nav.navigate(Routes.FINANCE) → FinanceScreen）。
     onOpenFinance: () -> Unit,
+    onOpenItems: () -> Unit,
+    onOpenIdentities: () -> Unit,
+    onOpenVaultHome: () -> Unit,
+    onOpenArchiveWall: () -> Unit,
     vm: VaultViewModel = viewModel(),
 ) {
     val unlocked by ServiceLocator.auth.isUnlocked.collectAsState()
@@ -88,6 +92,10 @@ fun VaultScreen(
                     // 使用 stringResource(R.string.nav_finance) 而非硬编码，与 4b 日历入口
                     // 文案加载方式保持一致）。
                     TextButton(onClick = onOpenFinance) { Text(stringResource(R.string.nav_finance)) }
+                    TextButton(onClick = onOpenItems) { Text(stringResource(R.string.nav_items)) }
+                    TextButton(onClick = onOpenVaultHome) { Text(stringResource(R.string.nav_vault_home)) }
+                    TextButton(onClick = onOpenArchiveWall) { Text(stringResource(R.string.nav_archive_wall)) }
+                    TextButton(onClick = onOpenIdentities) { Text(stringResource(R.string.nav_identities)) }
                     TextButton(onClick = { vm.syncNow() }) {
                         Text("同步\n${formatSyncTime(lastSync)}")
                     }

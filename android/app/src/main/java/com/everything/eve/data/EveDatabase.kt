@@ -13,6 +13,12 @@ import com.everything.eve.data.event.EventDao
 import com.everything.eve.data.event.EventEntity
 import com.everything.eve.data.event.EventReminderLogDao
 import com.everything.eve.data.event.EventReminderLogEntity
+import com.everything.eve.data.identity.IdentityDao
+import com.everything.eve.data.identity.IdentityEntity
+import com.everything.eve.data.item.ItemDao
+import com.everything.eve.data.item.ItemEntity
+import com.everything.eve.data.item.ItemReminderLogDao
+import com.everything.eve.data.item.ItemReminderLogEntity
 import com.everything.eve.data.finance.dao.AttachmentDao
 import com.everything.eve.data.finance.dao.FinanceAccountDao
 import com.everything.eve.data.finance.dao.FinanceCardDao
@@ -49,8 +55,12 @@ import com.everything.eve.data.finance.entity.QuoteTableEntity
         FinanceRateEntity::class,
         // 阶段 5 v2 / Task 8：投资账户行情本地缓存（v10 迁移新增——按 symbol 拆行的行情表）
         QuoteTableEntity::class,
+        // 阶段 5 items：物品模块（v11 迁移新增）
+        ItemEntity::class,
+        ItemReminderLogEntity::class,
+        IdentityEntity::class,
     ],
-    version = 10,
+    version = 13,
     exportSchema = false,
 )
 abstract class EveDatabase : RoomDatabase() {
@@ -86,6 +96,15 @@ abstract class EveDatabase : RoomDatabase() {
 
     /** 阶段 5 v2 / Task 8：投资账户行情本地缓存 DAO（v10 迁移新增）。 */
     abstract fun quoteTableDao(): QuoteTableDao
+
+    /** 阶段 5 items：物品 DAO（v11 迁移新增）。 */
+    abstract fun itemDao(): ItemDao
+
+    /** 阶段 5 items：物品提醒降级日志 DAO（v11 迁移新增）。 */
+    abstract fun itemReminderLogDao(): ItemReminderLogDao
+
+    /** 阶段 2b：证件明文缓存 DAO（v12 迁移新增）。 */
+    abstract fun identityDao(): IdentityDao
 
     companion object {
         /**
@@ -591,6 +610,134 @@ abstract class EveDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v10 → v11：新增 `item` 与 `item_reminder_log`（阶段 5 物品模块）。
+         *
+         * 仅 CREATE TABLE IF NOT EXISTS + 索引，不 ALTER/DROP 既有表。
+         */
+        /**
+         * v11 → v12：证件表 + 附件 name 列 + 银行卡卡面附件 id。
+         */
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS identity (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        name TEXT,
+                        number TEXT,
+                        issuer TEXT,
+                        issued_on TEXT,
+                        expires_on TEXT,
+                        notes TEXT,
+                        front_attachment_id TEXT,
+                        back_attachment_id TEXT,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        dirty INTEGER NOT NULL DEFAULT 0,
+                        deleted INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_identity_updated_at ON identity (updated_at)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_identity_dirty ON identity (dirty)",
+                )
+                db.execSQL(
+                    "ALTER TABLE finance_attachment ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+                )
+                db.execSQL(
+                    "ALTER TABLE finance_card ADD COLUMN card_face_attachment_id TEXT",
+                )
+            }
+        }
+
+        /**
+         * v12 → v13：W3 临时 `card_attachment_id` → canonical `card_face_attachment_id`。
+         */
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                var hasLegacy = false
+                var hasCanonical = false
+                db.query("PRAGMA table_info(finance_card)").use { c ->
+                    while (c.moveToNext()) {
+                        when (c.getString(1)) {
+                            "card_attachment_id" -> hasLegacy = true
+                            "card_face_attachment_id" -> hasCanonical = true
+                        }
+                    }
+                }
+                if (!hasCanonical) {
+                    db.execSQL(
+                        "ALTER TABLE finance_card ADD COLUMN card_face_attachment_id TEXT",
+                    )
+                }
+                if (hasLegacy) {
+                    db.execSQL(
+                        """
+                        UPDATE finance_card
+                        SET card_face_attachment_id = card_attachment_id
+                        WHERE card_attachment_id IS NOT NULL
+                          AND (card_face_attachment_id IS NULL OR card_face_attachment_id = '')
+                        """.trimIndent(),
+                    )
+                }
+            }
+        }
+
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS item (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        tags_json TEXT NOT NULL DEFAULT '[]',
+                        brand TEXT,
+                        model TEXT,
+                        serial_no TEXT,
+                        purchase_date INTEGER NOT NULL DEFAULT 0,
+                        purchase_price_cents INTEGER NOT NULL DEFAULT 0,
+                        currency TEXT NOT NULL DEFAULT 'CNY',
+                        warranty_duration_days INTEGER NOT NULL DEFAULT 0,
+                        warranty_until_ts INTEGER NOT NULL DEFAULT 0,
+                        receipt_url TEXT,
+                        note TEXT,
+                        location_text TEXT,
+                        dirty INTEGER NOT NULL DEFAULT 0,
+                        created_ts INTEGER NOT NULL,
+                        updated_ts INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_item_category ON item (category)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_item_updated_ts ON item (updated_ts)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_item_dirty ON item (dirty)",
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS item_reminder_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        item_id TEXT NOT NULL,
+                        occurrence_ts INTEGER NOT NULL,
+                        kind TEXT NOT NULL,
+                        created_ts INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
         fun build(context: Context): EveDatabase =
             Room.databaseBuilder(context, EveDatabase::class.java, "eve.db")
                 .addMigrations(
@@ -603,6 +750,9 @@ abstract class EveDatabase : RoomDatabase() {
                     MIGRATION_7_8,
                     MIGRATION_8_9,
                     MIGRATION_9_10,
+                    MIGRATION_10_11,
+                    MIGRATION_11_12,
+                    MIGRATION_12_13,
                 )
                 .build()
     }

@@ -506,6 +506,7 @@ fun FinanceCardEntity.toJson(): Map<String, Any?> {
         "expiry_year" to expiryYear,
         "holder" to holder,
         "note" to note,
+        "card_face_attachment_id" to cardFaceAttachmentId,
         "icon" to icon,
         "color" to color,
         "archived" to archived,
@@ -538,6 +539,8 @@ fun FinanceCardEntity.Companion.fromJsonObj(obj: Map<String, Any?>): FinanceCard
         expiryYear = obj.nullableInt("expiry_year"),
         holder = obj.nullableString("holder"),
         note = obj.nullableString("note"),
+        cardFaceAttachmentId = obj.nullableString("card_face_attachment_id")
+            ?: obj.nullableString("card_attachment_id"),
         icon = obj.nullableString("icon"),
         color = obj.nullableString("color"),
         archived = obj.boolean("archived", false),

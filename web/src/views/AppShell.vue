@@ -24,6 +24,7 @@ import { useVaultStore } from '../stores/vault'
 import { useLocationsStore } from '../stores/locations'
 // B7 / FR-V2-G：财务 store（通知偏好位与补发 / 停止动作的收口方）。
 import { useFinanceStore } from '../stores/finance'
+import { useItemsStore } from '../stores/items'
 // B7：解锁成功后注册全站唯一 Service Worker（不支持 / 失败均静默）。
 import { registerFinanceServiceWorker } from '../notifications/financeNotifications'
 import { eventsStatus, getSharedChannel } from '../stores/events'
@@ -31,6 +32,7 @@ import { uiSearch } from '../composables/useUiSearch'
 import { getAccessToken, onAuthExpired } from '../api/client'
 import MfaPanel from '../components/MfaPanel.vue'
 import PendingPanel from '../components/PendingPanel.vue'
+import GlobalSearchPanel from '../components/GlobalSearchPanel.vue'
 import type { LoginResponse } from '../api/client'
 
 const router = useRouter()
@@ -40,6 +42,7 @@ const auth = useAuthStore()
 const vault = useVaultStore()
 const locations = useLocationsStore()
 const financeStore = useFinanceStore()
+const itemsStore = useItemsStore()
 
 const unlockPassword = ref('')
 const unlocking = ref(false)
@@ -52,6 +55,9 @@ const shellUnlocked = ref(false)
 // ---- 导航 ----
 const expiringCount = computed(() => vault.expiring.length)
 const menuOptions = computed<MenuOption[]>(() => [
+  { label: '今日与我', key: 'home' },
+  { label: '证件墙', key: 'archive' },
+  { type: 'divider', key: 'd0' },
   { label: '登录项', key: 'logins' },
   { label: '安全笔记', key: 'notes' },
   { label: '银行卡', key: 'cards' },
@@ -74,6 +80,7 @@ const menuOptions = computed<MenuOption[]>(() => [
   { label: '轨迹', key: 'locations' },
   // 阶段 4b — 日程/日历：与轨迹同级侧栏入口，对应 /vault/calendar 路由。
   { label: '日历', key: 'calendar' },
+  { label: '物品', key: 'items' },
   { type: 'divider', key: 'd2' },
   // 阶段 5 — 财务：与日历/轨迹同级侧栏入口, 对应 /finance 路由。
   { label: '财务', key: 'finance' },
@@ -81,7 +88,11 @@ const menuOptions = computed<MenuOption[]>(() => [
   { label: '安全设置', key: 'security' },
 ])
 
-const activeKey = computed(() => (route.name as string) ?? 'logins')
+const activeKey = computed(() => {
+  const n = route.name as string
+  if (n === 'item-detail') return 'items'
+  return n ?? 'home'
+})
 function onMenu(key: string) {
   // 阶段 5 — 财务路由独立挂载在 /finance, 其它既有项均位于 /vault。
   if (key === 'finance') {
@@ -161,6 +172,7 @@ function onLockUseRecovery() {
   channel.stop()
   vault.reset()
   locations.reset() // 轨迹明文同样清空
+  itemsStore.reset()
   auth.logout()
   router.replace({ name: 'welcome' })
 }
@@ -212,6 +224,7 @@ function lock() {
   auth.lock()
   vault.reset()
   locations.reset() // 轨迹明文只驻内存，锁定即清
+  itemsStore.reset()
   // B7：撤销所有已排期财务通知并释放定时器（偏好位保留，解锁后无感恢复）。
   financeStore.stopNotifications()
   shellUnlocked.value = false
@@ -222,6 +235,7 @@ function logout() {
   channel.stop()
   vault.reset()
   locations.reset()
+  itemsStore.reset()
   // B7：退出登录同样立即停止财务通知（偏好位留在本地，下次登录仍生效）。
   financeStore.stopNotifications()
   shellUnlocked.value = false
@@ -254,6 +268,7 @@ onMounted(async () => {
     channel.stop()
     vault.reset()
     locations.reset()
+    itemsStore.reset()
     // B7：授权失效立即停止财务通知（与 lock / logout 同口径）。
     financeStore.stopNotifications()
     shellUnlocked.value = false
@@ -324,12 +339,15 @@ onBeforeUnmount(() => offBus?.())
 
       <n-layout>
         <n-layout-header bordered class="header">
-          <n-input
-            v-model:value="uiSearch.query"
-            class="search"
-            clearable
-            placeholder="搜索当前分类（标题/账号/网址/卡号尾号/备注/证号）"
-          />
+          <div class="search-wrap">
+            <n-input
+              v-model:value="uiSearch.query"
+              class="search"
+              clearable
+              placeholder="全局搜索（证件名/物品/财务备注/密码标题）"
+            />
+            <GlobalSearchPanel />
+          </div>
           <n-space align="center" :size="12">
             <n-tag size="small" :bordered="false" :type="eventsStatus.connected ? 'success' : 'warning'">
               {{ eventsStatus.connected ? '实时' : '重连中' }}
@@ -405,9 +423,13 @@ onBeforeUnmount(() => offBus?.())
   gap: 16px;
   background: #fff;
 }
-.search {
-  max-width: 460px;
+.search-wrap {
+  position: relative;
   flex: 1;
+  max-width: 460px;
+}
+.search {
+  width: 100%;
 }
 .sync-text {
   font-size: 12px;

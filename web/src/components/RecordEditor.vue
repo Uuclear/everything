@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 通用记录编辑器（modal）：按 kind 渲染 login/note/card/identity 四套表单。
 // 明文仅在本组件内存中暂存，保存时经 sealRecord 端到端加密后才离开浏览器。
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import {
   NModal,
   NForm,
@@ -29,6 +29,9 @@ import {
 } from '../types/vault'
 import { generatePassword, DEFAULT_GENERATOR_OPTIONS, type GeneratorOptions } from '../crypto/generator'
 import { parseOtpauth } from '../crypto/totp'
+import IdentityAttachmentFields from './IdentityAttachmentFields.vue'
+import OcrScanButton from '../ocr/components/OcrScanButton.vue'
+import { parseIdentityBackText, parseIdentityFrontText } from '../ocr/parsers/identity'
 
 const props = defineProps<{
   show: boolean
@@ -40,6 +43,8 @@ const emit = defineEmits<{ 'update:show': [v: boolean]; saved: [] }>()
 const vault = useVaultStore()
 const message = useMessage()
 const saving = ref(false)
+/** 新建证件时预分配 id，便于先上传影像再保存主记录。 */
+const draftRecordId = ref('')
 
 const KIND_TITLES: Record<RecordKind, string> = {
   login: '登录项',
@@ -71,6 +76,9 @@ const form = reactive({
   otpauthUri: '',
   totpSecret: '',
   totpIssuer: '',
+  frontAttachmentId: null as string | null,
+  backAttachmentId: null as string | null,
+  scanAttachmentIds: [] as string[],
 })
 
 // ---- 密码生成器 ----
@@ -109,6 +117,7 @@ watch(
   () => props.show,
   (open) => {
     if (!open) return
+    draftRecordId.value = props.record?.id ?? crypto.randomUUID()
     const d = props.record?.data as Record<string, any> | undefined
     Object.assign(form, {
       title: d?.title ?? '',
@@ -124,7 +133,7 @@ watch(
       cvv: d?.cvv ?? '',
       identityKind: (d?.kind as IdentityKind) ?? (props.record?.type as IdentityKind) ?? 'generic',
       name: d?.name ?? '',
-      idNumber: d?.idNumber ?? '',
+      idNumber: d?.number ?? d?.idNumber ?? '',
       issuer: d?.issuer ?? '',
       issued_ts: tsOf(d?.issued_on),
       expires_ts: tsOf(d?.expires_on),
@@ -132,9 +141,59 @@ watch(
       otpauthUri: '',
       totpSecret: d?.totp?.secret ?? '',
       totpIssuer: d?.totp?.issuer ?? '',
+      frontAttachmentId: d?.front_attachment_id ?? null,
+      backAttachmentId: d?.back_attachment_id ?? null,
+      scanAttachmentIds: Array.isArray(d?.scan_attachment_ids)
+        ? [...d.scan_attachment_ids]
+        : [],
     })
   },
 )
+
+const identityRecordId = computed(() => props.record?.id ?? draftRecordId.value)
+
+const identityFrontFieldLabels = {
+  name: '姓名',
+  idNumber: '证件号码',
+}
+
+const identityBackFieldLabels = {
+  issuer: '签发机构',
+  issued_on: '签发日期',
+  expires_on: '到期日期',
+}
+
+function buildIdentityFrontFields(text: string) {
+  const hint = parseIdentityFrontText(text)
+  if (!hint) return {}
+  const fields: Record<string, string> = {}
+  if (hint.name) fields.name = hint.name
+  if (hint.number) fields.idNumber = hint.number
+  return fields
+}
+
+function buildIdentityBackFields(text: string) {
+  const hint = parseIdentityBackText(text)
+  if (!hint) return {}
+  const fields: Record<string, string> = {}
+  if (hint.issuer) fields.issuer = hint.issuer
+  if (hint.validFrom) fields.issued_on = hint.validFrom
+  if (hint.expiresOn) fields.expires_on = hint.expiresOn
+  return fields
+}
+
+function applyIdentityFront(fields: Record<string, string>) {
+  if (fields.name) form.name = fields.name
+  if (fields.idNumber) form.idNumber = fields.idNumber
+}
+
+function applyIdentityBack(fields: Record<string, string>) {
+  if (fields.issuer) form.issuer = fields.issuer
+  if (fields.issued_on) form.issued_ts = tsOf(fields.issued_on)
+  if (fields.expires_on) {
+    form.expires_ts = fields.expires_on === '长期' ? null : tsOf(fields.expires_on)
+  }
+}
 
 function close() {
   emit('update:show', false)
@@ -180,11 +239,28 @@ async function submit() {
     if (issued) data.issued_on = issued
     if (expires) data.expires_on = expires
     if (form.notes) data.notes = form.notes
+    if (form.frontAttachmentId) data.front_attachment_id = form.frontAttachmentId
+    if (form.backAttachmentId) data.back_attachment_id = form.backAttachmentId
+    if (form.scanAttachmentIds.length) data.scan_attachment_ids = [...form.scanAttachmentIds]
   }
 
   saving.value = true
   try {
-    await vault.save(props.kind, data as any, props.record ?? undefined)
+    const existing =
+      props.record ??
+      (props.kind === 'identity'
+        ? {
+            id: draftRecordId.value,
+            module: 'identity',
+            type: form.identityKind,
+            version: 0,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            deleted: false,
+            data: {} as any,
+          }
+        : undefined)
+    await vault.save(props.kind, data as any, existing as DecryptedRecord | undefined)
     message.success('已加密保存并同步')
     emit('saved')
     close()
@@ -324,9 +400,21 @@ const yearOptions = Array.from({ length: 21 }, (_, i) => {
         </n-form-item>
         <n-form-item label="证件号码">
           <n-input v-model:value="form.idNumber" />
+          <OcrScanButton
+            label="扫描正面"
+            :build-fields="buildIdentityFrontFields"
+            :field-labels="identityFrontFieldLabels"
+            @apply="applyIdentityFront"
+          />
         </n-form-item>
         <n-form-item label="签发机构">
           <n-input v-model:value="form.issuer" />
+          <OcrScanButton
+            label="扫描反面"
+            :build-fields="buildIdentityBackFields"
+            :field-labels="identityBackFieldLabels"
+            @apply="applyIdentityBack"
+          />
         </n-form-item>
         <n-space>
           <n-form-item label="签发日期">
@@ -338,6 +426,18 @@ const yearOptions = Array.from({ length: 21 }, (_, i) => {
         </n-space>
         <n-form-item label="备注">
           <n-input v-model:value="form.notes" type="textarea" :rows="2" />
+        </n-form-item>
+        <n-form-item label="证件影像">
+          <IdentityAttachmentFields
+            :record-id="identityRecordId"
+            :identity-kind="form.identityKind"
+            :front-id="form.frontAttachmentId"
+            :back-id="form.backAttachmentId"
+            :scan-ids="form.scanAttachmentIds"
+            @update:front-id="form.frontAttachmentId = $event"
+            @update:back-id="form.backAttachmentId = $event"
+            @update:scan-ids="form.scanAttachmentIds = $event"
+          />
         </n-form-item>
       </template>
     </n-form>

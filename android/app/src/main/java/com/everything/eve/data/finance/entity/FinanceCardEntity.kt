@@ -98,6 +98,9 @@ data class FinanceCardEntity(
     /** 纯文本备注（可选）。 */
     val note: String?,
 
+    /** 卡面影像附件 id（可选；完整 PAN 仍不入库；与 Web `card_face_attachment_id` 一致）。 */
+    @ColumnInfo(name = "card_face_attachment_id") val cardFaceAttachmentId: String? = null,
+
     /** 图标 key（可选）。 */
     val icon: String?,
 

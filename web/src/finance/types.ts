@@ -172,6 +172,8 @@ export interface FinanceCard {
   created_at: number
   /** 最后更新时刻。 */
   updated_at: number
+  /** 可选卡面影像（module=finance / type=attachment）。 */
+  card_face_attachment_id?: string
 }
 
 /**
@@ -463,21 +465,12 @@ export interface FinanceBudget {
   updated_at: number
 }
 
-/**
- * 附件引用（policy / contract 等 v2 记录挂的附件列表项）。
- *
- * 实际二进制走 records 通道 type='attachment'；这里只存元数据。
- */
-export interface AttachmentRef {
-  /** 附件 UUID。 */
-  id: string
-  /** MIME 类型（如 application/pdf / image/jpeg）。 */
-  mime: string
-  /** 文件大小（字节；端侧校验 ≤ 50MB）。 */
-  size: number
-  /** 附件二进制 sha-256（hex 字符串）。 */
-  sha256: string
-}
+import {
+  ATTACHMENT_MAX_SIZE_BYTES,
+  type AttachmentRef as VaultAttachmentRef,
+} from '../vault/attachment'
+/** 附件引用（与 vault/attachment.AttachmentRef 同构）。 */
+export type AttachmentRef = VaultAttachmentRef
 
 /**
  * v2 财务条目明文 payload 联合。
@@ -547,7 +540,7 @@ export function isValidSha256Hex(s: string): boolean {
 }
 
 /** 单文件 ≤ 50MB 限制（端侧校验；超限直接拒收）。 */
-export const ATTACHMENT_MAX_SIZE_BYTES = 50 * 1024 * 1024
+export { ATTACHMENT_MAX_SIZE_BYTES }
 
 /**
  * 校验订阅条目。

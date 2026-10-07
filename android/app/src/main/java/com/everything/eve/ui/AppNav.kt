@@ -8,8 +8,18 @@ import com.everything.eve.ui.finance.FinanceScreen
 import com.everything.eve.ui.screens.CalendarScreen
 import com.everything.eve.ui.screens.CollectorScreen
 import com.everything.eve.ui.screens.DevicesScreen
+import com.everything.eve.ui.screens.ItemDetailScreen
+import com.everything.eve.ui.screens.ItemEditorScreen
+import com.everything.eve.ui.screens.IdentitiesScreen
+import com.everything.eve.ui.screens.IdentityEditorScreen
+import com.everything.eve.ui.screens.ItemScannerScreen
+import com.everything.eve.ui.screens.ItemsScreen
+import com.everything.eve.ui.screens.ArchiveWallScreen
+import com.everything.eve.ui.screens.VaultHomeScreen
 import com.everything.eve.ui.screens.VaultScreen
 import com.everything.eve.ui.screens.WelcomeScreen
+import androidx.navigation.NavType
+import androidx.navigation.navArgument
 
 object Routes {
     const val WELCOME = "welcome"
@@ -24,6 +34,15 @@ object Routes {
     // 字面量与 FinanceRoutes.ROOT 同源（均为 "finance"），保证主导航与模块内二级路由
     // 共享同一 namespace，避免出现两条不互通的 finance 路径）。
     const val FINANCE = "finance"
+    // 阶段 5 items Task 9
+    const val ITEMS = "items"
+    const val ITEMS_SCAN = "items/scan"
+    const val ITEM_DETAIL = "items/{itemId}"
+    const val ITEM_EDITOR = "items/editor?itemId={itemId}"
+    const val IDENTITIES = "identities"
+    const val IDENTITY_EDITOR = "identities/editor?identityId={identityId}"
+    const val VAULT_HOME = "vault/home"
+    const val ARCHIVE_WALL = "vault/archive"
 }
 
 @Composable
@@ -52,6 +71,24 @@ fun AppNav() {
                 // 阶段 5 Task 10 / TR-10.1：财务入口回调（沿用 4b CALENDAR 同款镜像新增；
                 // 顶部"财务"TextButton → onOpenFinance → nav.navigate(Routes.FINANCE)）。
                 onOpenFinance = { nav.navigate(Routes.FINANCE) },
+                onOpenItems = { nav.navigate(Routes.ITEMS) },
+                onOpenIdentities = { nav.navigate(Routes.IDENTITIES) },
+                onOpenVaultHome = { nav.navigate(Routes.VAULT_HOME) },
+                onOpenArchiveWall = { nav.navigate(Routes.ARCHIVE_WALL) },
+            )
+        }
+        composable(Routes.VAULT_HOME) {
+            VaultHomeScreen(
+                onBack = { nav.popBackStack() },
+                onOpenArchive = { nav.navigate(Routes.ARCHIVE_WALL) },
+                onOpenIdentities = { nav.navigate(Routes.IDENTITIES) },
+            )
+        }
+        composable(Routes.ARCHIVE_WALL) {
+            ArchiveWallScreen(
+                onBack = { nav.popBackStack() },
+                onOpenIdentity = { id -> nav.navigate("identities/editor?identityId=$id") },
+                onOpenFinance = { nav.navigate(Routes.FINANCE) },
             )
         }
         composable(Routes.DEVICES) {
@@ -72,6 +109,84 @@ fun AppNav() {
         // 无需外部 onBack 参数，与 4b CALENDAR 保持一致）。
         composable(Routes.FINANCE) {
             FinanceScreen()
+        }
+        composable(Routes.ITEMS) {
+            ItemsScreen(
+                onBack = { nav.popBackStack() },
+                onOpenDetail = { id -> nav.navigate("items/$id") },
+                onOpenEditor = { id ->
+                    if (id == null) nav.navigate("items/editor")
+                    else nav.navigate("items/editor?itemId=$id")
+                },
+                onOpenScan = { nav.navigate(Routes.ITEMS_SCAN) },
+            )
+        }
+        composable(
+            route = Routes.ITEM_DETAIL,
+            arguments = listOf(navArgument("itemId") { type = NavType.StringType }),
+        ) { entry ->
+            val id = entry.arguments?.getString("itemId") ?: return@composable
+            ItemDetailScreen(
+                itemId = id,
+                onBack = { nav.popBackStack() },
+                onEdit = { nav.navigate("items/editor?itemId=$id") },
+                onDeleted = {
+                    nav.popBackStack(Routes.ITEMS, false)
+                },
+            )
+        }
+        composable(
+            route = Routes.ITEM_EDITOR,
+            arguments = listOf(
+                navArgument("itemId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { entry ->
+            val id = entry.arguments?.getString("itemId")
+            ItemEditorScreen(
+                itemId = id,
+                onDone = { nav.popBackStack() },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Routes.ITEMS_SCAN) {
+            ItemScannerScreen(
+                onBack = { nav.popBackStack() },
+                onOpenDetail = { id ->
+                    nav.navigate("items/$id") {
+                        popUpTo(Routes.ITEMS)
+                    }
+                },
+            )
+        }
+        composable(Routes.IDENTITIES) {
+            IdentitiesScreen(
+                onBack = { nav.popBackStack() },
+                onOpenEditor = { id ->
+                    if (id == null) nav.navigate("identities/editor")
+                    else nav.navigate("identities/editor?identityId=$id")
+                },
+            )
+        }
+        composable(
+            route = Routes.IDENTITY_EDITOR,
+            arguments = listOf(
+                navArgument("identityId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { entry ->
+            val id = entry.arguments?.getString("identityId")
+            IdentityEditorScreen(
+                identityId = id,
+                onDone = { nav.popBackStack() },
+                onBack = { nav.popBackStack() },
+            )
         }
     }
 }

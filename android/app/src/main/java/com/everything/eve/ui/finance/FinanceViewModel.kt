@@ -147,6 +147,8 @@ data class FinanceEditorBuffer(
     val holder: String = "",
     /** 发卡行（卡片专用）。 */
     val issuer: String = "",
+    /** 卡面影像附件 id（可选；records JSON：`card_face_attachment_id`）。 */
+    val cardFaceAttachmentId: String? = null,
 )
 
 /**
@@ -771,6 +773,7 @@ open class FinanceViewModel(app: Application) : AndroidViewModel(app) {
                     holder = card.holder.orEmpty(), issuer = card.issuer,
                     note = card.note.orEmpty(), color = card.color ?: "blue",
                     archived = card.archived,
+                    cardFaceAttachmentId = card.cardFaceAttachmentId,
                 )
             }
             FinanceEditorKind.TX -> {
@@ -859,6 +862,7 @@ open class FinanceViewModel(app: Application) : AndroidViewModel(app) {
                             expiryYear = null,
                             holder = buffer.holder.takeIf { it.isNotBlank() },
                             note = buffer.note.takeIf { it.isNotBlank() },
+                            cardFaceAttachmentId = buffer.cardFaceAttachmentId,
                             icon = null,
                             color = buffer.color,
                             archived = buffer.archived,
@@ -1580,6 +1584,29 @@ open class FinanceViewModel(app: Application) : AndroidViewModel(app) {
      * @return [Result.success] [AttachmentRef]（id / mime / size / sha256）或
      *   [Result.failure]（含 IllegalArgumentException / IllegalStateException 提示）。
      */
+    /** 上传卡面/证件类影像（finance 父模块）。 */
+    suspend fun uploadVaultImage(
+        parentRefId: String,
+        content: ByteArray,
+        mime: String,
+        parentModule: String = com.everything.eve.data.finance.FinanceModule.MODULE,
+    ): Result<String> {
+        when (val sizeCheck = verifySize(content.size.toLong())) {
+            is ValidationResult.Invalid ->
+                return Result.failure(IllegalArgumentException(sizeCheck.reason))
+            else -> Unit
+        }
+        val sha256Hex = sha256HexOf(content)
+        return attachmentRepo.upload(
+            parentRefId = parentRefId,
+            content = content,
+            mime = mime,
+            sha256Hex = sha256Hex,
+            parentModule = parentModule,
+            name = "card-face",
+        ).map { it.id }
+    }
+
     fun addAttachment(
         recordId: String,
         content: ByteArray,

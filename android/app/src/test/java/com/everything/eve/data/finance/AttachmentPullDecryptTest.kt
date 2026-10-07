@@ -120,10 +120,13 @@ class AttachmentPullDecryptTest {
         val decryptResponses = mutableMapOf<String, String>()
         var decryptCallCount: Int = 0
 
-        override fun decryptFinanceAttachment(entity: com.everything.eve.data.RecordEntity): String {
+        override fun decryptFinanceAttachment(entity: com.everything.eve.data.RecordEntity): String =
+            decryptModuleAttachment(entity)
+
+        override fun decryptModuleAttachment(entity: com.everything.eve.data.RecordEntity): String {
             decryptCallCount += 1
             return decryptResponses[entity.id]
-                ?: """{"id":"att-1","recordId":"policy-1","mime":"application/pdf","size":100,"sha256":"${"a".repeat(64)}"}"""
+                ?: """{"id":"att-1","parent_ref_id":"policy-1","parent_module":"finance","recordId":"policy-1","mime":"application/pdf","size":100,"sha256":"${"a".repeat(64)}"}"""
         }
 
         fun toStub(): RecordsRepository = this

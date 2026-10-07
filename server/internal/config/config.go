@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/everything-personal/eve/internal/maptile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -19,6 +20,16 @@ const (
 	RegClosed = "closed"
 )
 
+// MapConfig 轨迹底图瓦片同源代理（P0）：上游模板 + 可选磁盘缓存 + 按 IP 限流。
+type MapConfig struct {
+	// UpstreamTemplate 上游 URL 模板，须含 {z}/{x}/{y}（默认 OSM 标准瓦片）。
+	UpstreamTemplate string `yaml:"upstream_template"`
+	// CacheEnabled 为 true 时在 data_dir/map_cache 下缓存成功拉取的 PNG。
+	CacheEnabled bool `yaml:"cache_enabled"`
+	// RateLimitRPMPerIP 单 IP 每分钟最大瓦片请求数（0 = 默认 240）。
+	RateLimitRPMPerIP int `yaml:"rate_limit_rpm_per_ip"`
+}
+
 // Config 是服务端全部可配置项。
 type Config struct {
 	// Addr 是 HTTP 监听地址，如 ":8787"。
@@ -31,6 +42,8 @@ type Config struct {
 	AccessTokenTTL int `yaml:"access_token_ttl_minutes"`
 	// RefreshTokenTTL 刷新令牌有效期（天）。
 	RefreshTokenTTL int `yaml:"refresh_token_ttl_days"`
+	// Map 瓦片代理配置（见 MapConfig）。
+	Map MapConfig `yaml:"map"`
 }
 
 // Default 返回带默认值的配置。
@@ -41,6 +54,10 @@ func Default() Config {
 		Registration:    RegFirst,
 		AccessTokenTTL:  15,
 		RefreshTokenTTL: 90,
+		Map: MapConfig{
+			UpstreamTemplate: maptile.DefaultUpstreamTemplate(),
+			CacheEnabled:     true,
+		},
 	}
 }
 
@@ -77,5 +94,8 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("EVE_REGISTRATION"); v != "" {
 		cfg.Registration = v
+	}
+	if v := os.Getenv("EVE_MAP_UPSTREAM_TEMPLATE"); v != "" {
+		cfg.Map.UpstreamTemplate = v
 	}
 }

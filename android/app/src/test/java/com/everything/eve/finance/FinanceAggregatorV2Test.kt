@@ -37,7 +37,7 @@ class FinanceAggregatorV2Test {
 
     companion object {
         /** fixture 文件 SHA-256（小写 hex）—— TR-4.6 双端一致性硬守护。 */
-        const val FIXTURE_SHA256 = "9e5fd8761458df070b7cd6b9e362cdd4b9869cdfb4cba6b4fa6ab9a5b291db88"
+        const val FIXTURE_SHA256 = "f0a054c61dd34b5dbedc2dee87880c9a7a66274110cccbc277aac80d71d006d5"
 
         @BeforeClass
         @JvmStatic

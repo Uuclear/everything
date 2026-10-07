@@ -42,7 +42,7 @@ import budgetEnforcerJson from '../__fixtures__/budget-enforcer-cases.json'
 
 /** fixture 文件 SHA-256（小写 hex）—— 与 Android 测试常量必须逐字节一致。 */
 const EXPECTED_FIXTURE_SHA256 =
-  '7e568077870c608172bd6a0b643aaf50fdbf15c8a571512871db113900342e44'
+  '3edadb7cbd84141e12096074b2b88a800b1b0fbe01d5223ea4d1591dfb004b2a'
 
 /** 锚点时刻：2026-06-28 12:00:00 CST（周日）。 */
 const ANCHOR_NOW_MS = 1_782_619_200_000

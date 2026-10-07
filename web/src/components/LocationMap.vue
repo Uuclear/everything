@@ -12,7 +12,8 @@
 
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import L from 'leaflet'
-import { NButton, NInput, NPopover } from 'naive-ui'
+import { NAlert, NButton, NInput, NPopover } from 'naive-ui'
+import { getAccessToken } from '../api/client'
 import type { DayTimeline } from '../locations/core/types'
 import type { PlaybackPosition } from '../locations/playback'
 import type { PlaceIndexEntry } from '../locations/places'
@@ -20,6 +21,7 @@ import { visitPlaceName } from '../locations/places'
 import {
   DEFAULT_TILE_URL,
   OSM_ATTRIBUTION,
+  isProxiedTileUrl,
   isValidTileUrl,
   loadTileUrl,
   saveTileUrl,
@@ -53,6 +55,10 @@ let headMarker: L.Marker | null = null
 const tileInput = ref('')
 const tileError = ref('')
 const settingsOpen = ref(false)
+/** 瓦片层加载失败（上游或鉴权）；提示用户可改自定义源。 */
+const tileLoadFailed = ref(false)
+/** fetch 瓦片产生的 blob URL，卸载时 revoke。 */
+const tileObjectUrls = new Set<string>()
 
 /** 打开设置弹层：回填当前生效的 URL，清空上次错误提示。 */
 function openSettings() {
@@ -64,7 +70,7 @@ function openSettings() {
 /** 保存瓦片源：校验通过才持久化并热替换 tileLayer；非法值提示不保存。 */
 function applyTileUrl() {
   if (!isValidTileUrl(tileInput.value)) {
-    tileError.value = '需以 http(s):// 开头且包含 {z}/{x}/{y} 占位符'
+    tileError.value = '需为 / 或 http(s):// 开头且包含 {z}/{x}/{y} 占位符'
     return
   }
   if (!saveTileUrl(tileInput.value)) return // localStorage 不可用：保守不动
@@ -73,18 +79,72 @@ function applyTileUrl() {
   mountTileLayer() // 热替换瓦片层（不动轨迹图层与播放头）
 }
 
-/** 按当前配置（重新）挂载瓦片层；仅缺省 OSM 源附署名。 */
+function revokeTileObjectUrls() {
+  for (const u of tileObjectUrls) URL.revokeObjectURL(u)
+  tileObjectUrls.clear()
+}
+
+function onTileLayerError() {
+  tileLoadFailed.value = true
+}
+
+/**
+ * 同源 /api 瓦片须带 JWT：扩展 TileLayer 用 fetch + blob URL 加载。
+ */
+function createAuthTileLayer(url: string, options: L.TileLayerOptions): L.TileLayer {
+  const AuthTileLayer = L.TileLayer.extend({
+    createTile(coords: L.Coords, done: L.DoneCallback) {
+      const tile = document.createElement('img')
+      tile.alt = ''
+      const tileUrl = this.getTileUrl(coords)
+      const headers: HeadersInit = {}
+      const token = getAccessToken()
+      if (token) headers.Authorization = `Bearer ${token}`
+      fetch(tileUrl, { headers })
+        .then((res) => {
+          if (!res.ok) throw new Error(String(res.status))
+          return res.blob()
+        })
+        .then((blob) => {
+          const obj = URL.createObjectURL(blob)
+          tileObjectUrls.add(obj)
+          tile.onload = () => done(undefined, tile)
+          tile.onerror = () => done(new Error('tile decode'), tile)
+          tile.src = obj
+        })
+        .catch((err: Error) => {
+          onTileLayerError()
+          done(err, tile)
+        })
+      return tile
+    },
+  })
+  // Leaflet Class.extend 的返回类型与 TileLayer 构造签名相交后 vue-tsc 会误判为 0 参构造。
+  const Ctor = AuthTileLayer as new (u: string, o?: L.TileLayerOptions) => L.TileLayer
+  return new Ctor(url, options)
+}
+
+/** 按当前配置（重新）挂载瓦片层；缺省同源代理附 OSM 署名。 */
 function mountTileLayer() {
   if (!map) return
+  tileLoadFailed.value = false
   if (tileLayer) {
+    tileLayer.off('tileerror', onTileLayerError)
     tileLayer.remove()
     tileLayer = null
   }
+  revokeTileObjectUrls()
   const url = loadTileUrl()
-  tileLayer = L.tileLayer(url, {
+  const opts: L.TileLayerOptions = {
     maxZoom: 19,
     attribution: url === DEFAULT_TILE_URL ? OSM_ATTRIBUTION : '',
-  }).addTo(map)
+  }
+  if (isProxiedTileUrl(url)) {
+    tileLayer = createAuthTileLayer(url, opts).addTo(map)
+  } else {
+    tileLayer = L.tileLayer(url, opts).addTo(map)
+  }
+  tileLayer.on('tileerror', onTileLayerError)
 }
 
 // ---- 轨迹渲染 ----
@@ -173,6 +233,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  revokeTileObjectUrls()
   // 销毁地图实例，释放瓦片请求与事件监听（明文图层随 DOM 一并移除）。
   map?.remove()
   map = null
@@ -189,6 +250,14 @@ watch(() => props.playhead, updateHead)
 
 <template>
   <div class="location-map">
+    <n-alert
+      v-if="tileLoadFailed"
+      type="warning"
+      title="底图加载失败"
+      class="tile-alert"
+    >
+      请在地图右上角 ⚙ 更换瓦片源，或确认已登录且服务端 map 代理可用。
+    </n-alert>
     <!-- leaflet 挂载容器 -->
     <div ref="mapEl" class="map-canvas" />
     <!-- 瓦片源设置入口（右上角齿轮；瓦片请求会暴露大致视窗给瓦片服务商，可自配源） -->
@@ -210,7 +279,9 @@ watch(() => props.playhead, updateHead)
           :status="tileError ? 'error' : undefined"
         />
         <div v-if="tileError" class="settings-error">{{ tileError }}</div>
-        <div class="settings-hint">留空即恢复缺省（OSM）；瓦片请求会向源站暴露大致浏览区域</div>
+        <div class="settings-hint">
+          缺省为服务端同源代理；自定义第三方源需含 {z}/{x}/{y}（如 MapTiler API URL）
+        </div>
         <div class="settings-actions">
           <n-button size="tiny" quaternary @click="tileInput = DEFAULT_TILE_URL">恢复缺省</n-button>
           <n-button size="tiny" type="primary" @click="applyTileUrl">保存</n-button>
@@ -229,6 +300,13 @@ watch(() => props.playhead, updateHead)
   border: 1px solid #efeff2;
   border-radius: 10px;
   overflow: hidden;
+}
+.tile-alert {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 44px;
+  z-index: 600;
 }
 .map-canvas {
   position: absolute;

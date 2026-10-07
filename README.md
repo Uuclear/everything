@@ -24,6 +24,8 @@
 > Room v6→v10 五段迁移，字段表见 [docs/module-schemas.md](docs/module-schemas.md)
 > §9.10–9.20，文档见下文"财务（阶段 5）"小节与
 > [docs/finance.md](docs/finance.md) §12–§15）。
+> **阶段 5 物品**（Web `/vault/items` + Android「物品」入口，records `module=item`，保修 30/7/1 提醒复用单闹钟链；Room v11）。
+> 自用冒烟见 [docs/smoke/selfuse-closure-web-android.md](docs/smoke/selfuse-closure-web-android.md)。
 > 完整路线与模块全景见 [.trae/documents/everything_plan.md](.trae/documents/everything_plan.md)。
 
 ## 快速开始
@@ -83,9 +85,14 @@ cd web && npm install && npm run dev
 
 隐私提示：
 
-- **瓦片隐私**：地图瓦片请求会暴露大致浏览区域给瓦片服务商（缺省 OpenStreetMap）；
-  地图右上角 ⚙ 可自配瓦片源（如自建 / 内网瓦片服务）。瓦片 URL 是轨迹页唯一允许
-  落盘（localStorage）的配置项，不属于轨迹数据。
+- **瓦片隐私**：缺省经服务端同源代理 `/api/v1/map/tiles/{z}/{x}/{y}.png` 拉取上游
+  （合规 `User-Agent`，需已登录 approved 令牌），避免浏览器直连 OSM 常见 **403**。
+  地图右上角 ⚙ 可自配其它 `{z}/{x}/{y}` 模板（如 MapTiler、内网瓦片）。瓦片 URL 是
+  轨迹页唯一允许落盘（localStorage）的配置项，不属于轨迹数据。
+- **地图空白 / 403 排障**：DevTools 看瓦片是否 401（未登录）或 502（上游不可达）；
+  可在 `data/config.yaml` 配置 `map.upstream_template`（或环境变量
+  `EVE_MAP_UPSTREAM_TEMPLATE`），例如 OpenFreeMap
+  `https://tiles.openfreemap.org/osm/{z}/{x}/{y}.png`；自定义源在地图设置中保存即可。
 - **明文不持久化**：解密后的坐标只驻浏览器内存，不写 localStorage / IndexedDB、
   不进日志；锁定或退出登录即清空，需重新解锁才能再次查看。
 

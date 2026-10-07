@@ -6,12 +6,14 @@ import (
 	"database/sql"
 	"io/fs"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/everything-personal/eve/internal/agent"
 	"github.com/everything-personal/eve/internal/auth"
 	"github.com/everything-personal/eve/internal/config"
+	"github.com/everything-personal/eve/internal/maptile"
 	"github.com/everything-personal/eve/internal/sync"
 	"github.com/everything-personal/eve/internal/vault"
 	"github.com/everything-personal/eve/web"
@@ -36,10 +38,16 @@ type Server struct {
 	agentRegistry    *agent.Registry
 	agentProxy       *agent.Proxy
 	agentSession     *agent.SessionManager // 阶段 6 Task 4：解锁 token 签发 / 校验
+
+	mapTiles *maptile.Proxy
 }
 
 // New 创建 API 服务器（不含 Agent；既有调用方行为完全保持）。
 func New(cfg config.Config, database *sql.DB, authSvc *auth.Service, records *vault.Store, hub *sync.Hub) *Server {
+	var cacheDir string
+	if cfg.Map.CacheEnabled {
+		cacheDir = filepath.Join(cfg.DataDir, "map_cache")
+	}
 	return &Server{
 		cfg:       cfg,
 		db:        database,
@@ -48,6 +56,7 @@ func New(cfg config.Config, database *sql.DB, authSvc *auth.Service, records *va
 		locations: vault.NewLocationStore(database),
 		hub:       hub,
 		limiter:   newAuthLimiter(),
+		mapTiles: maptile.New(cfg.Map.UpstreamTemplate, cacheDir, cfg.Map.RateLimitRPMPerIP),
 	}
 }
 
@@ -113,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 					r.Post("/locations/batch", s.uploadLocationBlocks)
 					r.Get("/locations", s.listLocationBlocks)
 					r.Delete("/locations", s.deleteLocationBlocks)
+					r.Get("/map/tiles/{z}/{x}/{y}.png", s.mapTile)
 					r.Post("/auth/events-token", s.eventsToken)
 					r.Post("/auth/password/change", s.changePassword)
 					r.Get("/auth/totp", s.totpStatus)

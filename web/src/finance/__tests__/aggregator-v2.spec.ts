@@ -40,7 +40,7 @@ import aggregatorV2Json from '../__fixtures__/aggregator-v2-cases.json'
 
 /** fixture 真理源 SHA-256（与 Android 镜像必须逐字节一致，TR-4.6）。 */
 const EXPECTED_FIXTURE_SHA256 =
-  '9e5fd8761458df070b7cd6b9e362cdd4b9869cdfb4cba6b4fa6ab9a5b291db88'
+  'f0a054c61dd34b5dbedc2dee87880c9a7a66274110cccbc277aac80d71d006d5'
 
 /** CST 相对 UTC 的偏移毫秒（UTC+8）。 */
 const CST_OFFSET_MS = 8 * 60 * 60 * 1000

@@ -10,7 +10,9 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   DEFAULT_TILE_URL,
+  OSM_DIRECT_TILE_URL,
   TILE_URL_STORAGE_KEY,
+  isProxiedTileUrl,
   isValidTileUrl,
   loadTileUrl,
   saveTileUrl,
@@ -25,8 +27,18 @@ describe('isValidTileUrl 校验', () => {
     expect(isValidTileUrl('http://192.168.1.10:8080/tile/{z}/{x}/{y}.png')).toBe(true)
   })
 
-  it('缺省 OSM 源通过', () => {
+  it('缺省同源代理 URL 通过', () => {
     expect(isValidTileUrl(DEFAULT_TILE_URL)).toBe(true)
+    expect(isProxiedTileUrl(DEFAULT_TILE_URL)).toBe(true)
+  })
+
+  it('直连 OSM 源通过', () => {
+    expect(isValidTileUrl(OSM_DIRECT_TILE_URL)).toBe(true)
+    expect(isProxiedTileUrl(OSM_DIRECT_TILE_URL)).toBe(false)
+  })
+
+  it('同源相对路径（含占位符）通过', () => {
+    expect(isValidTileUrl('/api/v1/map/tiles/{z}/{x}/{y}.png')).toBe(true)
   })
 
   it('前后空白 trim 后校验', () => {
@@ -77,7 +89,7 @@ describe('saveTileUrl / loadTileUrl 持久化', () => {
     } as unknown as Storage
   })
 
-  it('无配置时回退缺省 OSM 源', () => {
+  it('无配置时回退缺省同源代理', () => {
     expect(loadTileUrl()).toBe(DEFAULT_TILE_URL)
   })
 

@@ -45,7 +45,7 @@ import nextV2Json from '../__fixtures__/next-v2-firing-cases.json'
 
 /** fixture 真理源 SHA-256（与 Android 镜像必须逐字节一致，TR-4.6）。 */
 const EXPECTED_FIXTURE_SHA256 =
-  'c4ea61f7cc17c177ec93fc8cafc4b0cb616d8267ca79eb77bc17440f26edcb76'
+  'd685f4cde636aaa729b20fb49517ad6b30455a71201e1d4f8750cefc146bb264'
 
 /** CST 相对 UTC 的偏移毫秒（UTC+8）。 */
 const CST_OFFSET_MS = 8 * 60 * 60 * 1000

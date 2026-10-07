@@ -98,9 +98,8 @@ class CollectorWorker(appContext: Context, params: WorkerParameters) :
                     // 等待 RecordsRepository.sync() 周期推送。
                     ServiceLocator.attachmentRepo.pullAndDecrypt(
                         financeRecords.filter {
-                            it.module == com.everything.eve.data.finance.FinanceModule.MODULE &&
-                                it.type == com.everything.eve.data.finance.FinanceModule.TYPE_ATTACHMENT
-                        }
+                            it.type == com.everything.eve.data.finance.FinanceModule.TYPE_ATTACHMENT
+                        },
                     )
                     ServiceLocator.attachmentRepo.pushChanges()
                     // ---- 阶段 5 v2 / B5 挂载点：离线汇率包 pull + push 对账 ----
@@ -132,6 +131,24 @@ class CollectorWorker(appContext: Context, params: WorkerParameters) :
             } catch (t: Throwable) {
                 // 财务模块同步失败 / 闹钟重建失败不影响 Worker 整体成功
                 Log.w("SyncWorker", "finance sync failed", t)
+            }
+            // ---- 阶段 5 items TR-10.2：物品拉取 + 闹钟链重建 ----
+            try {
+                if (ServiceLocator.auth.masterKey != null) {
+                    val sinceMs = ServiceLocator.db.recordDao().maxUpdatedAt()
+                    ServiceLocator.itemsRepo.pullAndDecrypt(sinceMs)
+                    ReminderScheduler.rebuildChain(ctx)
+                }
+            } catch (t: Throwable) {
+                Log.w("SyncWorker", "items sync failed", t)
+            }
+            try {
+                if (ServiceLocator.auth.masterKey != null) {
+                    val sinceMs = ServiceLocator.db.recordDao().maxUpdatedAt()
+                    ServiceLocator.identityRepo.pullAndDecrypt(sinceMs)
+                }
+            } catch (t: Throwable) {
+                Log.w("SyncWorker", "identity sync failed", t)
             }
             Result.success()
         } catch (e: Exception) {

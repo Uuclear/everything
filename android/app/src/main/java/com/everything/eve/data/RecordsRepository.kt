@@ -259,6 +259,163 @@ open class RecordsRepository(
         )
     }
 
+    // ========== 阶段 5 items：物品模块（spec FR-3 / module-schemas 第 9 章）==========
+
+    private val moduleItem = "item"
+    private val typeItem = "item"
+
+    /** 密封一条 Item 明文为 records 条目（module=item/type=item），并标 dirty。 */
+    suspend fun upsertItemRule(itemId: String, plaintextJson: String): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val now = System.currentTimeMillis()
+        val plain = plaintextJson.toByteArray(Charsets.UTF_8)
+        val sealed = CryptoEnvelope.sealRecord(mk, plain, itemId, moduleItem, 1)
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = itemId,
+                    module = moduleItem,
+                    type = typeItem,
+                    ciphertext = CryptoEnvelope.b64(sealed),
+                    version = 1,
+                    createdAt = now,
+                    updatedAt = now,
+                    deleted = false,
+                    dirty = true,
+                ),
+            ),
+        )
+        return itemId
+    }
+
+    /** 删除物品：tombstone 覆盖 records 行。 */
+    suspend fun deleteItemRule(itemId: String) {
+        auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val existing = dao.getById(itemId)
+        val createdAt = existing?.createdAt ?: System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = itemId,
+                    module = moduleItem,
+                    type = typeItem,
+                    ciphertext = "",
+                    version = 1,
+                    createdAt = createdAt,
+                    updatedAt = now,
+                    deleted = true,
+                    dirty = true,
+                ),
+            ),
+        )
+    }
+
+    // ========== 阶段 2b：identity 证件模块 ==========
+
+    private val moduleIdentity = "identity"
+
+    /** 密封证件明文（module=identity，type=证件子类型）。 */
+    suspend fun upsertIdentityRecord(identityId: String, identityType: String, plaintextJson: String): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val now = System.currentTimeMillis()
+        val plain = plaintextJson.toByteArray(Charsets.UTF_8)
+        val sealed = CryptoEnvelope.sealRecord(mk, plain, identityId, moduleIdentity, 1)
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = identityId,
+                    module = moduleIdentity,
+                    type = identityType,
+                    ciphertext = CryptoEnvelope.b64(sealed),
+                    version = 1,
+                    createdAt = now,
+                    updatedAt = now,
+                    deleted = false,
+                    dirty = true,
+                ),
+            ),
+        )
+        return identityId
+    }
+
+    suspend fun deleteIdentityRecord(identityId: String, identityType: String) {
+        auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val existing = dao.getById(identityId)
+        val createdAt = existing?.createdAt ?: System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = identityId,
+                    module = moduleIdentity,
+                    type = identityType,
+                    ciphertext = "",
+                    version = 1,
+                    createdAt = createdAt,
+                    updatedAt = now,
+                    deleted = true,
+                    dirty = true,
+                ),
+            ),
+        )
+    }
+
+    fun decryptIdentityRecord(entity: RecordEntity): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val plain = CryptoEnvelope.openRecord(
+            mk,
+            CryptoEnvelope.unb64(entity.ciphertext),
+            entity.id,
+            entity.module,
+            entity.version,
+        )
+        return String(plain, Charsets.UTF_8)
+    }
+
+    /** 解密 item 记录密文回明文 JSON。 */
+    fun decryptItemRule(entity: RecordEntity): String {
+        val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
+            ?: error("资料库未解锁")
+        val plain = CryptoEnvelope.openRecord(
+            mk,
+            CryptoEnvelope.unb64(entity.ciphertext),
+            entity.id,
+            entity.module,
+            entity.version,
+        )
+        return String(plain, Charsets.UTF_8)
+    }
+
+    /** 同步 pull 后下行 item 条目落本地 records 表 dirty=false。 */
+    suspend fun ingestRemoteItem(
+        id: String,
+        ciphertext: String,
+        createdAt: Long,
+        updatedAt: Long,
+    ) {
+        dao.upsertAll(
+            listOf(
+                RecordEntity(
+                    id = id,
+                    module = moduleItem,
+                    type = typeItem,
+                    ciphertext = ciphertext,
+                    version = 1,
+                    createdAt = createdAt,
+                    updatedAt = updatedAt,
+                    deleted = false,
+                    dirty = false,
+                ),
+            ),
+        )
+    }
+
     // =============================================================================
     // 阶段 5：财务模块（spec FR-7 / FR-8 / FR-9；TR-4.6 补做挂载点）。
     // =============================================================================
@@ -470,17 +627,28 @@ open class RecordsRepository(
         attachmentId: String,
         plaintextJson: String,
         @Suppress("UNUSED_PARAMETER") recordId: String,
+    ): String = upsertModuleAttachment(moduleFinance, attachmentId, plaintextJson)
+
+    /**
+     * 把附件元数据密封为 records（module=parentModule / type=attachment），并标 dirty。
+     *
+     * @param parentModule 父记录模块（finance / identity / pass 等）。
+     */
+    open suspend fun upsertModuleAttachment(
+        parentModule: String,
+        attachmentId: String,
+        plaintextJson: String,
     ): String {
         val mk = auth.masterKey?.takeIf { it.isNotEmpty() }
             ?: error("资料库未解锁")
         val now = System.currentTimeMillis()
         val plain = plaintextJson.toByteArray(Charsets.UTF_8)
-        val sealed = CryptoEnvelope.sealRecord(mk, plain, attachmentId, moduleFinance, 1)
+        val sealed = CryptoEnvelope.sealRecord(mk, plain, attachmentId, parentModule, 1)
         dao.upsertAll(
             listOf(
                 RecordEntity(
                     id = attachmentId,
-                    module = moduleFinance,
+                    module = parentModule,
                     type = com.everything.eve.data.finance.FinanceModule.TYPE_ATTACHMENT,
                     ciphertext = CryptoEnvelope.b64(sealed),
                     version = 1,
@@ -496,17 +664,12 @@ open class RecordsRepository(
 
     /**
      * 解密一条 attachment records 密文回明文 JSON（AttachmentRepository.pullAndDecrypt 入库用）。
-     *
-     * 与 [decryptFinanceRecord] / [decryptEventRule] 同款骨架：解密失败（AAD 不匹配 / 模块非
-     * finance / 密文被改）抛 javax.crypto.AEADBadTagException，由 AttachmentRepository.pullAndDecrypt
-     * 决定是否降级。**不**静默吞掉（spec NFR-1 "解密失败不静默"）。
-     *
-     * @param entity 已落 records 表的 attachment 行（ciphertext / module / version 来自下行）。
-     * @return 明文 JSON 字符串（AttachmentRepository.upload / delete 的 plaintextJson 同格式）。
-     * @throws IllegalStateException MK 未解锁。
-     * @throws javax.crypto.AEADBadTagException 密文/AAD 不匹配。
      */
-    open fun decryptFinanceAttachment(entity: RecordEntity): String {
+    open fun decryptFinanceAttachment(entity: RecordEntity): String =
+        decryptModuleAttachment(entity)
+
+    /** 按记录行 module 字段解密附件元数据 JSON。 */
+    open fun decryptModuleAttachment(entity: RecordEntity): String {
         val mk = auth.masterKey?.takeIf { it.isNotEmpty() } ?: error("资料库未解锁")
         val plain = CryptoEnvelope.openRecord(
             mk,

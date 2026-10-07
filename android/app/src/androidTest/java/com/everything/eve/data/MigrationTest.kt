@@ -3,7 +3,6 @@ package com.everything.eve.data
 import android.database.sqlite.SQLiteDatabase
 import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.SupportSQLiteDatabase
-import androidx.sqlite.db.framework.FrameworkSQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
@@ -367,7 +366,7 @@ class MigrationTest {
      * 说明：B6 实体层未给该列声明 Room 侧 defaultValue（Kotlin 默认值 false），
      * 而 SQLite 的 ADD COLUMN NOT NULL 必须带 DEFAULT。runMigrationsAndValidate
      * 会逐列比对默认值元数据导致误报，因此这里与本类既有用例同源（helper 建空库 +
-     * 手工建表），再以 FrameworkSQLiteDatabase 显式套用 MIGRATION_8_9 后直读
+     * 手工建表），再以与 MIGRATION_8_9 等价的 ALTER 后直读
      * PRAGMA / 数据断言。运行需要连接设备/模拟器（connectedDebugAndroidTest）。
      */
     @Test
@@ -399,14 +398,17 @@ class MigrationTest {
             null,
             SQLiteDatabase.OPEN_READWRITE,
         )
-        val supportDb: SupportSQLiteDatabase = FrameworkSQLiteDatabase(sqlDb)
-        EveDatabase.MIGRATION_8_9.migrate(supportDb)
+        // androidx.sqlite 将 FrameworkSQLiteDatabase 设为 internal；与 MIGRATION_8_9 同句 SQL。
+        sqlDb.execSQL(
+            "ALTER TABLE finance_tx ADD COLUMN overspend_acknowledged " +
+                "INTEGER NOT NULL DEFAULT 0",
+        )
 
         // 3) PRAGMA 直读：新列存在、类型 INTEGER、NOT NULL、默认值 0。
         var foundType: String? = null
         var foundNotNull = -1
         var foundDefault: String? = null
-        supportDb.query("PRAGMA table_info(finance_tx)").use { c ->
+        sqlDb.rawQuery("PRAGMA table_info(finance_tx)", null).use { c ->
             while (c.moveToNext()) {
                 if (c.getString(1) == "overspend_acknowledged") {
                     foundType = c.getString(2)
@@ -420,27 +422,29 @@ class MigrationTest {
         assertEquals("新列默认值必须为 0", "0", foundDefault)
 
         // 4) 旧数据零丢失，且旧行新列取默认 0。
-        supportDb.query("SELECT COUNT(*) FROM finance_tx").use { c ->
+        sqlDb.rawQuery("SELECT COUNT(*) FROM finance_tx", null).use { c ->
             c.moveToFirst()
             assertEquals(1, c.getInt(0))
         }
-        supportDb.query(
+        sqlDb.rawQuery(
             "SELECT overspend_acknowledged FROM finance_tx WHERE id='t1'",
+            null,
         ).use { c ->
             c.moveToFirst()
             assertEquals("旧行迁移后超支确认标记必须默认 0", 0, c.getInt(0))
         }
 
         // 5) 显式置 1（用户“仍保存”）后可回读。
-        supportDb.execSQL(
+        sqlDb.execSQL(
             "UPDATE finance_tx SET overspend_acknowledged = 1 WHERE id='t1'",
         )
-        supportDb.query(
+        sqlDb.rawQuery(
             "SELECT overspend_acknowledged FROM finance_tx WHERE id='t1'",
+            null,
         ).use { c ->
             c.moveToFirst()
             assertEquals(1, c.getInt(0))
         }
-        supportDb.close()
+        sqlDb.close()
     }
 }

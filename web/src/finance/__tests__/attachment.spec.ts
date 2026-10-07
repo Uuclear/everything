@@ -33,7 +33,6 @@
 // ============================================================================
 
 import { describe, it, expect, beforeEach } from 'vitest'
-// @ts-expect-error node 全局 Buffer 由 vitest node 环境提供（无需显式 import 类型）。
 const NodeBuffer: typeof Buffer = (globalThis as { Buffer?: typeof Buffer }).Buffer!
 import {
   uploadFile,
@@ -99,8 +98,10 @@ function memoryAttachmentChannel(): AttachmentChannel & {
   remote: Map<string, AttachmentRecord>
 } {
   const remote = new Map<string, AttachmentRecord>()
+  const parentModule = 'finance'
   return {
     remote,
+    parentModule,
     seal(_plaintext, _attachmentId, _version) {
       // 占位密文：直接返回 base64 的明文（仅 mock 用, 不参与真实加解密校验）。
       // Buffer 在 node 环境属于全局（npm install --save-dev @types/node 提供类型）。
